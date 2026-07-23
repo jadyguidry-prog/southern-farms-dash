@@ -213,11 +213,13 @@ export default function DashboardPage() {
                 </p>
               </div>
             ))}
-            <Button asChild variant="outline" className="mt-auto w-full">
-              <Link href="/ai-advisor">
-                View all recommendations
-                <ArrowRight className="size-4" />
-              </Link>
+            <Button
+              render={<Link href="/ai-advisor" />}
+              variant="outline"
+              className="mt-auto w-full"
+            >
+              View all recommendations
+              <ArrowRight className="size-4" />
             </Button>
           </CardContent>
         </Card>
