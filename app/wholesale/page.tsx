@@ -17,14 +17,16 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
-import { wholesaleCustomers, formatCurrency } from '@/lib/data'
+import { formatCurrency } from '@/lib/data'
+import { getWholesaleCustomers } from '@/lib/queries'
 
 const statusStyle: Record<string, string> = {
   Current: 'bg-primary/10 text-primary',
   Watch: 'bg-chart-4/15 text-chart-4',
 }
 
-export default function WholesalePage() {
+export default async function WholesalePage() {
+  const wholesaleCustomers = await getWholesaleCustomers()
   const totalYtd = wholesaleCustomers.reduce((s, c) => s + c.ytd, 0)
   const totalOutstanding = wholesaleCustomers.reduce((s, c) => s + c.outstanding, 0)
   const watch = wholesaleCustomers.filter((c) => c.status === 'Watch')
@@ -64,7 +66,7 @@ export default function WholesalePage() {
                 </TableHeader>
                 <TableBody>
                   {wholesaleCustomers.map((c) => (
-                    <TableRow key={c.name}>
+                    <TableRow key={c.id}>
                       <TableCell className="font-medium">{c.name}</TableCell>
                       <TableCell className="text-muted-foreground">{c.region}</TableCell>
                       <TableCell className="font-mono text-sm">{c.terms}</TableCell>

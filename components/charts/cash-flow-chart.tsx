@@ -9,17 +9,20 @@ import {
   ChartLegendContent,
   type ChartConfig,
 } from '@/components/ui/chart'
-import { cashFlowMonthly } from '@/lib/data'
 
 const config = {
   inflow: { label: 'Cash In', color: 'var(--chart-1)' },
   outflow: { label: 'Cash Out', color: 'var(--chart-2)' },
 } satisfies ChartConfig
 
-export function CashFlowChart() {
+export function CashFlowChart({
+  data,
+}: {
+  data: { month: string; inflow: number; outflow: number }[]
+}) {
   return (
     <ChartContainer config={config} className="aspect-auto h-[300px] w-full">
-      <BarChart data={cashFlowMonthly} margin={{ left: 4, right: 8, top: 8 }}>
+      <BarChart data={data} margin={{ left: 4, right: 8, top: 8 }}>
         <CartesianGrid vertical={false} strokeDasharray="3 3" />
         <XAxis dataKey="month" tickLine={false} axisLine={false} tickMargin={8} />
         <YAxis

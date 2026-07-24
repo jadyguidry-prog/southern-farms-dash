@@ -18,9 +18,16 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { cashAccounts, cashFlowMonthly, formatCurrency } from '@/lib/data'
+import { formatCurrency } from '@/lib/data'
+import { getCashAccounts, getCashFlowMonthly, getCashForecast } from '@/lib/queries'
 
-export default function CashFlowPage() {
+export default async function CashFlowPage() {
+  const [cashAccounts, cashFlowMonthly, cashForecast] = await Promise.all([
+    getCashAccounts(),
+    getCashFlowMonthly(),
+    getCashForecast(),
+  ])
+
   const totalCash = cashAccounts.reduce((s, a) => s + a.balance, 0)
   const ytdIn = cashFlowMonthly.reduce((s, m) => s + m.inflow, 0)
   const ytdOut = cashFlowMonthly.reduce((s, m) => s + m.outflow, 0)
@@ -47,7 +54,7 @@ export default function CashFlowPage() {
             <CardDescription>Monthly, trailing 12 months</CardDescription>
           </CardHeader>
           <CardContent>
-            <CashFlowChart />
+            <CashFlowChart data={cashFlowMonthly} />
           </CardContent>
         </Card>
         <Card>
@@ -56,7 +63,7 @@ export default function CashFlowPage() {
             <CardDescription>Projected daily position</CardDescription>
           </CardHeader>
           <CardContent>
-            <CashForecastChart />
+            <CashForecastChart data={cashForecast} />
           </CardContent>
         </Card>
       </div>
@@ -78,7 +85,7 @@ export default function CashFlowPage() {
               </TableHeader>
               <TableBody>
                 {cashAccounts.map((a) => (
-                  <TableRow key={a.name}>
+                  <TableRow key={a.id}>
                     <TableCell className="font-medium">{a.name}</TableCell>
                     <TableCell className="text-muted-foreground">{a.bank}</TableCell>
                     <TableCell className="text-right font-mono">

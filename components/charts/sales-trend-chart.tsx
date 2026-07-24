@@ -9,17 +9,22 @@ import {
   ChartLegendContent,
   type ChartConfig,
 } from '@/components/ui/chart'
-import { salesTrend } from '@/lib/data'
 
 const config = {
   wholesale: { label: 'Wholesale', color: 'var(--chart-1)' },
   retail: { label: 'Retail', color: 'var(--chart-3)' },
 } satisfies ChartConfig
 
-export function SalesTrendChart({ height = 300 }: { height?: number }) {
+export function SalesTrendChart({
+  data,
+  height = 300,
+}: {
+  data: { month: string; wholesale: number; retail: number }[]
+  height?: number
+}) {
   return (
     <ChartContainer config={config} className="aspect-auto w-full" style={{ height }}>
-      <AreaChart data={salesTrend} margin={{ left: 4, right: 8, top: 8 }}>
+      <AreaChart data={data} margin={{ left: 4, right: 8, top: 8 }}>
         <defs>
           <linearGradient id="fillWholesale" x1="0" y1="0" x2="0" y2="1">
             <stop offset="5%" stopColor="var(--color-wholesale)" stopOpacity={0.3} />

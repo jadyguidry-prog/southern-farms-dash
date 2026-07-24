@@ -18,7 +18,8 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
-import { inventory, formatCurrency } from '@/lib/data'
+import { formatCurrency } from '@/lib/data'
+import { getInventory, getInventoryByCategory } from '@/lib/queries'
 
 const turnoverStyle: Record<string, string> = {
   Fast: 'bg-primary/10 text-primary',
@@ -26,11 +27,18 @@ const turnoverStyle: Record<string, string> = {
   Slow: 'bg-destructive/10 text-destructive',
 }
 
-export default function InventoryPage() {
+export default async function InventoryPage() {
+  const [inventory, inventoryByCategory] = await Promise.all([
+    getInventory(),
+    getInventoryByCategory(),
+  ])
+
   const totalValue = inventory.reduce((s, i) => s + i.value, 0)
   const totalUnits = inventory.reduce((s, i) => s + i.units, 0)
   const slowItems = inventory.filter((i) => i.turnover === 'Slow')
-  const avgDays = Math.round(inventory.reduce((s, i) => s + i.daysOnHand, 0) / inventory.length)
+  const avgDays = inventory.length
+    ? Math.round(inventory.reduce((s, i) => s + i.daysOnHand, 0) / inventory.length)
+    : 0
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -58,7 +66,7 @@ export default function InventoryPage() {
             <CardDescription>Share of total inventory cost</CardDescription>
           </CardHeader>
           <CardContent>
-            <InventoryCategoryChart />
+            <InventoryCategoryChart data={inventoryByCategory} />
           </CardContent>
         </Card>
 
@@ -81,7 +89,7 @@ export default function InventoryPage() {
                 </TableHeader>
                 <TableBody>
                   {inventory.map((i) => (
-                    <TableRow key={i.sku}>
+                    <TableRow key={i.id}>
                       <TableCell>
                         <div className="font-medium">{i.item}</div>
                         <div className="text-xs text-muted-foreground">

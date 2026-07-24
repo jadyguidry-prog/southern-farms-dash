@@ -7,18 +7,21 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from '@/components/ui/chart'
-import { payrollTrend } from '@/lib/data'
-
-const data = payrollTrend.map((d) => ({
-  month: d.month,
-  pct: Number(((d.payroll / d.sales) * 100).toFixed(1)),
-}))
 
 const config = {
   pct: { label: 'Payroll % of Sales', color: 'var(--chart-1)' },
 } satisfies ChartConfig
 
-export function PayrollChart() {
+export function PayrollChart({
+  data: raw,
+}: {
+  data: { month: string; payroll: number; sales: number }[]
+}) {
+  const data = raw.map((d) => ({
+    month: d.month,
+    pct: d.sales ? Number(((d.payroll / d.sales) * 100).toFixed(1)) : 0,
+  }))
+
   return (
     <ChartContainer config={config} className="aspect-auto h-[280px] w-full">
       <LineChart data={data} margin={{ left: 4, right: 12, top: 8 }}>

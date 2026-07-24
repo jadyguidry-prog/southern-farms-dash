@@ -7,7 +7,6 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from '@/components/ui/chart'
-import { inventoryByCategory } from '@/lib/data'
 
 const colors = [
   'var(--chart-1)',
@@ -21,7 +20,11 @@ const config = {
   value: { label: 'Value' },
 } satisfies ChartConfig
 
-export function InventoryCategoryChart() {
+export function InventoryCategoryChart({
+  data,
+}: {
+  data: { category: string; value: number }[]
+}) {
   return (
     <ChartContainer config={config} className="mx-auto aspect-square h-[260px]">
       <PieChart>
@@ -34,14 +37,14 @@ export function InventoryCategoryChart() {
           }
         />
         <Pie
-          data={inventoryByCategory}
+          data={data}
           dataKey="value"
           nameKey="category"
           innerRadius={60}
           outerRadius={100}
           paddingAngle={2}
         >
-          {inventoryByCategory.map((_, i) => (
+          {data.map((_, i) => (
             <Cell key={i} fill={colors[i % colors.length]} />
           ))}
         </Pie>

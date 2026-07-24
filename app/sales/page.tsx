@@ -10,10 +10,21 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import { kpis, salesByProduct, formatCurrency, formatPercent } from '@/lib/data'
+import { formatCurrency, formatPercent } from '@/lib/data'
+import { getKpis, kpi, asTrend, getSalesMonthly, getSalesByProduct } from '@/lib/queries'
 
-export default function SalesPage() {
+export default async function SalesPage() {
+  const [kpis, salesTrend, salesByProduct] = await Promise.all([
+    getKpis(),
+    getSalesMonthly(),
+    getSalesByProduct(),
+  ])
+
+  const weeklySales = kpi(kpis, 'weeklySales')
+  const monthlySales = kpi(kpis, 'monthlySales')
+  const grossProfitPct = kpi(kpis, 'grossProfitPct')
   const totalProductRev = salesByProduct.reduce((s, p) => s + p.revenue, 0)
+  const topProduct = salesByProduct[0]
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -25,32 +36,32 @@ export default function SalesPage() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Weekly Sales"
-          value={formatCurrency(kpis.weeklySales.value)}
+          value={formatCurrency(weeklySales.value)}
           icon={TrendingUp}
-          change={kpis.weeklySales.change}
-          trend={kpis.weeklySales.trend}
+          change={weeklySales.change ?? undefined}
+          trend={asTrend(weeklySales.trend)}
           changeLabel="vs prior week"
         />
         <StatCard
           label="Monthly Sales"
-          value={formatCurrency(kpis.monthlySales.value)}
+          value={formatCurrency(monthlySales.value)}
           icon={CalendarDays}
-          change={kpis.monthlySales.change}
-          trend={kpis.monthlySales.trend}
+          change={monthlySales.change ?? undefined}
+          trend={asTrend(monthlySales.trend)}
           changeLabel="vs prior month"
         />
         <StatCard
           label="Top Product Revenue"
-          value={formatCurrency(salesByProduct[0].revenue)}
+          value={topProduct ? formatCurrency(topProduct.revenue) : '—'}
           icon={ShoppingCart}
-          hint={salesByProduct[0].product}
+          hint={topProduct?.product ?? 'No products yet'}
         />
         <StatCard
           label="Gross Profit %"
-          value={formatPercent(kpis.grossProfitPct.value)}
+          value={formatPercent(grossProfitPct.value)}
           icon={Percent}
-          change={3.6}
-          trend="up"
+          change={grossProfitPct.change ?? undefined}
+          trend={asTrend(grossProfitPct.trend)}
           changeLabel="above target"
         />
       </div>
@@ -62,7 +73,7 @@ export default function SalesPage() {
             <CardDescription>Wholesale vs retail · trailing 12 months</CardDescription>
           </CardHeader>
           <CardContent>
-            <SalesTrendChart height={320} />
+            <SalesTrendChart data={salesTrend} height={320} />
           </CardContent>
         </Card>
       </div>
@@ -74,7 +85,7 @@ export default function SalesPage() {
             <CardDescription>Trailing 90 days</CardDescription>
           </CardHeader>
           <CardContent>
-            <SalesByProductChart />
+            <SalesByProductChart data={salesByProduct} />
           </CardContent>
         </Card>
         <Card className="lg:col-span-2">
@@ -84,7 +95,7 @@ export default function SalesPage() {
           </CardHeader>
           <CardContent className="space-y-3">
             {salesByProduct.map((p) => {
-              const pct = (p.revenue / totalProductRev) * 100
+              const pct = totalProductRev ? (p.revenue / totalProductRev) * 100 : 0
               return (
                 <div key={p.product}>
                   <div className="mb-1 flex items-center justify-between text-sm">

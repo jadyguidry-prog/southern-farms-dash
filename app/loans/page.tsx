@@ -9,18 +9,21 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
-import { loans, formatCurrency, formatPercent } from '@/lib/data'
+import { formatCurrency, formatPercent } from '@/lib/data'
+import { getLoans } from '@/lib/queries'
 
 function formatDate(iso: string) {
+  if (!iso) return '—'
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-export default function LoansPage() {
+export default async function LoansPage() {
+  const loans = await getLoans()
   const totalBalance = loans.reduce((s, l) => s + l.balance, 0)
   const totalMonthly = loans.reduce((s, l) => s + l.monthly, 0)
-  const totalOriginal = loans.reduce((s, l) => s + l.original, 0)
-  const weightedRate =
-    loans.reduce((s, l) => s + l.rate * l.balance, 0) / totalBalance
+  const weightedRate = totalBalance
+    ? loans.reduce((s, l) => s + l.rate * l.balance, 0) / totalBalance
+    : 0
 
   return (
     <div className="mx-auto max-w-7xl">

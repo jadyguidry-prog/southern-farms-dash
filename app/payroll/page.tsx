@@ -17,9 +17,18 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { departments, kpis, formatCurrency, formatPercent } from '@/lib/data'
+import { formatCurrency, formatPercent } from '@/lib/data'
+import { getKpis, kpi, getDepartments, getPayrollTrend } from '@/lib/queries'
 
-export default function PayrollPage() {
+export default async function PayrollPage() {
+  const [kpis, departments, payrollTrend] = await Promise.all([
+    getKpis(),
+    getDepartments(),
+    getPayrollTrend(),
+  ])
+
+  const payrollPct = kpi(kpis, 'payrollPct')
+  const target = Number(payrollPct.meta.target ?? 30)
   const totalMonthly = departments.reduce((s, d) => s + d.monthlyCost, 0)
   const totalEmployees = departments.reduce((s, d) => s + d.employees, 0)
 
@@ -33,12 +42,12 @@ export default function PayrollPage() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Payroll % of Sales"
-          value={formatPercent(kpis.payrollPct.value)}
+          value={formatPercent(payrollPct.value)}
           icon={Percent}
-          change={1.2}
+          change={payrollPct.value <= target ? Number((target - payrollPct.value).toFixed(1)) : undefined}
           trend="down"
           goodDirection="down"
-          changeLabel="under 30% target"
+          changeLabel={`under ${formatPercent(target, 0)} target`}
         />
         <StatCard label="Monthly Payroll Cost" value={formatCurrency(totalMonthly)} icon={DollarSign} />
         <StatCard label="Total Employees" value={String(totalEmployees)} icon={Users} />
@@ -52,7 +61,7 @@ export default function PayrollPage() {
             <CardDescription>Trailing 6 months vs 30% target ceiling</CardDescription>
           </CardHeader>
           <CardContent>
-            <PayrollChart />
+            <PayrollChart data={payrollTrend} />
           </CardContent>
         </Card>
 
@@ -72,7 +81,7 @@ export default function PayrollPage() {
               </TableHeader>
               <TableBody>
                 {departments.map((d) => (
-                  <TableRow key={d.name}>
+                  <TableRow key={d.id}>
                     <TableCell className="font-medium">{d.name}</TableCell>
                     <TableCell className="text-right font-mono">{d.employees}</TableCell>
                     <TableCell className="text-right font-mono">

@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import {
   LayoutDashboard,
   Banknote,
@@ -14,14 +14,17 @@ import {
   Landmark,
   Sparkles,
   Settings,
+  ShieldCheck,
   Menu,
   X,
   Beef,
   Bell,
+  LogOut,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { createClient } from '@/lib/supabase/client'
 
 const nav = [
   { label: 'Dashboard', href: '/', icon: LayoutDashboard },
@@ -33,11 +36,34 @@ const nav = [
   { label: 'Wholesale Customers', href: '/wholesale', icon: Store },
   { label: 'Loans', href: '/loans', icon: Landmark },
   { label: 'AI Advisor', href: '/ai-advisor', icon: Sparkles },
+  { label: 'Admin', href: '/admin', icon: ShieldCheck },
   { label: 'Settings', href: '/settings', icon: Settings },
 ]
 
+function initialsFromEmail(email: string | null) {
+  if (!email) return 'SF'
+  const name = email.split('@')[0]
+  const parts = name.split(/[._-]+/).filter(Boolean)
+  const letters = parts.length >= 2 ? parts[0][0] + parts[1][0] : name.slice(0, 2)
+  return letters.toUpperCase()
+}
+
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname()
+  const router = useRouter()
+  const [email, setEmail] = useState<string | null>(null)
+
+  useEffect(() => {
+    const supabase = createClient()
+    supabase.auth.getUser().then(({ data }) => setEmail(data.user?.email ?? null))
+  }, [])
+
+  const handleSignOut = async () => {
+    const supabase = createClient()
+    await supabase.auth.signOut()
+    router.push('/auth/login')
+    router.refresh()
+  }
 
   return (
     <div className="flex h-full flex-col bg-sidebar text-sidebar-foreground">
@@ -79,21 +105,38 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         <div className="flex items-center gap-3">
           <Avatar className="size-9">
             <AvatarFallback className="bg-sidebar-accent text-xs font-semibold text-white">
-              JM
+              {initialsFromEmail(email)}
             </AvatarFallback>
           </Avatar>
           <div className="min-w-0 leading-tight">
-            <p className="truncate text-sm font-semibold text-white">J. Merriweather</p>
-            <p className="truncate text-xs text-sidebar-foreground/70">Chief Operating Officer</p>
+            <p className="truncate text-sm font-semibold text-white">
+              {email ?? 'Co-op Staff'}
+            </p>
+            <p className="truncate text-xs text-sidebar-foreground/70">Signed in</p>
           </div>
         </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleSignOut}
+          className="mt-3 w-full justify-start gap-2 text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-white"
+        >
+          <LogOut className="size-4" aria-hidden="true" />
+          Sign out
+        </Button>
       </div>
     </div>
   )
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname()
   const [mobileOpen, setMobileOpen] = useState(false)
+
+  // Auth pages render without the dashboard chrome.
+  if (pathname.startsWith('/auth')) {
+    return <>{children}</>
+  }
 
   return (
     <div className="flex min-h-screen bg-background">

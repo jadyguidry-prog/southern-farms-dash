@@ -7,17 +7,20 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from '@/components/ui/chart'
-import { salesByProduct } from '@/lib/data'
 
 const config = {
   revenue: { label: 'Revenue', color: 'var(--chart-1)' },
 } satisfies ChartConfig
 
-export function SalesByProductChart() {
+export function SalesByProductChart({
+  data,
+}: {
+  data: { product: string; revenue: number }[]
+}) {
   return (
     <ChartContainer config={config} className="aspect-auto h-[300px] w-full">
       <BarChart
-        data={salesByProduct}
+        data={data}
         layout="vertical"
         margin={{ left: 8, right: 16 }}
       >

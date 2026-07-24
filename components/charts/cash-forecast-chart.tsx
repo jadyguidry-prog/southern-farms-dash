@@ -7,16 +7,19 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from '@/components/ui/chart'
-import { cashForecast } from '@/lib/data'
 
 const config = {
   balance: { label: 'Projected Balance', color: 'var(--chart-1)' },
 } satisfies ChartConfig
 
-export function CashForecastChart() {
+export function CashForecastChart({
+  data,
+}: {
+  data: { day: string; balance: number }[]
+}) {
   return (
     <ChartContainer config={config} className="aspect-auto h-[260px] w-full">
-      <AreaChart data={cashForecast} margin={{ left: 4, right: 12, top: 8 }}>
+      <AreaChart data={data} margin={{ left: 4, right: 12, top: 8 }}>
         <defs>
           <linearGradient id="fillBalance" x1="0" y1="0" x2="0" y2="1">
             <stop offset="5%" stopColor="var(--color-balance)" stopOpacity={0.3} />

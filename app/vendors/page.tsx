@@ -17,7 +17,8 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
-import { vendors, formatCurrency } from '@/lib/data'
+import { formatCurrency } from '@/lib/data'
+import { getVendors } from '@/lib/queries'
 
 const statusStyle: Record<string, string> = {
   Overdue: 'bg-destructive/10 text-destructive',
@@ -26,10 +27,12 @@ const statusStyle: Record<string, string> = {
 }
 
 function formatDate(iso: string) {
+  if (!iso) return '—'
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
-export default function VendorsPage() {
+export default async function VendorsPage() {
+  const vendors = await getVendors()
   const totalPayable = vendors.reduce((s, v) => s + v.balance, 0)
   const dueSoon = vendors.filter((v) => v.status === 'Due Soon' || v.status === 'Overdue')
   const dueSoonTotal = dueSoon.reduce((s, v) => s + v.balance, 0)
@@ -69,7 +72,7 @@ export default function VendorsPage() {
                 </TableHeader>
                 <TableBody>
                   {vendors.map((v) => (
-                    <TableRow key={v.name}>
+                    <TableRow key={v.id}>
                       <TableCell className="font-medium">{v.name}</TableCell>
                       <TableCell className="text-muted-foreground">{v.category}</TableCell>
                       <TableCell className="font-mono text-sm">{formatDate(v.due)}</TableCell>

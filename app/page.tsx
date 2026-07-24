@@ -20,7 +20,15 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
-import { kpis, recommendations, formatCurrency, formatPercent } from '@/lib/data'
+import { formatCurrency, formatPercent } from '@/lib/data'
+import {
+  getKpis,
+  kpi,
+  asTrend,
+  getCashForecast,
+  getCashFlowMonthly,
+  getRecommendations,
+} from '@/lib/queries'
 
 const severityStyles: Record<string, string> = {
   critical: 'bg-destructive/10 text-destructive',
@@ -28,8 +36,31 @@ const severityStyles: Record<string, string> = {
   opportunity: 'bg-primary/10 text-primary',
 }
 
-export default function DashboardPage() {
-  const creditUsedPct = Math.round((kpis.lineOfCredit.used / kpis.lineOfCredit.value) * 100)
+export default async function DashboardPage() {
+  const [kpis, cashForecast, cashFlowMonthly, recommendations] = await Promise.all([
+    getKpis(),
+    getCashForecast(),
+    getCashFlowMonthly(),
+    getRecommendations(),
+  ])
+
+  const cashOnHand = kpi(kpis, 'cashOnHand')
+  const lineOfCredit = kpi(kpis, 'lineOfCredit')
+  const accountsReceivable = kpi(kpis, 'accountsReceivable')
+  const accountsPayable = kpi(kpis, 'accountsPayable')
+  const inventoryValue = kpi(kpis, 'inventoryValue')
+  const healthScore = kpi(kpis, 'healthScore')
+  const weeklySales = kpi(kpis, 'weeklySales')
+  const monthlySales = kpi(kpis, 'monthlySales')
+  const payrollPct = kpi(kpis, 'payrollPct')
+  const grossProfitPct = kpi(kpis, 'grossProfitPct')
+
+  const locTotal = lineOfCredit.value
+  const locUsed = Number(lineOfCredit.meta.used ?? 0)
+  const locAvailable = Number(lineOfCredit.meta.available ?? Math.max(locTotal - locUsed, 0))
+  const creditUsedPct = locTotal ? Math.round((locUsed / locTotal) * 100) : 0
+  const payrollTarget = Number(payrollPct.meta.target ?? 30)
+  const gpTarget = Number(grossProfitPct.meta.target ?? 38)
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -42,58 +73,58 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Cash on Hand"
-          value={formatCurrency(kpis.cashOnHand.value)}
+          value={formatCurrency(cashOnHand.value)}
           icon={Wallet}
-          change={kpis.cashOnHand.change}
-          trend={kpis.cashOnHand.trend}
+          change={cashOnHand.change ?? undefined}
+          trend={asTrend(cashOnHand.trend)}
           changeLabel="vs last month"
         />
         <StatCard
           label="Available Line of Credit"
-          value={formatCurrency(kpis.lineOfCredit.available)}
+          value={formatCurrency(locAvailable)}
           icon={CreditCard}
-          hint={`${formatCurrency(kpis.lineOfCredit.used, { compact: true })} drawn of ${formatCurrency(kpis.lineOfCredit.value, { compact: true })}`}
+          hint={`${formatCurrency(locUsed, { compact: true })} drawn of ${formatCurrency(locTotal, { compact: true })}`}
         />
         <StatCard
           label="Weekly Sales"
-          value={formatCurrency(kpis.weeklySales.value)}
+          value={formatCurrency(weeklySales.value)}
           icon={TrendingUp}
-          change={kpis.weeklySales.change}
-          trend={kpis.weeklySales.trend}
+          change={weeklySales.change ?? undefined}
+          trend={asTrend(weeklySales.trend)}
           changeLabel="vs prior week"
         />
         <StatCard
           label="Monthly Sales"
-          value={formatCurrency(kpis.monthlySales.value)}
+          value={formatCurrency(monthlySales.value)}
           icon={CalendarDays}
-          change={kpis.monthlySales.change}
-          trend={kpis.monthlySales.trend}
+          change={monthlySales.change ?? undefined}
+          trend={asTrend(monthlySales.trend)}
           changeLabel="vs prior month"
         />
         <StatCard
           label="Accounts Receivable"
-          value={formatCurrency(kpis.accountsReceivable.value)}
+          value={formatCurrency(accountsReceivable.value)}
           icon={ArrowDownToLine}
-          change={kpis.accountsReceivable.change}
-          trend={kpis.accountsReceivable.trend}
+          change={accountsReceivable.change ?? undefined}
+          trend={asTrend(accountsReceivable.trend)}
           goodDirection="down"
           changeLabel="owed to us"
         />
         <StatCard
           label="Accounts Payable"
-          value={formatCurrency(kpis.accountsPayable.value)}
+          value={formatCurrency(accountsPayable.value)}
           icon={ArrowUpFromLine}
-          change={kpis.accountsPayable.change}
-          trend={kpis.accountsPayable.trend}
+          change={accountsPayable.change ?? undefined}
+          trend={asTrend(accountsPayable.trend)}
           goodDirection="down"
           changeLabel="we owe vendors"
         />
         <StatCard
           label="Current Inventory Value"
-          value={formatCurrency(kpis.inventoryValue.value)}
+          value={formatCurrency(inventoryValue.value)}
           icon={Package}
-          change={kpis.inventoryValue.change}
-          trend={kpis.inventoryValue.trend}
+          change={inventoryValue.change ?? undefined}
+          trend={asTrend(inventoryValue.trend)}
           changeLabel="at cost"
         />
         <Card className="gap-0 py-0">
@@ -126,49 +157,49 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent className="pt-2">
             <RadialStat
-              value={kpis.healthScore.value}
+              value={healthScore.value}
               color="var(--chart-1)"
-              label={kpis.healthScore.label}
-              centerText={String(kpis.healthScore.value)}
+              label={String(healthScore.meta.label ?? 'Score')}
+              centerText={String(healthScore.value)}
             />
             <p className="text-center text-sm text-muted-foreground">
-              Up {kpis.healthScore.change} pts this quarter
+              {healthScore.change ? `Up ${healthScore.change} pts this quarter` : 'Composite score'}
             </p>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-0">
             <CardTitle className="text-base">Payroll % of Sales</CardTitle>
-            <CardDescription>Target ceiling {formatPercent(kpis.payrollPct.target, 0)}</CardDescription>
+            <CardDescription>Target ceiling {formatPercent(payrollTarget, 0)}</CardDescription>
           </CardHeader>
           <CardContent className="pt-2">
             <RadialStat
-              value={kpis.payrollPct.value}
+              value={payrollPct.value}
               max={50}
               color="var(--chart-3)"
               label="of sales"
-              centerText={formatPercent(kpis.payrollPct.value)}
+              centerText={formatPercent(payrollPct.value)}
             />
             <p className="text-center text-sm text-muted-foreground">
-              Under target by {formatPercent(kpis.payrollPct.target - kpis.payrollPct.value)}
+              Under target by {formatPercent(payrollTarget - payrollPct.value)}
             </p>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-0">
             <CardTitle className="text-base">Gross Profit %</CardTitle>
-            <CardDescription>Target {formatPercent(kpis.grossProfitPct.target, 0)}</CardDescription>
+            <CardDescription>Target {formatPercent(gpTarget, 0)}</CardDescription>
           </CardHeader>
           <CardContent className="pt-2">
             <RadialStat
-              value={kpis.grossProfitPct.value}
+              value={grossProfitPct.value}
               max={60}
               color="var(--chart-2)"
               label="margin"
-              centerText={formatPercent(kpis.grossProfitPct.value)}
+              centerText={formatPercent(grossProfitPct.value)}
             />
             <p className="text-center text-sm text-muted-foreground">
-              Above target by {formatPercent(kpis.grossProfitPct.value - kpis.grossProfitPct.target)}
+              Above target by {formatPercent(grossProfitPct.value - gpTarget)}
             </p>
           </CardContent>
         </Card>
@@ -184,7 +215,7 @@ export default function DashboardPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <CashForecastChart />
+            <CashForecastChart data={cashForecast} />
           </CardContent>
         </Card>
 
@@ -213,6 +244,11 @@ export default function DashboardPage() {
                 </p>
               </div>
             ))}
+            {recommendations.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                No recommendations yet. Add data in the Admin panel to generate insights.
+              </p>
+            )}
             <Button
               render={<Link href="/ai-advisor" />}
               variant="outline"
@@ -233,7 +269,7 @@ export default function DashboardPage() {
             <CardDescription>Monthly operating cash flow · trailing 12 months</CardDescription>
           </CardHeader>
           <CardContent>
-            <CashFlowChart />
+            <CashFlowChart data={cashFlowMonthly} />
           </CardContent>
         </Card>
       </div>
