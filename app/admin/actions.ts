@@ -13,6 +13,7 @@ const REVALIDATE_PATHS = [
   '/vendors',
   '/wholesale',
   '/loans',
+  '/cash-debt',
   '/ai-advisor',
   '/admin',
 ]
@@ -37,6 +38,9 @@ function coerce(value: string | null, type: string) {
     const n = Number(String(value).replace(/[$,%\s]/g, ''))
     return Number.isFinite(n) ? n : 0
   }
+  // Normalize boolean-like values (used by the "recurring" obligation flag).
+  if (value === 'true') return true
+  if (value === 'false') return false
   return value
 }
 
@@ -60,6 +64,26 @@ export async function addRecord(tableKey: string, formData: FormData) {
   }
 }
 
+export async function updateRecord(tableKey: string, id: string, formData: FormData) {
+  const def = getTableDef(tableKey)
+  if (!def) return { error: 'Unknown table' }
+
+  try {
+    const supabase = await requireUser()
+    const row: Record<string, unknown> = {}
+    for (const field of def.fields) {
+      const raw = formData.get(field.name)
+      row[field.name] = coerce(raw as string | null, field.type)
+    }
+    const { error } = await supabase.from(def.table).update(row).eq('id', id)
+    if (error) return { error: error.message }
+    revalidateAll()
+    return { success: `Updated ${def.label} record.` }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : 'Something went wrong' }
+  }
+}
+
 export async function deleteRecord(tableKey: string, id: string) {
   const def = getTableDef(tableKey)
   if (!def) return { error: 'Unknown table' }
@@ -71,6 +95,41 @@ export async function deleteRecord(tableKey: string, id: string) {
     if (error) return { error: error.message }
     revalidateAll()
     return { success: 'Record deleted.' }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : 'Something went wrong' }
+  }
+}
+
+/**
+ * Mark a receivable or obligation as paid. For receivables we also set the
+ * amount paid equal to the full amount so outstanding balances zero out.
+ */
+export async function markPaid(
+  tableKey: 'receivables' | 'cash_obligations',
+  id: string,
+) {
+  try {
+    const supabase = await requireUser()
+    if (tableKey === 'receivables') {
+      const { data: rec } = await supabase
+        .from('receivables')
+        .select('amount')
+        .eq('id', id)
+        .single()
+      const { error } = await supabase
+        .from('receivables')
+        .update({ status: 'Paid', amount_paid: rec ? Number(rec.amount) : undefined })
+        .eq('id', id)
+      if (error) return { error: error.message }
+    } else {
+      const { error } = await supabase
+        .from('cash_obligations')
+        .update({ status: 'Paid' })
+        .eq('id', id)
+      if (error) return { error: error.message }
+    }
+    revalidateAll()
+    return { success: 'Marked as paid.' }
   } catch (e) {
     return { error: e instanceof Error ? e.message : 'Something went wrong' }
   }

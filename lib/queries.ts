@@ -196,17 +196,147 @@ export async function getLoans() {
   const { data } = await supabase
     .from('loans')
     .select('*')
-    .order('balance', { ascending: false })
+    .order('current_balance', { ascending: false })
   return (data ?? []).map((l) => ({
     id: l.id,
-    name: l.name,
+    name: l.loan_name,
     lender: l.lender ?? '',
-    original: Number(l.original),
-    balance: Number(l.balance),
-    rate: Number(l.rate),
-    monthly: Number(l.monthly),
-    nextPayment: l.next_payment ?? '',
+    original: Number(l.original_balance),
+    balance: Number(l.current_balance),
+    rate: Number(l.interest_rate),
+    monthly: Number(l.monthly_payment),
+    paymentType: l.payment_type ?? '',
+    nextPayment: l.next_payment_date ?? '',
+    status: l.status ?? 'Active',
+    notes: l.notes ?? '',
   }))
+}
+
+export async function getBankAccounts() {
+  const supabase = await createClient()
+  const { data } = await supabase
+    .from('bank_accounts')
+    .select('*')
+    .order('current_balance', { ascending: false })
+  return (data ?? []).map((a) => ({
+    id: a.id,
+    accountName: a.account_name,
+    accountType: a.account_type ?? '',
+    currentBalance: Number(a.current_balance),
+    availableCredit: Number(a.available_credit),
+    creditLimit: Number(a.credit_limit),
+    lastUpdated: a.last_updated ?? '',
+    notes: a.notes ?? '',
+  }))
+}
+
+export async function getReceivables() {
+  const supabase = await createClient()
+  const { data } = await supabase
+    .from('receivables')
+    .select('*')
+    .order('due_date', { ascending: true })
+  return (data ?? []).map((r) => ({
+    id: r.id,
+    customerName: r.customer_name,
+    invoiceNumber: r.invoice_number ?? '',
+    invoiceDate: r.invoice_date ?? '',
+    dueDate: r.due_date ?? '',
+    amount: Number(r.amount),
+    amountPaid: Number(r.amount_paid),
+    expectedPaymentDate: r.expected_payment_date ?? '',
+    status: r.status ?? 'Open',
+    notes: r.notes ?? '',
+  }))
+}
+
+export async function getCashObligations() {
+  const supabase = await createClient()
+  const { data } = await supabase
+    .from('cash_obligations')
+    .select('*')
+    .order('due_date', { ascending: true })
+  return (data ?? []).map((o) => ({
+    id: o.id,
+    obligationName: o.obligation_name,
+    category: o.category ?? '',
+    vendorName: o.vendor_name ?? '',
+    amount: Number(o.amount),
+    dueDate: o.due_date ?? '',
+    recurring: Boolean(o.recurring),
+    frequency: o.frequency ?? '',
+    status: o.status ?? 'Pending',
+    notes: o.notes ?? '',
+  }))
+}
+
+// Raw rows (snake_case columns) for the management tables + edit forms.
+export async function getRawTable(
+  table: string,
+  orderBy: { column: string; ascending: boolean },
+) {
+  const supabase = await createClient()
+  const { data } = await supabase
+    .from(table)
+    .select('*')
+    .order(orderBy.column, { ascending: orderBy.ascending })
+  return (data ?? []) as Record<string, unknown>[]
+}
+
+export type CashDebtSummary = Awaited<ReturnType<typeof getCashDebtSummary>>
+
+// Derived cash position, debt load, receivables, and obligations metrics.
+export async function getCashDebtSummary() {
+  const [accounts, loans, receivables, obligations] = await Promise.all([
+    getBankAccounts(),
+    getLoans(),
+    getReceivables(),
+    getCashObligations(),
+  ])
+
+  const totalCash = accounts.reduce((s, a) => s + a.currentBalance, 0)
+  const totalAvailableCredit = accounts.reduce((s, a) => s + a.availableCredit, 0)
+  const totalDebt = loans.reduce((s, l) => s + l.balance, 0)
+  const monthlyDebtService = loans.reduce((s, l) => s + l.monthly, 0)
+
+  const openReceivables = receivables.filter((r) => r.status !== 'Paid')
+  const totalReceivable = openReceivables.reduce(
+    (s, r) => s + (r.amount - r.amountPaid),
+    0,
+  )
+
+  const pendingObligations = obligations.filter((o) => o.status !== 'Paid')
+  const totalObligations = pendingObligations.reduce((s, o) => s + o.amount, 0)
+
+  // Overdue = due date in the past and not yet paid.
+  const today = new Date().toISOString().slice(0, 10)
+  const overdueObligations = pendingObligations.filter(
+    (o) => o.dueDate && o.dueDate < today,
+  )
+  const overdueReceivables = openReceivables.filter(
+    (r) => r.dueDate && r.dueDate < today,
+  )
+
+  // Projected position = cash + available credit + incoming receivables - obligations.
+  const projectedPosition =
+    totalCash + totalReceivable - totalObligations
+
+  return {
+    accounts,
+    loans,
+    receivables,
+    obligations,
+    totalCash,
+    totalAvailableCredit,
+    totalDebt,
+    monthlyDebtService,
+    totalReceivable,
+    totalObligations,
+    projectedPosition,
+    overdueObligationsCount: overdueObligations.length,
+    overdueReceivablesCount: overdueReceivables.length,
+    netWorth: totalCash + totalReceivable - totalDebt - totalObligations,
+  }
 }
 
 export async function getRecommendations() {
