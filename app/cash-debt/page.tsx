@@ -1,12 +1,12 @@
 import {
   Wallet,
   CreditCard,
+  Droplets,
   Landmark,
   CalendarClock,
   ArrowDownToLine,
-  ArrowUpFromLine,
   TrendingUp,
-  Scale,
+  Activity,
   AlertTriangle,
 } from 'lucide-react'
 import { PageHeader } from '@/components/page-header'
@@ -22,6 +22,12 @@ const bankDef = getTableDef('bank_accounts')!
 const loanDef = getTableDef('loans')!
 const receivableDef = getTableDef('receivables')!
 const obligationDef = getTableDef('cash_obligations')!
+
+const healthLabel: Record<'green' | 'yellow' | 'red', string> = {
+  green: 'Healthy',
+  yellow: 'Caution',
+  red: 'At Risk',
+}
 
 const bankColumns: Column[] = [
   { name: 'account_name', label: 'Account' },
@@ -104,16 +110,22 @@ export default async function CashDebtPage() {
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
-          label="Cash Position"
-          value={formatCurrency(summary.totalCash)}
+          label="Cash On Hand"
+          value={formatCurrency(summary.cashOnHand)}
           icon={Wallet}
-          hint="Across all bank accounts"
+          hint="Checking + Savings + Cash"
         />
         <StatCard
           label="Available Credit"
-          value={formatCurrency(summary.totalAvailableCredit)}
+          value={formatCurrency(summary.availableCredit)}
           icon={CreditCard}
-          hint="Undrawn credit lines"
+          hint="Undrawn lines of credit"
+        />
+        <StatCard
+          label="Operating Liquidity"
+          value={formatCurrency(summary.operatingLiquidity)}
+          icon={Droplets}
+          hint="Cash + available credit"
         />
         <StatCard
           label="Total Debt"
@@ -122,10 +134,10 @@ export default async function CashDebtPage() {
           hint="Outstanding loan balances"
         />
         <StatCard
-          label="Monthly Debt Service"
-          value={formatCurrency(summary.monthlyDebtService)}
+          label="Upcoming Obligations"
+          value={formatCurrency(summary.obligations30)}
           icon={CalendarClock}
-          hint="Scheduled loan payments"
+          hint={`Next 30 days · 7d ${formatCurrency(summary.obligations7)} · 14d ${formatCurrency(summary.obligations14)}`}
         />
         <StatCard
           label="Outstanding Receivables"
@@ -138,26 +150,16 @@ export default async function CashDebtPage() {
           }
         />
         <StatCard
-          label="Upcoming Obligations"
-          value={formatCurrency(summary.totalObligations)}
-          icon={ArrowUpFromLine}
-          hint={
-            summary.overdueObligationsCount > 0
-              ? `${summary.overdueObligationsCount} overdue`
-              : 'Pending payments'
-          }
-        />
-        <StatCard
-          label="Projected Cash Position"
-          value={formatCurrency(summary.projectedPosition)}
+          label="Cash After 14 Days"
+          value={formatCurrency(summary.cashAfter14)}
           icon={TrendingUp}
-          hint="Cash + receivables − obligations"
+          hint="Cash + expected AR − obligations"
         />
         <StatCard
-          label="Net Position"
-          value={formatCurrency(summary.netWorth)}
-          icon={Scale}
-          hint="Cash + AR − debt − obligations"
+          label="Business Health"
+          value={healthLabel[summary.businessHealth]}
+          icon={Activity}
+          hint={`Projected 14-day cash ${formatCurrency(summary.cashAfter14)}`}
         />
       </div>
 

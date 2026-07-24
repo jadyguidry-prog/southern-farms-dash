@@ -201,6 +201,7 @@ export async function getLoans() {
     id: l.id,
     name: l.loan_name,
     lender: l.lender ?? '',
+    loanType: l.loan_type ?? '',
     original: Number(l.original_balance),
     balance: Number(l.current_balance),
     rate: Number(l.interest_rate),
@@ -221,6 +222,8 @@ export async function getBankAccounts() {
   return (data ?? []).map((a) => ({
     id: a.id,
     accountName: a.account_name,
+    accountNickname: a.account_nickname ?? '',
+    institution: a.institution ?? '',
     accountType: a.account_type ?? '',
     currentBalance: Number(a.current_balance),
     availableCredit: Number(a.available_credit),
@@ -265,6 +268,7 @@ export async function getCashObligations() {
     dueDate: o.due_date ?? '',
     recurring: Boolean(o.recurring),
     frequency: o.frequency ?? '',
+    paymentMethod: o.payment_method ?? '',
     status: o.status ?? 'Pending',
     notes: o.notes ?? '',
   }))
@@ -285,6 +289,18 @@ export async function getRawTable(
 
 export type CashDebtSummary = Awaited<ReturnType<typeof getCashDebtSummary>>
 
+// Account types that count as immediately spendable cash.
+const CASH_ON_HAND_TYPES = ['Checking', 'Savings', 'Cash']
+// Account types that carry a revolving credit line.
+const CREDIT_LINE_TYPES = ['Line of Credit', 'Credit Card']
+
+// Days from today (inclusive) that a dated item falls within.
+function daysUntil(dateStr: string, today: Date) {
+  if (!dateStr) return Number.POSITIVE_INFINITY
+  const d = new Date(dateStr + 'T00:00:00')
+  return Math.floor((d.getTime() - today.getTime()) / 86_400_000)
+}
+
 // Derived cash position, debt load, receivables, and obligations metrics.
 export async function getCashDebtSummary() {
   const [accounts, loans, receivables, obligations] = await Promise.all([
@@ -294,45 +310,111 @@ export async function getCashDebtSummary() {
     getCashObligations(),
   ])
 
+  // ---- Cash & credit ----
+  // Cash On Hand = Checking + Savings + Cash balances only.
+  const cashOnHand = accounts
+    .filter((a) => CASH_ON_HAND_TYPES.includes(a.accountType))
+    .reduce((s, a) => s + a.currentBalance, 0)
+
+  // Available Credit = undrawn balance across all lines of credit / cards.
+  const availableCredit = accounts
+    .filter((a) => CREDIT_LINE_TYPES.includes(a.accountType))
+    .reduce((s, a) => s + a.availableCredit, 0)
+
+  // Operating Liquidity = cash on hand + available credit.
+  const operatingLiquidity = cashOnHand + availableCredit
+
+  // Sum of every account balance (kept for the legacy "cash position" label).
   const totalCash = accounts.reduce((s, a) => s + a.currentBalance, 0)
   const totalAvailableCredit = accounts.reduce((s, a) => s + a.availableCredit, 0)
+
+  // ---- Debt ----
   const totalDebt = loans.reduce((s, l) => s + l.balance, 0)
   const monthlyDebtService = loans.reduce((s, l) => s + l.monthly, 0)
 
+  // ---- Receivables ----
   const openReceivables = receivables.filter((r) => r.status !== 'Paid')
   const totalReceivable = openReceivables.reduce(
     (s, r) => s + (r.amount - r.amountPaid),
     0,
   )
 
+  // ---- Obligations ----
   const pendingObligations = obligations.filter((o) => o.status !== 'Paid')
   const totalObligations = pendingObligations.reduce((s, o) => s + o.amount, 0)
 
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const todayStr = today.toISOString().slice(0, 10)
+
+  // Obligations coming due within a rolling window (overdue items included).
+  const obligationsWithin = (days: number) =>
+    pendingObligations
+      .filter((o) => daysUntil(o.dueDate, today) <= days)
+      .reduce((s, o) => s + o.amount, 0)
+
+  const obligations7 = obligationsWithin(7)
+  const obligations14 = obligationsWithin(14)
+  const obligations30 = obligationsWithin(30)
+
+  // Receivables expected to collect within 14 days (by expected date, else due date).
+  const expectedReceivables14 = openReceivables
+    .filter((r) => {
+      const ref = r.expectedPaymentDate || r.dueDate
+      return daysUntil(ref, today) <= 14
+    })
+    .reduce((s, r) => s + (r.amount - r.amountPaid), 0)
+
+  // Cash After 14 Days = current cash + expected receivables − known obligations.
+  const cashAfter14 = cashOnHand + expectedReceivables14 - obligations14
+
   // Overdue = due date in the past and not yet paid.
-  const today = new Date().toISOString().slice(0, 10)
   const overdueObligations = pendingObligations.filter(
-    (o) => o.dueDate && o.dueDate < today,
+    (o) => o.dueDate && o.dueDate < todayStr,
   )
   const overdueReceivables = openReceivables.filter(
-    (r) => r.dueDate && r.dueDate < today,
+    (r) => r.dueDate && r.dueDate < todayStr,
   )
 
-  // Projected position = cash + available credit + incoming receivables - obligations.
-  const projectedPosition =
-    totalCash + totalReceivable - totalObligations
+  // Business health signal based on projected cash after 14 days.
+  // Green: comfortably positive. Yellow: positive but thin. Red: cash goes negative.
+  let businessHealth: 'green' | 'yellow' | 'red'
+  if (cashAfter14 < 0) {
+    businessHealth = 'red'
+  } else if (cashAfter14 < obligations30) {
+    // Less than a full month of obligations in reserve after 14 days.
+    businessHealth = 'yellow'
+  } else {
+    businessHealth = 'green'
+  }
+
+  // Projected position = cash + incoming receivables − obligations.
+  const projectedPosition = totalCash + totalReceivable - totalObligations
 
   return {
     accounts,
     loans,
     receivables,
     obligations,
+    // Core balances
+    cashOnHand,
+    availableCredit,
+    operatingLiquidity,
     totalCash,
     totalAvailableCredit,
     totalDebt,
     monthlyDebtService,
+    // Receivables & obligations
     totalReceivable,
     totalObligations,
+    obligations7,
+    obligations14,
+    obligations30,
+    expectedReceivables14,
+    cashAfter14,
+    // Projections & health
     projectedPosition,
+    businessHealth,
     overdueObligationsCount: overdueObligations.length,
     overdueReceivablesCount: overdueReceivables.length,
     netWorth: totalCash + totalReceivable - totalDebt - totalObligations,
