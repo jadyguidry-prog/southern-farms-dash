@@ -16,7 +16,7 @@ export default function AuthErrorPage() {
           Something went wrong while signing you in. The link may have expired or
           already been used. Please try signing in again.
         </p>
-        <Button className="mt-6 w-full" render={<Link href="/auth/login" />}>
+        <Button className="mt-6 w-full" nativeButton={false} render={<Link href="/auth/login" />}>
           Back to sign in
         </Button>
       </div>

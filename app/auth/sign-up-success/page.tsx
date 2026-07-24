@@ -14,7 +14,7 @@ export default function SignUpSuccessPage() {
           We&apos;ve sent a confirmation link to your inbox. Confirm your email to
           activate your account, then sign in to access the dashboard.
         </p>
-        <Button className="mt-6 w-full" render={<Link href="/auth/login" />}>
+        <Button className="mt-6 w-full" nativeButton={false} render={<Link href="/auth/login" />}>
           Back to sign in
         </Button>
       </div>

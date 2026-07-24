@@ -251,6 +251,7 @@ export default async function DashboardPage() {
             )}
             <Button
               render={<Link href="/ai-advisor" />}
+              nativeButton={false}
               variant="outline"
               className="mt-auto w-full"
             >

@@ -15,10 +15,10 @@ import {
 } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { recommendations, type Recommendation } from '@/lib/data'
+import { getRecommendations } from '@/lib/queries'
 
 const severityMeta: Record<
-  Recommendation['severity'],
+  string,
   { label: string; badge: string; icon: typeof Info; accent: string }
 > = {
   critical: {
@@ -41,7 +41,8 @@ const severityMeta: Record<
   },
 }
 
-export default function AiAdvisorPage() {
+export default async function AiAdvisorPage() {
+  const recommendations = await getRecommendations()
   const critical = recommendations.filter((r) => r.severity === 'critical').length
   const warnings = recommendations.filter((r) => r.severity === 'warning').length
   const opps = recommendations.filter((r) => r.severity === 'opportunity').length
@@ -73,7 +74,7 @@ export default function AiAdvisorPage() {
 
       <div className="space-y-4">
         {recommendations.map((rec) => {
-          const meta = severityMeta[rec.severity]
+          const meta = severityMeta[rec.severity] ?? severityMeta.opportunity
           const Icon = meta.icon
           return (
             <Card key={rec.id} className={`border-l-4 ${meta.accent}`}>
@@ -110,7 +111,7 @@ export default function AiAdvisorPage() {
       </div>
 
       <p className="mt-6 text-center text-xs text-muted-foreground">
-        Recommendations are generated from mock financial data for demonstration purposes.
+        Recommendations are generated from your live financial data.
       </p>
     </div>
   )
