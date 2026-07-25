@@ -153,13 +153,17 @@ export default async function CashDebtPage() {
           label="Cash After 14 Days"
           value={formatCurrency(summary.cashAfter14)}
           icon={TrendingUp}
-          hint="Cash + expected AR − obligations"
+          hint={
+            summary.reserveGap >= 0
+              ? `${formatCurrency(summary.reserveGap)} above your ${formatCurrency(summary.minCashReserve)} reserve`
+              : `${formatCurrency(Math.abs(summary.reserveGap))} below your ${formatCurrency(summary.minCashReserve)} reserve`
+          }
         />
         <StatCard
           label="Business Health"
           value={healthLabel[summary.businessHealth]}
           icon={Activity}
-          hint={`Projected 14-day cash ${formatCurrency(summary.cashAfter14)}`}
+          hint={`vs ${formatCurrency(summary.minCashReserve)} minimum cash reserve`}
         />
       </div>
 

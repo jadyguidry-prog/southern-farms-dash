@@ -63,9 +63,15 @@ export function StatCard({
             </span>
           )}
           {(changeLabel || hint) && (
-            <span className="truncate text-xs text-muted-foreground">{changeLabel ?? hint}</span>
+            <span className="truncate text-xs text-muted-foreground">
+              {changeLabel ?? hint}
+            </span>
           )}
         </div>
+        {/* Show the hint on its own line when a change label already took the slot above. */}
+        {changeLabel && hint && (
+          <p className="mt-1 truncate text-xs text-muted-foreground">{hint}</p>
+        )}
       </CardContent>
     </Card>
   )

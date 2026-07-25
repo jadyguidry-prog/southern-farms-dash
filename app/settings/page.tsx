@@ -9,8 +9,8 @@ import {
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
-import { Separator } from '@/components/ui/separator'
-import { Button } from '@/components/ui/button'
+import { FinancialTargetsForm } from '@/components/settings/financial-targets-form'
+import { getBusinessSettings } from '@/lib/queries'
 
 const alertToggles = [
   { id: 'cash', label: 'Low cash forecast alerts', desc: 'Warn when projected balance nears the minimum buffer', on: true },
@@ -19,9 +19,11 @@ const alertToggles = [
   { id: 'ar', label: 'Receivable aging alerts', desc: 'Flag wholesale accounts trending slow', on: false },
 ]
 
-export default function SettingsPage() {
+export default async function SettingsPage() {
+  const settings = await getBusinessSettings()
+
   return (
-    <div className="mx-auto max-w-3xl">
+    <div className="mx-auto max-w-4xl">
       <PageHeader
         title="Settings"
         description="Manage company details, financial targets, and alert preferences for the Operations Center."
@@ -53,26 +55,7 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Financial Targets</CardTitle>
-            <CardDescription>Used to evaluate KPIs and health scoring</CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-3">
-            <div className="space-y-2">
-              <Label htmlFor="payroll-target">Payroll % Ceiling</Label>
-              <Input id="payroll-target" defaultValue="30%" />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="gp-target">Gross Profit Target</Label>
-              <Input id="gp-target" defaultValue="38%" />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="buffer">Min Cash Buffer</Label>
-              <Input id="buffer" defaultValue="$375,000" />
-            </div>
-          </CardContent>
-        </Card>
+        <FinancialTargetsForm values={settings} />
 
         <Card>
           <CardHeader>
@@ -97,12 +80,6 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        <Separator />
-
-        <div className="flex justify-end gap-3">
-          <Button variant="outline">Cancel</Button>
-          <Button>Save changes</Button>
-        </div>
       </div>
     </div>
   )

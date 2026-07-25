@@ -31,6 +31,46 @@ const KPI_FALLBACK = {
   meta: {} as Record<string, number | string>,
 }
 
+// ---------- Business settings ----------
+// Operating targets entered by the owner (Admin → Business Settings).
+// Defaults are used only when a setting row hasn't been created yet.
+export const SETTING_DEFAULTS = {
+  target_payroll_pct: 15,
+  warning_payroll_pct: 16,
+  min_cash_reserve: 15000,
+  preferred_weekly_sales: 18000,
+  minimum_weekly_sales: 17000,
+  avg_monthly_wholesale: 6000,
+} as const
+
+export type SettingKey = keyof typeof SETTING_DEFAULTS
+export type BusinessSettings = Record<SettingKey, number> & {
+  rows: { key: string; label: string; value: number; unit: string; notes: string }[]
+}
+
+export async function getBusinessSettings(): Promise<BusinessSettings> {
+  const supabase = await createClient()
+  const { data } = await supabase.from('business_settings').select('*')
+
+  const values = { ...SETTING_DEFAULTS } as Record<SettingKey, number>
+  const rows: BusinessSettings['rows'] = []
+
+  for (const row of data ?? []) {
+    rows.push({
+      key: row.setting_key,
+      label: row.label,
+      value: Number(row.value),
+      unit: row.unit ?? 'number',
+      notes: row.notes ?? '',
+    })
+    if (row.setting_key in values) {
+      values[row.setting_key as SettingKey] = Number(row.value)
+    }
+  }
+
+  return { ...values, rows }
+}
+
 export async function getKpis(): Promise<Kpis> {
   const supabase = await createClient()
   const { data } = await supabase.from('kpis').select('*')
@@ -303,12 +343,15 @@ function daysUntil(dateStr: string, today: Date) {
 
 // Derived cash position, debt load, receivables, and obligations metrics.
 export async function getCashDebtSummary() {
-  const [accounts, loans, receivables, obligations] = await Promise.all([
+  const [accounts, loans, receivables, obligations, settings] = await Promise.all([
     getBankAccounts(),
     getLoans(),
     getReceivables(),
     getCashObligations(),
+    getBusinessSettings(),
   ])
+
+  const minCashReserve = settings.min_cash_reserve
 
   // ---- Cash & credit ----
   // Cash On Hand = Checking + Savings + Cash balances only.
@@ -376,17 +419,20 @@ export async function getCashDebtSummary() {
     (r) => r.dueDate && r.dueDate < todayStr,
   )
 
-  // Business health signal based on projected cash after 14 days.
-  // Green: comfortably positive. Yellow: positive but thin. Red: cash goes negative.
+  // Business health measured against the owner's minimum cash reserve target.
+  // Red: projected to fall below zero. Yellow: dips under the reserve target.
+  // Green: stays at or above the reserve.
   let businessHealth: 'green' | 'yellow' | 'red'
   if (cashAfter14 < 0) {
     businessHealth = 'red'
-  } else if (cashAfter14 < obligations30) {
-    // Less than a full month of obligations in reserve after 14 days.
+  } else if (cashAfter14 < minCashReserve) {
     businessHealth = 'yellow'
   } else {
     businessHealth = 'green'
   }
+
+  // How far the 14-day projection sits above/below the reserve target.
+  const reserveGap = cashAfter14 - minCashReserve
 
   // Projected position = cash + incoming receivables − obligations.
   const projectedPosition = totalCash + totalReceivable - totalObligations
@@ -415,6 +461,9 @@ export async function getCashDebtSummary() {
     // Projections & health
     projectedPosition,
     businessHealth,
+    minCashReserve,
+    reserveGap,
+    settings,
     overdueObligationsCount: overdueObligations.length,
     overdueReceivablesCount: overdueReceivables.length,
     netWorth: totalCash + totalReceivable - totalDebt - totalObligations,

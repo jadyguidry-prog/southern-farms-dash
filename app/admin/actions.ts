@@ -16,6 +16,7 @@ const REVALIDATE_PATHS = [
   '/cash-debt',
   '/ai-advisor',
   '/admin',
+  '/settings',
 ]
 
 function revalidateAll() {
@@ -130,6 +131,47 @@ export async function markPaid(
     }
     revalidateAll()
     return { success: 'Marked as paid.' }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : 'Something went wrong' }
+  }
+}
+
+/**
+ * Save the owner's operating targets from the Settings page. Each setting is
+ * upserted by its stable setting_key so the form works whether or not the row
+ * already exists.
+ */
+const SETTING_LABELS: Record<string, { label: string; unit: string }> = {
+  target_payroll_pct: { label: 'Target Payroll Percentage', unit: 'percent' },
+  warning_payroll_pct: { label: 'Warning Payroll Percentage', unit: 'percent' },
+  min_cash_reserve: { label: 'Target Minimum Cash Reserve', unit: 'currency' },
+  preferred_weekly_sales: { label: 'Preferred Weekly Sales', unit: 'currency' },
+  minimum_weekly_sales: { label: 'Minimum Weekly Sales', unit: 'currency' },
+  avg_monthly_wholesale: { label: 'Average Monthly Wholesale Sales', unit: 'currency' },
+}
+
+export async function saveBusinessSettings(formData: FormData) {
+  try {
+    const supabase = await requireUser()
+
+    const rows = Object.entries(SETTING_LABELS)
+      .filter(([key]) => formData.get(key) !== null)
+      .map(([key, meta]) => ({
+        setting_key: key,
+        label: meta.label,
+        unit: meta.unit,
+        value: coerce(formData.get(key) as string | null, 'number'),
+      }))
+
+    if (rows.length === 0) return { error: 'Nothing to save.' }
+
+    const { error } = await supabase
+      .from('business_settings')
+      .upsert(rows, { onConflict: 'setting_key' })
+    if (error) return { error: error.message }
+
+    revalidateAll()
+    return { success: 'Targets saved.' }
   } catch (e) {
     return { error: e instanceof Error ? e.message : 'Something went wrong' }
   }

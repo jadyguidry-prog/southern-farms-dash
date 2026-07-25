@@ -18,17 +18,26 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { formatCurrency, formatPercent } from '@/lib/data'
-import { getKpis, kpi, getDepartments, getPayrollTrend } from '@/lib/queries'
+import {
+  getKpis,
+  kpi,
+  getDepartments,
+  getPayrollTrend,
+  getBusinessSettings,
+} from '@/lib/queries'
 
 export default async function PayrollPage() {
-  const [kpis, departments, payrollTrend] = await Promise.all([
+  const [kpis, departments, payrollTrend, settings] = await Promise.all([
     getKpis(),
     getDepartments(),
     getPayrollTrend(),
+    getBusinessSettings(),
   ])
 
   const payrollPct = kpi(kpis, 'payrollPct')
-  const target = Number(payrollPct.meta.target ?? 30)
+  const target = settings.target_payroll_pct
+  const warning = settings.warning_payroll_pct
+  const isOver = payrollPct.value > target
   const totalMonthly = departments.reduce((s, d) => s + d.monthlyCost, 0)
   const totalEmployees = departments.reduce((s, d) => s + d.employees, 0)
 
@@ -44,10 +53,15 @@ export default async function PayrollPage() {
           label="Payroll % of Sales"
           value={formatPercent(payrollPct.value)}
           icon={Percent}
-          change={payrollPct.value <= target ? Number((target - payrollPct.value).toFixed(1)) : undefined}
-          trend="down"
+          change={Number(Math.abs(payrollPct.value - target).toFixed(1))}
+          trend={isOver ? 'up' : 'down'}
           goodDirection="down"
-          changeLabel={`under ${formatPercent(target, 0)} target`}
+          changeLabel={
+            isOver
+              ? `over ${formatPercent(target, 0)} target`
+              : `under ${formatPercent(target, 0)} target`
+          }
+          hint={`Warning above ${formatPercent(warning, 0)}`}
         />
         <StatCard label="Monthly Payroll Cost" value={formatCurrency(totalMonthly)} icon={DollarSign} />
         <StatCard label="Total Employees" value={String(totalEmployees)} icon={Users} />
@@ -58,10 +72,12 @@ export default async function PayrollPage() {
         <Card className="lg:col-span-3">
           <CardHeader>
             <CardTitle className="text-base">Payroll % of Sales Trend</CardTitle>
-            <CardDescription>Trailing 6 months vs 30% target ceiling</CardDescription>
+            <CardDescription>
+              Trailing 6 months vs {formatPercent(target, 0)} target ceiling
+            </CardDescription>
           </CardHeader>
           <CardContent>
-            <PayrollChart data={payrollTrend} />
+            <PayrollChart data={payrollTrend} target={target} warning={warning} />
           </CardContent>
         </Card>
 

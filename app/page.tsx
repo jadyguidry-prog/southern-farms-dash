@@ -28,6 +28,7 @@ import {
   getCashForecast,
   getCashFlowMonthly,
   getRecommendations,
+  getBusinessSettings,
 } from '@/lib/queries'
 
 const severityStyles: Record<string, string> = {
@@ -37,12 +38,14 @@ const severityStyles: Record<string, string> = {
 }
 
 export default async function DashboardPage() {
-  const [kpis, cashForecast, cashFlowMonthly, recommendations] = await Promise.all([
-    getKpis(),
-    getCashForecast(),
-    getCashFlowMonthly(),
-    getRecommendations(),
-  ])
+  const [kpis, cashForecast, cashFlowMonthly, recommendations, settings] =
+    await Promise.all([
+      getKpis(),
+      getCashForecast(),
+      getCashFlowMonthly(),
+      getRecommendations(),
+      getBusinessSettings(),
+    ])
 
   const cashOnHand = kpi(kpis, 'cashOnHand')
   const lineOfCredit = kpi(kpis, 'lineOfCredit')
@@ -59,7 +62,10 @@ export default async function DashboardPage() {
   const locUsed = Number(lineOfCredit.meta.used ?? 0)
   const locAvailable = Number(lineOfCredit.meta.available ?? Math.max(locTotal - locUsed, 0))
   const creditUsedPct = locTotal ? Math.round((locUsed / locTotal) * 100) : 0
-  const payrollTarget = Number(payrollPct.meta.target ?? 30)
+  // Owner-defined thresholds from Admin → Business Settings.
+  const payrollTarget = settings.target_payroll_pct
+  const payrollWarning = settings.warning_payroll_pct
+  const payrollOverTarget = payrollPct.value - payrollTarget
   const gpTarget = Number(grossProfitPct.meta.target ?? 38)
 
   return (
@@ -92,6 +98,7 @@ export default async function DashboardPage() {
           change={weeklySales.change ?? undefined}
           trend={asTrend(weeklySales.trend)}
           changeLabel="vs prior week"
+          hint={`Goal ${formatCurrency(settings.preferred_weekly_sales)} · floor ${formatCurrency(settings.minimum_weekly_sales)}`}
         />
         <StatCard
           label="Monthly Sales"
@@ -143,7 +150,11 @@ export default async function DashboardPage() {
               </div>
             </div>
             <Progress value={creditUsedPct} className="mt-4" />
-            <p className="mt-2 text-xs text-muted-foreground">Healthy — well below 50% target</p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {creditUsedPct <= 50
+                ? 'Healthy — at or below the 50% target'
+                : `Above the 50% target — ${formatCurrency(locUsed)} drawn`}
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -170,18 +181,29 @@ export default async function DashboardPage() {
         <Card>
           <CardHeader className="pb-0">
             <CardTitle className="text-base">Payroll % of Sales</CardTitle>
-            <CardDescription>Target ceiling {formatPercent(payrollTarget, 0)}</CardDescription>
+            <CardDescription>
+              Target {formatPercent(payrollTarget, 0)} · warning above{' '}
+              {formatPercent(payrollWarning, 0)}
+            </CardDescription>
           </CardHeader>
           <CardContent className="pt-2">
             <RadialStat
               value={payrollPct.value}
-              max={50}
-              color="var(--chart-3)"
+              max={30}
+              color={
+                payrollPct.value > payrollWarning
+                  ? 'var(--destructive)'
+                  : payrollPct.value > payrollTarget
+                    ? 'var(--chart-4)'
+                    : 'var(--chart-3)'
+              }
               label="of sales"
               centerText={formatPercent(payrollPct.value)}
             />
             <p className="text-center text-sm text-muted-foreground">
-              Under target by {formatPercent(payrollTarget - payrollPct.value)}
+              {payrollOverTarget > 0
+                ? `Over target by ${formatPercent(payrollOverTarget)}`
+                : `Under target by ${formatPercent(Math.abs(payrollOverTarget))}`}
             </p>
           </CardContent>
         </Card>
@@ -199,7 +221,9 @@ export default async function DashboardPage() {
               centerText={formatPercent(grossProfitPct.value)}
             />
             <p className="text-center text-sm text-muted-foreground">
-              Above target by {formatPercent(grossProfitPct.value - gpTarget)}
+              {grossProfitPct.value >= gpTarget
+                ? `Above target by ${formatPercent(grossProfitPct.value - gpTarget)}`
+                : `Below target by ${formatPercent(gpTarget - grossProfitPct.value)}`}
             </p>
           </CardContent>
         </Card>
