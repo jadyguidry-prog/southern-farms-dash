@@ -41,7 +41,11 @@ export default async function LoansPage() {
 
       <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {loans.map((l) => {
-          const paidPct = Math.round(((l.original - l.balance) / l.original) * 100)
+          // Original amount may be unknown (0) — avoid dividing by zero.
+          const hasOriginal = l.original > 0
+          const paidPct = hasOriginal
+            ? Math.max(0, Math.min(100, Math.round(((l.original - l.balance) / l.original) * 100)))
+            : 0
           return (
             <Card key={l.name}>
               <CardHeader>
@@ -64,13 +68,19 @@ export default async function LoansPage() {
                   </div>
                 </div>
 
-                <div>
-                  <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
-                    <span>{paidPct}% paid down</span>
-                    <span>of {formatCurrency(l.original)}</span>
+                {hasOriginal ? (
+                  <div>
+                    <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
+                      <span>{paidPct}% paid down</span>
+                      <span>of {formatCurrency(l.original)}</span>
+                    </div>
+                    <Progress value={paidPct} />
                   </div>
-                  <Progress value={paidPct} />
-                </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Add the original loan amount to track payoff progress.
+                  </p>
+                )}
 
                 <div className="flex items-center justify-between border-t border-border pt-3 text-sm">
                   <span className="text-muted-foreground">

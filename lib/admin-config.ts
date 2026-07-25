@@ -333,6 +333,30 @@ export const ADMIN_TABLES: TableDef[] = [
     orderBy: { column: 'due_date', ascending: true },
   },
   {
+    key: 'business_settings',
+    table: 'business_settings',
+    label: 'Business Settings',
+    description: 'Operating targets and thresholds used across the dashboard.',
+    fields: [
+      { name: 'setting_key', label: 'Setting Key', type: 'text', required: true },
+      { name: 'label', label: 'Label', type: 'text', required: true },
+      { name: 'value', label: 'Value', type: 'number', required: true },
+      {
+        name: 'unit',
+        label: 'Unit',
+        type: 'select',
+        options: ['currency', 'percent', 'number'],
+      },
+      { name: 'notes', label: 'Notes', type: 'text' },
+    ],
+    displayColumns: [
+      { name: 'label', label: 'Setting' },
+      { name: 'value', label: 'Value' },
+      { name: 'unit', label: 'Unit' },
+    ],
+    orderBy: { column: 'created_at', ascending: true },
+  },
+  {
     key: 'recommendations',
     table: 'recommendations',
     label: 'AI Recommendations',
