@@ -237,8 +237,93 @@ export function EntityManager({
             No records yet. Click &quot;Add&quot; to create one.
           </p>
         ) : (
-          <div className="overflow-x-auto">
-            <Table>
+          <>
+            {/* Mobile: stacked cards with large, reachable action buttons. */}
+            <div className="flex flex-col gap-3 md:hidden">
+              {rows.map((row) => {
+                const status = String(row.status ?? '')
+                const isPaid = status.toLowerCase() === 'paid'
+                const [primary, ...rest] = columns
+                return (
+                  <div
+                    key={String(row.id)}
+                    className="rounded-lg border border-border bg-card p-4"
+                  >
+                    <div className="mb-3 flex items-start justify-between gap-3">
+                      <span className="font-medium text-foreground">
+                        {formatValue(row[primary.name], primary.format)}
+                      </span>
+                      {columns.some((c) => c.badge) && (
+                        <Badge
+                          variant="secondary"
+                          className={statusBadgeClass(status)}
+                        >
+                          {formatValue(status)}
+                        </Badge>
+                      )}
+                    </div>
+                    <dl className="grid grid-cols-2 gap-x-4 gap-y-2">
+                      {rest
+                        .filter((col) => !col.badge)
+                        .map((col) => (
+                          <div key={col.name} className="min-w-0">
+                            <dt className="text-xs text-muted-foreground">
+                              {col.label}
+                            </dt>
+                            <dd
+                              className={cn(
+                                'truncate text-sm',
+                                col.format && col.format !== 'date'
+                                  ? 'font-mono'
+                                  : 'font-medium',
+                              )}
+                            >
+                              {formatValue(row[col.name], col.format)}
+                            </dd>
+                          </div>
+                        ))}
+                    </dl>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {markPaidEnabled && !isPaid && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-11 flex-1 min-w-[7rem]"
+                          onClick={() => onMarkPaid(String(row.id))}
+                          disabled={isPending}
+                        >
+                          <CheckCircle2 className="size-4" />
+                          Mark paid
+                        </Button>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-11 flex-1 min-w-[7rem]"
+                        onClick={() => openEdit(row)}
+                      >
+                        <Pencil className="size-4" />
+                        Edit
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-11 flex-1 min-w-[7rem] text-destructive hover:text-destructive"
+                        onClick={() => onDelete(String(row.id))}
+                        disabled={isPending}
+                      >
+                        <Trash2 className="size-4" />
+                        Delete
+                      </Button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Desktop: full table. */}
+            <div className="hidden overflow-x-auto md:block">
+              <Table>
               <TableHeader>
                 <TableRow>
                   {columns.map((col) => (
@@ -323,7 +408,8 @@ export function EntityManager({
                 })}
               </TableBody>
             </Table>
-          </div>
+            </div>
+          </>
         )}
       </CardContent>
       <RecordDialog
