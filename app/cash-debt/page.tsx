@@ -23,10 +23,11 @@ const loanDef = getTableDef('loans')!
 const receivableDef = getTableDef('receivables')!
 const obligationDef = getTableDef('cash_obligations')!
 
-const healthLabel: Record<'green' | 'yellow' | 'red', string> = {
+const healthLabel: Record<'green' | 'yellow' | 'red' | 'unknown', string> = {
   green: 'Healthy',
   yellow: 'Caution',
   red: 'At Risk',
+  unknown: 'No Data',
 }
 
 const bankColumns: Column[] = [
