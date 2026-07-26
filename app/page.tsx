@@ -22,14 +22,14 @@ import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { formatCurrency, formatPercent } from '@/lib/data'
 import {
-  getKpis,
   kpi,
   asTrend,
   getCashForecast,
   getCashFlowMonthly,
   getRecommendations,
-  getBusinessSettings,
+  getHealthSnapshot,
 } from '@/lib/queries'
+import { HEALTH_COLOR, HEALTH_TEXT } from '@/lib/health'
 
 const severityStyles: Record<string, string> = {
   critical: 'bg-destructive/10 text-destructive',
@@ -38,21 +38,22 @@ const severityStyles: Record<string, string> = {
 }
 
 export default async function DashboardPage() {
-  const [kpis, cashForecast, cashFlowMonthly, recommendations, settings] =
-    await Promise.all([
-      getKpis(),
-      getCashForecast(),
-      getCashFlowMonthly(),
-      getRecommendations(),
-      getBusinessSettings(),
-    ])
+  const [snapshot, cashForecast, cashFlowMonthly, saved] = await Promise.all([
+    getHealthSnapshot(),
+    getCashForecast(),
+    getCashFlowMonthly(),
+    getRecommendations(),
+  ])
+
+  const { kpis, settings, pillars, composite, insights } = snapshot
+  // Generated insights lead, followed by anything entered manually.
+  const recommendations = [...insights, ...saved]
 
   const cashOnHand = kpi(kpis, 'cashOnHand')
   const lineOfCredit = kpi(kpis, 'lineOfCredit')
   const accountsReceivable = kpi(kpis, 'accountsReceivable')
   const accountsPayable = kpi(kpis, 'accountsPayable')
   const inventoryValue = kpi(kpis, 'inventoryValue')
-  const healthScore = kpi(kpis, 'healthScore')
   const weeklySales = kpi(kpis, 'weeklySales')
   const monthlySales = kpi(kpis, 'monthlySales')
   const payrollPct = kpi(kpis, 'payrollPct')
@@ -98,7 +99,7 @@ export default async function DashboardPage() {
           change={weeklySales.change ?? undefined}
           trend={asTrend(weeklySales.trend)}
           changeLabel="vs prior week"
-          hint={`Goal ${formatCurrency(settings.preferred_weekly_sales)} · floor ${formatCurrency(settings.minimum_weekly_sales)}`}
+          hint={`${pillars.sales.label} · goal ${formatCurrency(settings.preferred_weekly_sales)} · floor ${formatCurrency(settings.minimum_weekly_sales)}`}
         />
         <StatCard
           label="Monthly Sales"
@@ -164,18 +165,34 @@ export default async function DashboardPage() {
         <Card>
           <CardHeader className="pb-0">
             <CardTitle className="text-base">Business Health Score</CardTitle>
-            <CardDescription>Composite of liquidity, margin & growth</CardDescription>
+            <CardDescription>Cash reserve, payroll & weekly sales vs your targets</CardDescription>
           </CardHeader>
           <CardContent className="pt-2">
             <RadialStat
-              value={healthScore.value}
-              color="var(--chart-1)"
-              label={String(healthScore.meta.label ?? 'Score')}
-              centerText={String(healthScore.value)}
+              value={composite.score ?? 0}
+              color={HEALTH_COLOR[composite.status]}
+              label={composite.label}
+              centerText={composite.score === null ? '—' : String(composite.score)}
             />
             <p className="text-center text-sm text-muted-foreground">
-              {healthScore.change ? `Up ${healthScore.change} pts this quarter` : 'Composite score'}
+              {composite.score === null
+                ? 'Add your data to generate a score'
+                : `${composite.measured} of ${composite.total} measures scored`}
             </p>
+            <ul className="mt-3 space-y-1">
+              {(
+                [
+                  ['Cash', pillars.cash],
+                  ['Payroll', pillars.payroll],
+                  ['Sales', pillars.sales],
+                ] as const
+              ).map(([name, p]) => (
+                <li key={name} className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">{name}</span>
+                  <span className={`font-medium ${HEALTH_TEXT[p.status]}`}>{p.label}</span>
+                </li>
+              ))}
+            </ul>
           </CardContent>
         </Card>
         <Card>
@@ -190,13 +207,7 @@ export default async function DashboardPage() {
             <RadialStat
               value={payrollPct.value}
               max={30}
-              color={
-                payrollPct.value > payrollWarning
-                  ? 'var(--destructive)'
-                  : payrollPct.value > payrollTarget
-                    ? 'var(--chart-4)'
-                    : 'var(--chart-3)'
-              }
+              color={HEALTH_COLOR[pillars.payroll.status]}
               label="of sales"
               centerText={formatPercent(payrollPct.value)}
             />

@@ -61,6 +61,8 @@ const obligationColumns: Column[] = [
   { name: 'vendor_name', label: 'Payee' },
   { name: 'amount', label: 'Amount', format: 'currency' },
   { name: 'due_date', label: 'Due', format: 'date' },
+  { name: 'frequency', label: 'Frequency' },
+  { name: 'next_due_date', label: 'Next Due', format: 'date' },
   { name: 'status', label: 'Status', badge: true },
 ]
 
@@ -104,6 +106,34 @@ export default async function CashDebtPage() {
               )}
               . Review the tabs below.
             </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {summary.obligationsMissingDueDate.length > 0 && (
+        <Card className="mb-4 border-chart-4/40 bg-chart-4/5">
+          <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-chart-4/15 text-chart-4">
+              <CalendarClock className="size-5" aria-hidden="true" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-foreground">
+                {summary.obligationsMissingDueDate.length}{' '}
+                {summary.obligationsMissingDueDate.length === 1
+                  ? 'obligation needs'
+                  : 'obligations need'}{' '}
+                a due date
+              </p>
+              <p className="mt-1 text-sm text-muted-foreground text-pretty">
+                {formatCurrency(summary.unscheduledObligations)} is excluded from the
+                7, 14, and 30-day projections until you set due dates. Open the
+                Obligations tab and add a due date and frequency for:{' '}
+                <span className="font-medium text-foreground">
+                  {summary.obligationsMissingDueDate.map((o) => o.name).join(', ')}
+                </span>
+                .
+              </p>
+            </div>
           </CardContent>
         </Card>
       )}

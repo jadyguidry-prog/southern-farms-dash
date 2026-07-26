@@ -15,7 +15,7 @@ import {
 } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { getRecommendations } from '@/lib/queries'
+import { getRecommendations, getHealthSnapshot } from '@/lib/queries'
 
 const severityMeta: Record<
   string,
@@ -42,10 +42,28 @@ const severityMeta: Record<
 }
 
 export default async function AiAdvisorPage() {
-  const recommendations = await getRecommendations()
+  const [snapshot, saved] = await Promise.all([
+    getHealthSnapshot(),
+    getRecommendations(),
+  ])
+
+  // Insights generated live from the owner's stored thresholds, followed by
+  // anything entered by hand in the Admin panel.
+  const recommendations = [...snapshot.insights, ...saved]
+  const { composite, pillars } = snapshot
+
   const critical = recommendations.filter((r) => r.severity === 'critical').length
   const warnings = recommendations.filter((r) => r.severity === 'warning').length
   const opps = recommendations.filter((r) => r.severity === 'opportunity').length
+
+  const headline =
+    composite.status === 'red'
+      ? 'Some measures need your attention.'
+      : composite.status === 'yellow'
+        ? 'A few measures are worth watching.'
+        : composite.status === 'green'
+          ? 'Your books look strong overall.'
+          : 'Add your data to generate insights.'
 
   return (
     <div className="mx-auto max-w-5xl">
@@ -62,11 +80,28 @@ export default async function AiAdvisorPage() {
               <Sparkles className="size-5" aria-hidden="true" />
             </span>
             <div>
-              <p className="font-semibold">Your books look strong overall.</p>
+              <p className="font-semibold">{headline}</p>
               <p className="mt-1 text-sm text-primary-foreground/80 text-pretty">
-                {critical} item needs action, {warnings} to monitor, and {opps} growth
-                opportunities identified this week.
+                {critical} {critical === 1 ? 'item needs' : 'items need'} action,{' '}
+                {warnings} to monitor, and {opps} positive{' '}
+                {opps === 1 ? 'signal' : 'signals'} based on your targets.
               </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {(
+                  [
+                    ['Cash', pillars.cash],
+                    ['Payroll', pillars.payroll],
+                    ['Sales', pillars.sales],
+                  ] as const
+                ).map(([name, p]) => (
+                  <span
+                    key={name}
+                    className="rounded-md bg-primary-foreground/15 px-2 py-1 text-xs font-medium"
+                  >
+                    {name}: {p.label}
+                  </span>
+                ))}
+              </div>
             </div>
           </div>
         </CardContent>

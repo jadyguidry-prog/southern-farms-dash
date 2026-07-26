@@ -1,4 +1,12 @@
 import { createClient } from '@/lib/supabase/server'
+import {
+  cashReserveHealth,
+  payrollHealth,
+  weeklySalesHealth,
+  compositeHealth,
+  generateInsights,
+  resolveNextDueDate,
+} from '@/lib/health'
 
 // ---------- Types ----------
 export type KpiRow = {
@@ -306,9 +314,11 @@ export async function getCashObligations() {
     vendorName: o.vendor_name ?? '',
     amount: Number(o.amount),
     dueDate: o.due_date ?? '',
+    nextDueDate: o.next_due_date ?? '',
     recurring: Boolean(o.recurring),
     frequency: o.frequency ?? '',
     paymentMethod: o.payment_method ?? '',
+    active: o.active ?? true,
     status: o.status ?? 'Pending',
     notes: o.notes ?? '',
   }))
@@ -383,17 +393,33 @@ export async function getCashDebtSummary() {
   )
 
   // ---- Obligations ----
-  const pendingObligations = obligations.filter((o) => o.status !== 'Paid')
-  const totalObligations = pendingObligations.reduce((s, o) => s + o.amount, 0)
-
   const now = new Date()
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const todayStr = today.toISOString().slice(0, 10)
 
+  // Only active, unpaid obligations affect the forecast. Each one carries its
+  // effective next due date (explicit override, else rolled forward by frequency).
+  const pendingObligations = obligations
+    .filter((o) => o.status !== 'Paid' && o.active !== false)
+    .map((o) => ({ ...o, effectiveDueDate: resolveNextDueDate(o, today) }))
+
+  const totalObligations = pendingObligations.reduce((s, o) => s + o.amount, 0)
+
+  // Obligations with no date at all can't be projected — surface them so the
+  // owner knows which records still need input.
+  const obligationsMissingDueDate = pendingObligations
+    .filter((o) => !o.effectiveDueDate)
+    .map((o) => ({ name: o.obligationName, amount: o.amount }))
+
+  const unscheduledObligations = obligationsMissingDueDate.reduce(
+    (s, o) => s + o.amount,
+    0,
+  )
+
   // Obligations coming due within a rolling window (overdue items included).
   const obligationsWithin = (days: number) =>
     pendingObligations
-      .filter((o) => daysUntil(o.dueDate, today) <= days)
+      .filter((o) => daysUntil(o.effectiveDueDate, today) <= days)
       .reduce((s, o) => s + o.amount, 0)
 
   const obligations7 = obligationsWithin(7)
@@ -413,23 +439,17 @@ export async function getCashDebtSummary() {
 
   // Overdue = due date in the past and not yet paid.
   const overdueObligations = pendingObligations.filter(
-    (o) => o.dueDate && o.dueDate < todayStr,
+    (o) => o.effectiveDueDate && o.effectiveDueDate < todayStr,
   )
   const overdueReceivables = openReceivables.filter(
     (r) => r.dueDate && r.dueDate < todayStr,
   )
 
-  // Business health measured against the owner's minimum cash reserve target.
-  // Red: projected to fall below zero. Yellow: dips under the reserve target.
-  // Green: stays at or above the reserve.
-  let businessHealth: 'green' | 'yellow' | 'red'
-  if (cashAfter14 < 0) {
-    businessHealth = 'red'
-  } else if (cashAfter14 < minCashReserve) {
-    businessHealth = 'yellow'
-  } else {
-    businessHealth = 'green'
-  }
+  // Cash health uses the shared three-tier rule against the owner's reserve.
+  // Treated as unknown until at least one account balance has been entered.
+  const hasBalances = accounts.some((a) => a.currentBalance !== 0)
+  const cashHealth = cashReserveHealth(cashAfter14, settings, hasBalances)
+  const businessHealth = cashHealth.status
 
   // How far the 14-day projection sits above/below the reserve target.
   const reserveGap = cashAfter14 - minCashReserve
@@ -461,13 +481,46 @@ export async function getCashDebtSummary() {
     // Projections & health
     projectedPosition,
     businessHealth,
+    cashHealth,
     minCashReserve,
     reserveGap,
     settings,
+    obligationsMissingDueDate,
+    unscheduledObligations,
     overdueObligationsCount: overdueObligations.length,
     overdueReceivablesCount: overdueReceivables.length,
     netWorth: totalCash + totalReceivable - totalDebt - totalObligations,
   }
+}
+
+/**
+ * One shared evaluation of the three health pillars plus the composite score
+ * and generated advisor insights. Used by the dashboard and the AI Advisor so
+ * both always agree, and every threshold comes from business_settings.
+ */
+export async function getHealthSnapshot() {
+  const [kpis, summary] = await Promise.all([getKpis(), getCashDebtSummary()])
+  const settings = summary.settings
+
+  const payrollValue = kpi(kpis, 'payrollPct').value
+  const weeklySalesValue = kpi(kpis, 'weeklySales').value
+
+  const pillars = {
+    payroll: payrollHealth(payrollValue, settings, payrollValue > 0),
+    cash: summary.cashHealth,
+    sales: weeklySalesHealth(weeklySalesValue, settings, weeklySalesValue > 0),
+  }
+
+  const composite = compositeHealth(pillars)
+
+  const insights = generateInsights({
+    settings,
+    pillars,
+    obligationsMissingDueDate: summary.obligationsMissingDueDate,
+    overdueObligations: summary.overdueObligationsCount,
+  })
+
+  return { kpis, settings, summary, pillars, composite, insights }
 }
 
 export async function getRecommendations() {
