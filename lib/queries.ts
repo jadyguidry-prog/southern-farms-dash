@@ -192,9 +192,12 @@ export async function getCashFlowMonthly() {
 
 export async function getSalesMonthly() {
   const supabase = await createClient()
+  // Order by year first: with more than one year of data, sorting by
+  // month_order alone interleaves months from different years on the chart.
   const { data } = await supabase
     .from('sales_monthly')
     .select('*')
+    .order('year', { ascending: true, nullsFirst: true })
     .order('month_order', { ascending: true })
   return (data ?? []).map((m) => ({
     month: m.month,
