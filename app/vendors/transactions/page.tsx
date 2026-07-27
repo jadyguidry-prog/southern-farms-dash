@@ -3,12 +3,15 @@ import { Upload, ArrowLeft } from 'lucide-react'
 import { PageHeader } from '@/components/page-header'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { TransactionReview } from '@/components/vendors/transaction-review'
+import { PayeeGroups } from '@/components/vendors/payee-groups'
 import { RecurringSuggestions } from '@/components/vendors/recurring-suggestions'
 import { getVendorDirectory } from '@/lib/queries'
 import {
   getTransactions,
   getTransactionCounts,
   getRecurringSuggestions,
+  getPayeeGroups,
+  getVendorNameMap,
 } from '@/lib/transaction-queries'
 
 export const dynamic = 'force-dynamic'
@@ -19,12 +22,15 @@ export default async function TransactionsPage({
   searchParams: Promise<{ vendor?: string }>
 }) {
   const { vendor: initialVendorId } = await searchParams
-  const [transactions, counts, directory, suggestions] = await Promise.all([
-    getTransactions(),
-    getTransactionCounts(),
-    getVendorDirectory(),
-    getRecurringSuggestions(),
-  ])
+  const [transactions, counts, directory, suggestions, groups, vendorNames] =
+    await Promise.all([
+      getTransactions(),
+      getTransactionCounts(),
+      getVendorDirectory(),
+      getRecurringSuggestions(),
+      getPayeeGroups(),
+      getVendorNameMap(),
+    ])
 
   const vendorOptions = directory
     .filter((v) => !v.archived)
@@ -63,13 +69,28 @@ export default async function TransactionsPage({
         }
       />
 
-      <Tabs defaultValue="transactions" className="mt-4">
+      <Tabs defaultValue="review" className="mt-4">
         <TabsList>
-          <TabsTrigger value="transactions">Transactions</TabsTrigger>
+          <TabsTrigger value="review">
+            Review by payee
+            {groups.totals.groups > 0 ? ` (${groups.totals.groups})` : ''}
+          </TabsTrigger>
+          <TabsTrigger value="transactions">All transactions</TabsTrigger>
           <TabsTrigger value="recurring">
             Recurring{openSuggestions > 0 ? ` (${openSuggestions})` : ''}
           </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="review">
+          <PayeeGroups
+            payeeGroups={groups.payeeGroups}
+            genericGroups={groups.genericGroups}
+            totals={groups.totals}
+            vendors={vendorOptions}
+            categories={categories}
+            vendorNames={vendorNames}
+          />
+        </TabsContent>
 
         <TabsContent value="transactions">
           <TransactionReview

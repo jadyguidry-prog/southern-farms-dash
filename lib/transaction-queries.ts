@@ -8,6 +8,11 @@ import {
   type TransactionType,
   type VendorMatchRule,
 } from '@/lib/transactions'
+import {
+  buildPayeeGroups,
+  type GroupInputRow,
+  type PayeeGroup,
+} from '@/lib/transaction-groups'
 
 export type TransactionRow = {
   id: string
@@ -110,6 +115,95 @@ export async function getTransactions(
 
   const [{ data }, names] = await Promise.all([query, vendorNameMap()])
   return (data ?? []).map((t) => mapTransaction(t, names))
+}
+
+/**
+ * Fetch every row matching a review status, paging past PostgREST's 1000-row
+ * cap. Grouping has to see the whole set — the review table's 500-row limit
+ * would silently hide payees and understate their totals.
+ */
+async function fetchAllForGrouping(
+  statuses: ReviewStatus[],
+): Promise<Record<string, any>[]> {
+  const supabase = await createClient()
+  const pageSize = 1000
+  const all: Record<string, any>[] = []
+
+  for (let page = 0; ; page += 1) {
+    const { data, error } = await supabase
+      .from('financial_transactions')
+      .select(
+        'id, transaction_date, description, normalized_description, amount, transaction_type, review_status, vendor_id, expense_category',
+      )
+      .is('deleted_at', null)
+      .in('review_status', statuses)
+      .order('id', { ascending: true })
+      .range(page * pageSize, page * pageSize + pageSize - 1)
+
+    if (error) break
+    const rows = data ?? []
+    all.push(...rows)
+    if (rows.length < pageSize) break
+  }
+
+  return all
+}
+
+export type PayeeGroupsResult = {
+  payeeGroups: PayeeGroup[]
+  genericGroups: PayeeGroup[]
+  /** Totals across everything still awaiting review. */
+  totals: {
+    groups: number
+    transactions: number
+    spend: number
+  }
+}
+
+/**
+ * Outstanding review work, collapsed into payee groups ordered by spend.
+ *
+ * Only rows that still need attention are grouped (`needs_review` and
+ * `unreviewed`); already-matched and excluded rows are left alone so this view
+ * is a work queue rather than a second copy of the full ledger.
+ */
+export async function getPayeeGroups(): Promise<PayeeGroupsResult> {
+  const [rows, names] = await Promise.all([
+    fetchAllForGrouping(['needs_review', 'unreviewed']),
+    vendorNameMap(),
+  ])
+
+  const inputs: GroupInputRow[] = rows.map((t) => ({
+    id: String(t.id),
+    transactionDate: String(t.transaction_date ?? ''),
+    description: String(t.description ?? ''),
+    normalizedDescription: String(t.normalized_description ?? ''),
+    amount: Number(t.amount ?? 0),
+    transactionType: (t.transaction_type ?? 'expense') as TransactionType,
+    reviewStatus: (t.review_status ?? 'unreviewed') as ReviewStatus,
+    vendorId: t.vendor_id ? String(t.vendor_id) : null,
+    expenseCategory: String(t.expense_category ?? ''),
+  }))
+
+  const groups = buildPayeeGroups(inputs)
+  const payeeGroups = groups.filter((g) => !g.generic)
+  const genericGroups = groups.filter((g) => g.generic)
+
+  return {
+    payeeGroups,
+    genericGroups,
+    totals: {
+      groups: groups.length,
+      transactions: inputs.length,
+      spend: groups.reduce((sum, g) => sum + g.totalSpend, 0),
+    },
+  }
+}
+
+/** Vendor names keyed by id, for labelling suggested matches in the group view. */
+export async function getVendorNameMap(): Promise<Record<string, string>> {
+  const map = await vendorNameMap()
+  return Object.fromEntries(map)
 }
 
 export async function getTransactionCounts() {
