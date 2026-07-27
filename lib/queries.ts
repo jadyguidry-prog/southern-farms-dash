@@ -374,6 +374,13 @@ export async function getCashDebtSummary() {
     .filter((a) => CREDIT_LINE_TYPES.includes(a.accountType))
     .reduce((s, a) => s + a.availableCredit, 0)
 
+  // Total approved credit, and how much of it is currently drawn.
+  const creditLines = accounts.filter((a) =>
+    CREDIT_LINE_TYPES.includes(a.accountType),
+  )
+  const creditLimitTotal = creditLines.reduce((s, a) => s + a.creditLimit, 0)
+  const creditDrawn = creditLines.reduce((s, a) => s + a.currentBalance, 0)
+
   // Operating Liquidity = cash on hand + available credit.
   const operatingLiquidity = cashOnHand + availableCredit
 
@@ -465,6 +472,8 @@ export async function getCashDebtSummary() {
     // Core balances
     cashOnHand,
     availableCredit,
+    creditLimitTotal,
+    creditDrawn,
     operatingLiquidity,
     totalCash,
     totalAvailableCredit,
@@ -499,8 +508,36 @@ export async function getCashDebtSummary() {
  * both always agree, and every threshold comes from business_settings.
  */
 export async function getHealthSnapshot() {
-  const [kpis, summary] = await Promise.all([getKpis(), getCashDebtSummary()])
+  const [rawKpis, summary] = await Promise.all([getKpis(), getCashDebtSummary()])
   const settings = summary.settings
+
+  // Balance-sheet figures are always derived from the live account, receivable,
+  // and obligation records rather than the stored `kpis` snapshot, so editing an
+  // account balance is reflected on the dashboard immediately. Trend metadata
+  // from the stored row is preserved.
+  const derive = (
+    key: string,
+    value: number,
+    meta?: Record<string, string | number>,
+  ) => {
+    const prev = kpi(rawKpis, key)
+    return {
+      ...prev,
+      value,
+      meta: { ...prev.meta, ...(meta ?? {}) },
+    }
+  }
+
+  const kpis: Kpis = {
+    ...rawKpis,
+    cashOnHand: derive('cashOnHand', summary.cashOnHand),
+    lineOfCredit: derive('lineOfCredit', summary.creditLimitTotal, {
+      used: summary.creditDrawn,
+      available: summary.availableCredit,
+    }),
+    accountsReceivable: derive('accountsReceivable', summary.totalReceivable),
+    accountsPayable: derive('accountsPayable', summary.totalObligations),
+  }
 
   const payrollValue = kpi(kpis, 'payrollPct').value
   const weeklySalesValue = kpi(kpis, 'weeklySales').value
