@@ -103,13 +103,63 @@ export function asTrend(v: string | null): 'up' | 'down' | undefined {
   return v === 'up' || v === 'down' ? v : undefined
 }
 
+/**
+ * A 30-day daily cash projection derived from live records: today's cash on
+ * hand, obligations on their resolved due dates (outflows), and receivables on
+ * their expected payment dates (inflows). Nothing is stored or hardcoded, so it
+ * always reflects the current state of the books.
+ */
 export async function getCashForecast() {
-  const supabase = await createClient()
-  const { data } = await supabase
-    .from('cash_forecast')
-    .select('*')
-    .order('day_order', { ascending: true })
-  return (data ?? []).map((d) => ({ day: d.day_label, balance: Number(d.balance) }))
+  const summary = await getCashDebtSummary()
+
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const dayKey = (d: Date) => d.toISOString().slice(0, 10)
+
+  // Bucket each dated cash movement onto the day it lands.
+  const movements = new Map<string, number>()
+  const add = (date: string, amount: number) => {
+    if (!date) return
+    movements.set(date, (movements.get(date) ?? 0) + amount)
+  }
+
+  for (const o of summary.scheduledObligations) {
+    add(o.effectiveDueDate, -o.amount)
+  }
+
+  for (const r of summary.receivables) {
+    if (r.status === 'Paid') continue
+    const outstanding = r.amount - r.amountPaid
+    if (outstanding <= 0) continue
+    // Fall back to the invoice due date when no expected date is set.
+    add(r.expectedPaymentDate || r.dueDate, outstanding)
+  }
+
+  // Anything already past due is treated as landing today.
+  const todayKey = dayKey(today)
+  let overdueNet = 0
+  for (const [date, amount] of movements) {
+    if (date < todayKey) {
+      overdueNet += amount
+      movements.delete(date)
+    }
+  }
+  if (overdueNet !== 0) add(todayKey, overdueNet)
+
+  let balance = summary.cashOnHand
+  const series: { day: string; balance: number }[] = []
+
+  for (let i = 0; i < 30; i++) {
+    const date = new Date(today)
+    date.setDate(today.getDate() + i)
+    balance += movements.get(dayKey(date)) ?? 0
+    series.push({
+      day: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      balance,
+    })
+  }
+
+  return series
 }
 
 export async function getCashAccounts() {
@@ -480,6 +530,8 @@ export async function getCashDebtSummary() {
     totalDebt,
     monthlyDebtService,
     // Receivables & obligations
+    // Unpaid, active obligations each carrying their resolved next due date.
+    scheduledObligations: pendingObligations,
     totalReceivable,
     totalObligations,
     obligations7,
