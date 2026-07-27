@@ -10,6 +10,7 @@ import {
   Users,
   ShoppingCart,
   Truck,
+  Receipt,
   Store,
   Landmark,
   Wallet,
@@ -46,6 +47,7 @@ const navSections = [
     label: 'Business',
     items: [
       { label: 'Vendor Management', href: '/vendors', icon: Truck },
+      { label: 'Transactions', href: '/vendors/transactions', icon: Receipt },
       { label: 'Wholesale Customers', href: '/wholesale', icon: Store },
     ],
   },
@@ -67,10 +69,23 @@ const navSections = [
   },
 ]
 
-/** Highlight a section link for its own page and any detail page beneath it. */
-function isActive(pathname: string, href: string) {
+const allHrefs = navSections.flatMap((s) => s.items.map((i) => i.href))
+
+/** True when `href` is a prefix of the current path (its own page or a child). */
+function matchesPath(pathname: string, href: string) {
   if (href === '/') return pathname === '/'
   return pathname === href || pathname.startsWith(`${href}/`)
+}
+
+/**
+ * Highlight a link for its own page and detail pages beneath it, but let the
+ * MOST specific link win. Otherwise `/vendors/transactions` would light up both
+ * "Vendor Management" (/vendors) and "Transactions".
+ */
+function resolveActiveHref(pathname: string) {
+  return allHrefs
+    .filter((href) => matchesPath(pathname, href))
+    .sort((a, b) => b.length - a.length)[0]
 }
 
 function initialsFromEmail(email: string | null) {
@@ -83,6 +98,7 @@ function initialsFromEmail(email: string | null) {
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname()
+  const activeHref = resolveActiveHref(pathname)
   const router = useRouter()
   const [email, setEmail] = useState<string | null>(null)
 
@@ -120,7 +136,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             )}
             <div className="space-y-1">
               {section.items.map((item) => {
-                const active = isActive(pathname, item.href)
+                const active = activeHref === item.href
                 const Icon = item.icon
                 return (
                   <Link

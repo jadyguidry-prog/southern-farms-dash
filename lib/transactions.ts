@@ -150,6 +150,38 @@ export function inferTransactionType(
   return 'income'
 }
 
+/**
+ * How a statement represents the direction of money in its amount column.
+ *
+ * - `bank`: a checking/savings/line-of-credit export where money leaving the
+ *   account is NEGATIVE (the default for most bank CSVs).
+ * - `card`: a credit-card export where PURCHASES are POSITIVE and
+ *   payments/credits are negative. Without correcting for this, every card
+ *   purchase would look like income and vendor spend would read as zero.
+ */
+export const AMOUNT_CONVENTIONS = ['bank', 'card'] as const
+export type AmountConvention = (typeof AMOUNT_CONVENTIONS)[number]
+
+export const AMOUNT_CONVENTION_LABELS: Record<AmountConvention, string> = {
+  bank: 'Bank account — money out is negative',
+  card: 'Credit card — purchases are positive',
+}
+
+/**
+ * Convert a CSV amount into the canonical convention used everywhere else in
+ * this module: NEGATIVE means money out. For `bank` files the value already
+ * follows that convention and is returned unchanged. For `card` files the sign
+ * is flipped so a positive purchase becomes negative (money out) and a negative
+ * card payment becomes positive (money in).
+ */
+export function canonicalizeSign(
+  signedAmount: number,
+  convention: AmountConvention,
+): number {
+  if (convention === 'card') return -signedAmount
+  return signedAmount
+}
+
 // ---------- Vendor matching ----------
 
 export type VendorMatchRule = {

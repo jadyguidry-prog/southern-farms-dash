@@ -38,6 +38,10 @@ import {
   parseAmount,
   parseDate,
   inferTransactionType,
+  canonicalizeSign,
+  AMOUNT_CONVENTIONS,
+  AMOUNT_CONVENTION_LABELS,
+  type AmountConvention,
   type ColumnRole,
 } from '@/lib/transactions'
 import { commitImport, previewImport, type StagedRow } from '@/app/vendors/import/actions'
@@ -73,6 +77,7 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
   const [parsed, setParsed] = useState<ParsedFile | null>(null)
   const [roles, setRoles] = useState<Record<string, ColumnRole>>({})
   const [accountName, setAccountName] = useState('')
+  const [convention, setConvention] = useState<AmountConvention>('bank')
   const [overrideDuplicates, setOverrideDuplicates] = useState(false)
   const [duplicateKeys, setDuplicateKeys] = useState<Set<string> | null>(null)
   const [isPending, startTransition] = useTransition()
@@ -147,6 +152,12 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
 
       const normalized = normalizeDescription(description)
 
+      // Put the amount into the canonical "negative = money out" convention
+      // before inferring the type, so a credit-card file (purchases positive)
+      // isn't misread as income. The stored amount is a magnitude regardless.
+      const canonicalSigned =
+        signed == null ? 0 : canonicalizeSign(signed, convention)
+
       // A type column from the bank is respected only when it matches a type we
       // understand; otherwise we infer from the description and direction.
       const rawType = typeCol ? String(raw[typeCol] ?? '').trim().toLowerCase() : ''
@@ -170,7 +181,7 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
         description,
         amount: signed ?? 0,
         transactionType:
-          knownType ?? inferTransactionType(normalized, signed ?? 0),
+          knownType ?? inferTransactionType(normalized, canonicalSigned),
         accountName:
           (accountCol ? String(raw[accountCol] ?? '').trim() : '') ||
           accountName ||
@@ -185,7 +196,7 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
         error: errors.length > 0 ? errors.join(', ') : null,
       }
     })
-  }, [parsed, roles, accountName])
+  }, [parsed, roles, accountName, convention])
 
   const validRows = built.filter((r) => r.error === null)
   const errorRows = built.filter((r) => r.error !== null)
@@ -307,26 +318,51 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
               )}
             </div>
 
-            <div className="max-w-sm">
-              <Label htmlFor="account-name">
-                Account name
-                <span className="ml-1 font-normal text-muted-foreground">
-                  (used when the file has no account column)
-                </span>
-              </Label>
-              <Input
-                id="account-name"
-                value={accountName}
-                onChange={(e) => setAccountName(e.target.value)}
-                placeholder="e.g. Operating Checking"
-                list="known-accounts"
-                className="mt-1.5"
-              />
-              <datalist id="known-accounts">
-                {accountNames.map((n) => (
-                  <option key={n} value={n} />
-                ))}
-              </datalist>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <Label htmlFor="account-name">
+                  Account name
+                  <span className="ml-1 font-normal text-muted-foreground">
+                    (used when the file has no account column)
+                  </span>
+                </Label>
+                <Input
+                  id="account-name"
+                  value={accountName}
+                  onChange={(e) => setAccountName(e.target.value)}
+                  placeholder="e.g. Operating Checking"
+                  list="known-accounts"
+                  className="mt-1.5"
+                />
+                <datalist id="known-accounts">
+                  {accountNames.map((n) => (
+                    <option key={n} value={n} />
+                  ))}
+                </datalist>
+              </div>
+
+              <div>
+                <Label htmlFor="amount-convention">Statement type</Label>
+                <Select
+                  value={convention}
+                  onValueChange={(v) => setConvention((v as AmountConvention) ?? 'bank')}
+                >
+                  <SelectTrigger id="amount-convention" className="mt-1.5">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {AMOUNT_CONVENTIONS.map((c) => (
+                      <SelectItem key={c} value={c}>
+                        {AMOUNT_CONVENTION_LABELS[c]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  Credit-card exports list purchases as positive numbers. Pick the
+                  matching type so spend is counted correctly.
+                </p>
+              </div>
             </div>
           </div>
         </CardContent>
