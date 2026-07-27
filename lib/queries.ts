@@ -327,13 +327,13 @@ export async function getCashObligations() {
 // Raw rows (snake_case columns) for the management tables + edit forms.
 export async function getRawTable(
   table: string,
-  orderBy: { column: string; ascending: boolean },
+  orderBy: { column: string; ascending?: boolean },
 ) {
   const supabase = await createClient()
   const { data } = await supabase
     .from(table)
     .select('*')
-    .order(orderBy.column, { ascending: orderBy.ascending })
+    .order(orderBy.column, { ascending: orderBy.ascending ?? true })
   return (data ?? []) as Record<string, unknown>[]
 }
 

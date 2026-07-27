@@ -60,16 +60,18 @@ const FIELDS: FieldDef[] = [
   },
 ]
 
-function toFormState(values: Record<string, number>) {
+// Accepts the whole settings object (which also carries a `rows` array) and
+// pulls just the numeric target for each field.
+function toFormState(values: Record<string, unknown>) {
   return Object.fromEntries(
-    FIELDS.map((f) => [f.key, String(values[f.key] ?? 0)]),
+    FIELDS.map((f) => [f.key, String(Number(values[f.key] ?? 0))]),
   ) as Record<string, string>
 }
 
 export function FinancialTargetsForm({
   values,
 }: {
-  values: Record<string, number>
+  values: Record<string, unknown>
 }) {
   const [pending, startTransition] = useTransition()
   const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(

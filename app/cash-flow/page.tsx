@@ -19,16 +19,22 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { formatCurrency } from '@/lib/data'
-import { getCashAccounts, getCashFlowMonthly, getCashForecast } from '@/lib/queries'
+import { getBankAccounts, getCashFlowMonthly, getCashForecast } from '@/lib/queries'
 
 export default async function CashFlowPage() {
-  const [cashAccounts, cashFlowMonthly, cashForecast] = await Promise.all([
-    getCashAccounts(),
+  const [bankAccounts, cashFlowMonthly, cashForecast] = await Promise.all([
+    getBankAccounts(),
     getCashFlowMonthly(),
     getCashForecast(),
   ])
 
-  const totalCash = cashAccounts.reduce((s, a) => s + a.balance, 0)
+  // Credit lines are a borrowing facility, not cash on hand, so they're listed
+  // separately and excluded from the cash total.
+  const isCreditLine = (type: string) => /credit|loan/i.test(type)
+  const depository = bankAccounts.filter((a) => !isCreditLine(a.accountType))
+  const creditLines = bankAccounts.filter((a) => isCreditLine(a.accountType))
+
+  const totalCash = depository.reduce((s, a) => s + a.currentBalance, 0)
   const ytdIn = cashFlowMonthly.reduce((s, m) => s + m.inflow, 0)
   const ytdOut = cashFlowMonthly.reduce((s, m) => s + m.outflow, 0)
   const net = ytdIn - ytdOut
@@ -72,36 +78,69 @@ export default async function CashFlowPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Account Balances</CardTitle>
-            <CardDescription>Current balance by bank account</CardDescription>
+            <CardDescription>
+              Live balances from your accounts. Edit them on the Cash &amp; Debt page.
+            </CardDescription>
           </CardHeader>
           <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Account</TableHead>
-                  <TableHead>Institution</TableHead>
-                  <TableHead className="text-right">Balance</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {cashAccounts.map((a) => (
-                  <TableRow key={a.id}>
-                    <TableCell className="font-medium">{a.name}</TableCell>
-                    <TableCell className="text-muted-foreground">{a.bank}</TableCell>
-                    <TableCell className="text-right font-mono">
-                      {formatCurrency(a.balance)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-                <TableRow className="border-t-2">
-                  <TableCell className="font-semibold">Total</TableCell>
-                  <TableCell />
-                  <TableCell className="text-right font-mono font-semibold">
-                    {formatCurrency(totalCash)}
-                  </TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
+            {bankAccounts.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                No accounts yet. Add them on the Cash &amp; Debt page.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Account</TableHead>
+                      <TableHead>Institution</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead className="text-right">Balance</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {depository.map((a) => (
+                      <TableRow key={a.id}>
+                        <TableCell className="font-medium">{a.accountName}</TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {a.institution || '—'}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {a.accountType || '—'}
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {formatCurrency(a.currentBalance)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    <TableRow className="border-t-2">
+                      <TableCell className="font-semibold">Total Cash</TableCell>
+                      <TableCell />
+                      <TableCell />
+                      <TableCell className="text-right font-mono font-semibold">
+                        {formatCurrency(totalCash)}
+                      </TableCell>
+                    </TableRow>
+                    {creditLines.map((a) => (
+                      <TableRow key={a.id}>
+                        <TableCell className="font-medium">{a.accountName}</TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {a.institution || '—'}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {a.availableCredit > 0
+                            ? `${formatCurrency(a.availableCredit)} available`
+                            : a.accountType || '—'}
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {formatCurrency(a.currentBalance)} drawn
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
