@@ -18,6 +18,13 @@ export type TableDef = {
   /** columns shown in the current-records preview table */
   displayColumns: { name: string; label: string; format?: 'currency' | 'number' | 'percent' }[]
   orderBy?: { column: string; ascending?: boolean }
+  /**
+   * Set when the table is derived from other data and must not be hand-edited
+   * here. Typing directly into a calculated table looks like it works, then the
+   * next recalculation silently discards it. The Admin panel shows a pointer to
+   * the real controls instead of an entry form.
+   */
+  managedElsewhere?: { href: string; linkLabel: string; reason: string }
 }
 
 export const ADMIN_TABLES: TableDef[] = [
@@ -60,7 +67,13 @@ export const ADMIN_TABLES: TableDef[] = [
     key: 'sales_monthly',
     table: 'sales_monthly',
     label: 'Monthly Sales',
-    description: 'Wholesale and retail sales by month.',
+    description: 'Wholesale and retail sales by month, calculated from bank deposits.',
+    managedElsewhere: {
+      href: '/sales',
+      linkLabel: 'Go to Sales',
+      reason:
+        'Monthly sales are calculated from your imported bank records. Editing them here would be erased the next time sales are recalculated, so overrides and locks live on the Sales page.',
+    },
     fields: [
       { name: 'month', label: 'Month (e.g. Jan)', type: 'text', required: true },
       { name: 'month_order', label: 'Month Order (1-12)', type: 'number', required: true },
@@ -68,9 +81,11 @@ export const ADMIN_TABLES: TableDef[] = [
       { name: 'retail', label: 'Retail', type: 'number', required: true },
     ],
     displayColumns: [
+      { name: 'year', label: 'Year' },
       { name: 'month', label: 'Month' },
       { name: 'wholesale', label: 'Wholesale', format: 'currency' },
       { name: 'retail', label: 'Retail', format: 'currency' },
+      { name: 'source', label: 'Source' },
     ],
     orderBy: { column: 'month_order', ascending: true },
   },
