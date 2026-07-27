@@ -257,20 +257,153 @@ export async function getDepartments() {
   }))
 }
 
+/**
+ * Accounts-payable view of vendors, used by the Payables tab. Soft-deleted
+ * vendors are excluded so removing a vendor also clears it from payables.
+ */
 export async function getVendors() {
   const supabase = await createClient()
   const { data } = await supabase
     .from('vendors')
     .select('*')
+    .is('deleted_at', null)
     .order('due_date', { ascending: true })
   return (data ?? []).map((v) => ({
     id: v.id,
     name: v.name,
     category: v.category ?? '',
-    balance: Number(v.balance),
+    balance: Number(v.balance ?? 0),
     due: v.due_date ?? '',
     status: v.status ?? 'Upcoming',
   }))
+}
+
+export type DirectoryVendor = {
+  id: string
+  vendorNumber: string
+  name: string
+  displayName: string
+  category: string
+  vendorType: string
+  vendorStatus: string
+  phone: string
+  email: string
+  website: string
+  billingAddress: string
+  shippingAddress: string
+  paymentTerms: string
+  preferredPaymentMethod: string
+  notes: string
+  recurring: boolean
+  requires1099: boolean
+  archived: boolean
+  balance: number
+  createdAt: string
+  updatedAt: string
+}
+
+function mapDirectoryVendor(v: Record<string, unknown>): DirectoryVendor {
+  const str = (k: string) => (v[k] == null ? '' : String(v[k]))
+  return {
+    id: String(v.id),
+    vendorNumber: str('vendor_number'),
+    name: str('name'),
+    displayName: str('display_name') || str('name'),
+    category: str('category'),
+    vendorType: str('vendor_type'),
+    vendorStatus: str('vendor_status') || 'Active',
+    phone: str('phone'),
+    email: str('email'),
+    website: str('website'),
+    billingAddress: str('billing_address'),
+    shippingAddress: str('shipping_address'),
+    paymentTerms: str('payment_terms'),
+    preferredPaymentMethod: str('preferred_payment_method'),
+    notes: str('notes'),
+    recurring: Boolean(v.recurring),
+    requires1099: Boolean(v.requires_1099),
+    archived: v.archived_at != null,
+    balance: Number(v.balance ?? 0),
+    createdAt: str('created_at'),
+    updatedAt: str('updated_at'),
+  }
+}
+
+/**
+ * The vendor directory. Returns every vendor that has not been soft-deleted,
+ * including archived ones, so the page can offer an "Archived" filter.
+ */
+export async function getVendorDirectory(): Promise<DirectoryVendor[]> {
+  const supabase = await createClient()
+  const { data } = await supabase
+    .from('vendors')
+    .select('*')
+    .is('deleted_at', null)
+    .order('name', { ascending: true })
+  return (data ?? []).map(mapDirectoryVendor)
+}
+
+/**
+ * A single vendor with its contacts and documents. Returns null when the id
+ * doesn't exist or the vendor has been soft-deleted.
+ */
+export async function getVendorDetail(id: string) {
+  const supabase = await createClient()
+  const [{ data: vendor }, { data: contacts }, { data: documents }] =
+    await Promise.all([
+      supabase
+        .from('vendors')
+        .select('*')
+        .eq('id', id)
+        .is('deleted_at', null)
+        .maybeSingle(),
+      supabase
+        .from('vendor_contacts')
+        .select('*')
+        .eq('vendor_id', id)
+        .order('created_at', { ascending: true }),
+      supabase
+        .from('vendor_documents')
+        .select('*')
+        .eq('vendor_id', id)
+        .order('uploaded_at', { ascending: false }),
+    ])
+
+  if (!vendor) return null
+
+  return {
+    vendor: mapDirectoryVendor(vendor),
+    contacts: (contacts ?? []).map((c) => ({
+      id: String(c.id),
+      name: c.name ?? '',
+      title: c.title ?? '',
+      phone: c.phone ?? '',
+      email: c.email ?? '',
+    })),
+    documents: (documents ?? []).map((d) => ({
+      id: String(d.id),
+      documentName: d.document_name ?? '',
+      documentType: d.document_type ?? '',
+      fileUrl: d.file_url ?? '',
+      uploadedAt: d.uploaded_at ?? '',
+    })),
+  }
+}
+
+/**
+ * Recurring cash obligations already recorded against this vendor. Obligations
+ * reference a vendor by name, so we match on both the legal and display name.
+ * Nothing is estimated — an empty list simply means no obligation has been
+ * entered for this vendor yet.
+ */
+export async function getVendorObligations(names: string[]) {
+  const wanted = names.map((n) => n.trim().toLowerCase()).filter(Boolean)
+  if (wanted.length === 0) return []
+
+  const obligations = await getCashObligations()
+  return obligations.filter((o) =>
+    wanted.includes((o.vendorName ?? '').trim().toLowerCase()),
+  )
 }
 
 export async function getWholesaleCustomers() {
