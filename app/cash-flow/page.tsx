@@ -19,11 +19,17 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { formatCurrency } from '@/lib/data'
-import { getBankAccounts, getCashFlowMonthly, getCashForecast } from '@/lib/queries'
+import {
+  getBankAccounts,
+  getCashDebtSummary,
+  getCashFlowMonthly,
+  getCashForecast,
+} from '@/lib/queries'
 
 export default async function CashFlowPage() {
-  const [bankAccounts, cashFlowMonthly, cashForecast] = await Promise.all([
+  const [bankAccounts, summary, cashFlowMonthly, cashForecast] = await Promise.all([
     getBankAccounts(),
+    getCashDebtSummary(),
     getCashFlowMonthly(),
     getCashForecast(),
   ])
@@ -35,9 +41,27 @@ export default async function CashFlowPage() {
   const creditLines = bankAccounts.filter((a) => isCreditLine(a.accountType))
 
   const totalCash = depository.reduce((s, a) => s + a.currentBalance, 0)
-  const ytdIn = cashFlowMonthly.reduce((s, m) => s + m.inflow, 0)
-  const ytdOut = cashFlowMonthly.reduce((s, m) => s + m.outflow, 0)
-  const net = ytdIn - ytdOut
+
+  // Forward-looking movement over the next 30 days, derived from scheduled
+  // obligations and expected receivable payments.
+  const horizon = new Date()
+  horizon.setDate(horizon.getDate() + 30)
+  const horizonKey = horizon.toISOString().slice(0, 10)
+
+  const outflows30 = summary.scheduledObligations
+    .filter((o) => o.effectiveDueDate && o.effectiveDueDate <= horizonKey)
+    .reduce((s, o) => s + o.amount, 0)
+
+  const inflows30 = summary.receivables
+    .filter((r) => r.status !== 'Paid')
+    .filter((r) => {
+      const date = r.expectedPaymentDate || r.dueDate
+      return date && date <= horizonKey
+    })
+    .reduce((s, r) => s + Math.max(r.amount - r.amountPaid, 0), 0)
+
+  const net30 = inflows30 - outflows30
+  const hasHistory = cashFlowMonthly.length > 0
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -47,10 +71,34 @@ export default async function CashFlowPage() {
       />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Total Cash Across Accounts" value={formatCurrency(totalCash)} icon={Wallet} />
-        <StatCard label="YTD Cash In" value={formatCurrency(ytdIn)} icon={ArrowDownToLine} />
-        <StatCard label="YTD Cash Out" value={formatCurrency(ytdOut)} icon={ArrowUpFromLine} />
-        <StatCard label="Net Operating Cash" value={formatCurrency(net)} icon={Scale} />
+        <StatCard
+          label="Total Cash Across Accounts"
+          value={formatCurrency(totalCash)}
+          icon={Wallet}
+          hint={`${depository.length} operating ${depository.length === 1 ? 'account' : 'accounts'}`}
+        />
+        <StatCard
+          label="Expected In (30 Days)"
+          value={formatCurrency(inflows30)}
+          icon={ArrowDownToLine}
+          hint="Receivables due"
+        />
+        <StatCard
+          label="Scheduled Out (30 Days)"
+          value={formatCurrency(outflows30)}
+          icon={ArrowUpFromLine}
+          hint={
+            summary.unscheduledObligations > 0
+              ? `${formatCurrency(summary.unscheduledObligations)} undated`
+              : 'Obligations due'
+          }
+        />
+        <StatCard
+          label="Net 30-Day Change"
+          value={formatCurrency(net30)}
+          icon={Scale}
+          hint={net30 < 0 ? 'Cash decreasing' : 'Cash increasing'}
+        />
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -60,16 +108,38 @@ export default async function CashFlowPage() {
             <CardDescription>Monthly, trailing 12 months</CardDescription>
           </CardHeader>
           <CardContent>
-            <CashFlowChart data={cashFlowMonthly} />
+            {hasHistory ? (
+              <CashFlowChart data={cashFlowMonthly} />
+            ) : (
+              <div className="flex h-[300px] flex-col items-center justify-center gap-2 text-center">
+                <p className="text-sm font-medium text-foreground">
+                  No monthly history yet
+                </p>
+                <p className="max-w-xs text-sm text-muted-foreground text-pretty">
+                  This chart compares actual cash in and out per month. Import your
+                  monthly totals from the Admin page to populate it.
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
         <Card>
           <CardHeader>
             <CardTitle className="text-base">30-Day Cash Forecast</CardTitle>
-            <CardDescription>Projected daily position</CardDescription>
+            <CardDescription>
+              Projected daily position from today&apos;s cash, scheduled
+              obligations, and expected receipts
+            </CardDescription>
           </CardHeader>
           <CardContent>
             <CashForecastChart data={cashForecast} />
+            {summary.unscheduledObligations > 0 && (
+              <p className="mt-2 text-xs text-muted-foreground text-pretty">
+                {formatCurrency(summary.unscheduledObligations)} in obligations has
+                no due date and is excluded. Add due dates on the Cash &amp; Debt
+                page for a complete forecast.
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>

@@ -1,3 +1,4 @@
+import { cache } from 'react'
 import { createClient } from '@/lib/supabase/server'
 import {
   cashReserveHealth,
@@ -402,7 +403,10 @@ function daysUntil(dateStr: string, today: Date) {
 }
 
 // Derived cash position, debt load, receivables, and obligations metrics.
-export async function getCashDebtSummary() {
+// Wrapped in React's `cache` so multiple callers in one render (the dashboard
+// reads it via both the health snapshot and the cash forecast) share a single
+// set of database queries.
+export const getCashDebtSummary = cache(async () => {
   const [accounts, loans, receivables, obligations, settings] = await Promise.all([
     getBankAccounts(),
     getLoans(),
@@ -552,7 +556,7 @@ export async function getCashDebtSummary() {
     overdueReceivablesCount: overdueReceivables.length,
     netWorth: totalCash + totalReceivable - totalDebt - totalObligations,
   }
-}
+})
 
 /**
  * One shared evaluation of the three health pillars plus the composite score
