@@ -1,7 +1,6 @@
 import Link from 'next/link'
 import { ArrowLeft } from 'lucide-react'
 import { PageHeader } from '@/components/page-header'
-import { Button } from '@/components/ui/button'
 import {
   Card,
   CardContent,
@@ -12,6 +11,8 @@ import {
 import { TransactionImport } from '@/components/vendors/transaction-import'
 import { getImportBatches, getKnownAccountNames } from '@/lib/transaction-queries'
 
+export const dynamic = 'force-dynamic'
+
 export default async function ImportPage() {
   const [accountNames, batches] = await Promise.all([
     getKnownAccountNames(),
@@ -20,12 +21,15 @@ export default async function ImportPage() {
 
   return (
     <div className="mx-auto max-w-5xl">
-      <Button asChild variant="ghost" size="sm" className="mb-2 -ml-2">
-        <Link href="/vendors">
-          <ArrowLeft className="mr-1 h-4 w-4" />
-          Back to vendors
+      <div className="mb-2">
+        <Link
+          href="/vendors"
+          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="size-4" aria-hidden="true" />
+          Back to Vendor Management
         </Link>
-      </Button>
+      </div>
 
       <PageHeader
         title="Import Transactions"

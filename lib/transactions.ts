@@ -13,6 +13,17 @@ export const TRANSACTION_TYPES = [
 ] as const
 export type TransactionType = (typeof TRANSACTION_TYPES)[number]
 
+export const TRANSACTION_TYPE_LABELS: Record<TransactionType, string> = {
+  expense: 'Expense',
+  payment: 'Payment',
+  credit: 'Credit',
+  refund: 'Refund',
+  transfer: 'Transfer',
+  fee: 'Fee',
+  interest: 'Interest',
+  income: 'Income',
+}
+
 export const REVIEW_STATUSES = [
   'unreviewed',
   'matched',

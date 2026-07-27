@@ -160,7 +160,7 @@ export async function approveRecurringSuggestion(input: {
     .from('cash_obligations')
     .select('id')
     .eq('vendor_name', input.vendorName)
-    .eq('name', input.label)
+    .eq('obligation_name', input.label)
     .maybeSingle()
 
   if (existing) {
@@ -168,12 +168,16 @@ export async function approveRecurringSuggestion(input: {
   }
 
   const { error } = await supabase.from('cash_obligations').insert({
-    name: input.label,
+    obligation_name: input.label,
     vendor_name: input.vendorName,
     amount: input.amount,
     frequency,
+    due_date: input.nextDueDate,
     next_due_date: input.nextDueDate,
     category: input.category || null,
+    recurring: true,
+    status: 'Pending',
+    active: true,
   })
 
   if (error) return { ok: false, error: error.message }

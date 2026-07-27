@@ -1,4 +1,12 @@
-import { Truck, CircleDollarSign, Clock, AlertTriangle, RefreshCw } from 'lucide-react'
+import Link from 'next/link'
+import {
+  Truck,
+  CircleDollarSign,
+  Clock,
+  AlertTriangle,
+  Upload,
+  Receipt,
+} from 'lucide-react'
 import { PageHeader } from '@/components/page-header'
 import { StatCard } from '@/components/stat-card'
 import {
@@ -21,6 +29,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { VendorDirectory } from '@/components/vendors/vendor-directory'
 import { formatCurrency } from '@/lib/data'
 import { getVendors, getVendorDirectory } from '@/lib/queries'
+import { getVendorSpend } from '@/lib/transaction-queries'
 
 const statusStyle: Record<string, string> = {
   Overdue: 'bg-destructive/10 text-destructive',
@@ -34,7 +43,16 @@ function formatDate(iso: string) {
 }
 
 export default async function VendorsPage() {
-  const [vendors, directory] = await Promise.all([getVendors(), getVendorDirectory()])
+  const [vendors, directory, spendMap] = await Promise.all([
+    getVendors(),
+    getVendorDirectory(),
+    getVendorSpend(),
+  ])
+
+  // Real year-to-date spend across every vendor, straight from imported
+  // transactions. Zero until statements are imported — never estimated.
+  const ytdSpend = [...spendMap.values()].reduce((s, v) => s + v.ytdSpend, 0)
+  const vendorsWithSpend = spendMap.size
 
   const totalPayable = vendors.reduce((s, v) => s + v.balance, 0)
   const dueSoon = vendors.filter((v) => v.status === 'Due Soon' || v.status === 'Overdue')
@@ -44,18 +62,44 @@ export default async function VendorsPage() {
   // Directory counts exclude archived vendors so the headline numbers describe
   // who the business is actively buying from.
   const activeVendors = directory.filter((v) => !v.archived && v.vendorStatus === 'Active')
-  const recurringVendors = activeVendors.filter((v) => v.recurring)
 
   return (
     <div className="mx-auto max-w-7xl">
       <PageHeader
         title="Vendor Management"
         description="Your vendor directory plus outstanding payables, payment terms, and upcoming due dates across all suppliers."
+        action={
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href="/vendors/transactions"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-md border border-input bg-background px-4 text-sm font-medium shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+            >
+              <Receipt className="size-4" aria-hidden="true" />
+              Transactions
+            </Link>
+            <Link
+              href="/vendors/import"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+            >
+              <Upload className="size-4" aria-hidden="true" />
+              Import statement
+            </Link>
+          </div>
+        }
       />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Active Vendors" value={String(activeVendors.length)} icon={Truck} hint={`${directory.length} total on file`} />
-        <StatCard label="Recurring Vendors" value={String(recurringVendors.length)} icon={RefreshCw} hint="Regular, repeating spend" />
+        <StatCard
+          label="Spend This Year"
+          value={formatCurrency(ytdSpend)}
+          icon={Receipt}
+          hint={
+            vendorsWithSpend === 0
+              ? 'Import statements to track spend'
+              : `Across ${vendorsWithSpend} ${vendorsWithSpend === 1 ? 'vendor' : 'vendors'}`
+          }
+        />
         <StatCard label="Total Payable" value={formatCurrency(totalPayable)} icon={CircleDollarSign} hint={totalPayable === 0 ? 'No balances entered yet' : undefined} />
         <StatCard label="Overdue" value={String(overdue.length)} icon={AlertTriangle} hint={overdue.length ? 'Needs attention' : 'All current'} />
       </div>

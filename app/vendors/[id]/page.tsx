@@ -9,6 +9,7 @@ import {
   CalendarClock,
   RefreshCw,
   FileText,
+  Receipt,
 } from 'lucide-react'
 import {
   Card,
@@ -28,6 +29,8 @@ import {
   getVendorDirectory,
   getVendorObligations,
 } from '@/lib/queries'
+import { getVendorSpend, getTransactions } from '@/lib/transaction-queries'
+import { TRANSACTION_TYPE_LABELS, type TransactionType } from '@/lib/transactions'
 
 function formatDate(iso: string) {
   if (!iso) return '—'
@@ -85,10 +88,16 @@ export default async function VendorDetailPage({
   if (!detail) notFound()
 
   const { vendor, contacts, documents } = detail
-  const [directory, obligations] = await Promise.all([
+  const [directory, obligations, spendMap, recentTransactions] = await Promise.all([
     getVendorDirectory(),
     getVendorObligations([vendor.name, vendor.displayName]),
+    getVendorSpend(),
+    getTransactions({ vendorId: id, limit: 8 }),
   ])
+
+  // Spend comes straight from imported, non-excluded transactions for this
+  // vendor. When nothing has been imported it stays zero rather than guessing.
+  const spend = spendMap.get(id)
 
   const categories = Array.from(
     new Set(directory.map((v) => v.category).filter(Boolean)),
@@ -155,6 +164,16 @@ export default async function VendorDetailPage({
       {/* Statistics — derived entirely from entered records. */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
+          label="Spend This Year"
+          value={formatCurrency(spend?.ytdSpend ?? 0)}
+          icon={Receipt}
+          hint={
+            spend
+              ? `${spend.transactionCount} imported ${spend.transactionCount === 1 ? 'transaction' : 'transactions'}`
+              : 'No transactions imported yet'
+          }
+        />
+        <StatCard
           label="Outstanding Balance"
           value={formatCurrency(vendor.balance)}
           icon={CircleDollarSign}
@@ -175,12 +194,6 @@ export default async function VendorDetailPage({
           value={nextDue ? formatDate(nextDue) : '—'}
           icon={CalendarClock}
           hint={nextDue ? undefined : 'No due date on file'}
-        />
-        <StatCard
-          label="Documents on File"
-          value={String(documents.length)}
-          icon={FileText}
-          hint={`${contacts.length} ${contacts.length === 1 ? 'contact' : 'contacts'} saved`}
         />
       </div>
 
@@ -252,6 +265,58 @@ export default async function VendorDetailPage({
                 <p className="py-4 text-center text-sm text-muted-foreground">
                   No notes yet. Use Edit to add some.
                 </p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="mt-4">
+            <CardHeader className="flex-row items-start justify-between gap-3">
+              <div>
+                <CardTitle className="text-base">Recent Transactions</CardTitle>
+                <CardDescription>
+                  Imported bank and card activity matched to this vendor
+                </CardDescription>
+              </div>
+              <Link
+                href={`/vendors/transactions?vendor=${vendor.id}`}
+                className="shrink-0 text-sm text-primary underline-offset-4 hover:underline"
+              >
+                View all
+              </Link>
+            </CardHeader>
+            <CardContent>
+              {recentTransactions.length === 0 ? (
+                <p className="py-6 text-center text-sm text-muted-foreground">
+                  No transactions matched to this vendor yet.{' '}
+                  <Link href="/vendors/import" className="text-primary underline-offset-4 hover:underline">
+                    Import a statement
+                  </Link>{' '}
+                  to see spend here.
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-2">
+                  {recentTransactions.map((t) => (
+                    <li
+                      key={t.id}
+                      className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-border py-2.5 last:border-0"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-foreground" title={t.description}>
+                          {t.description}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {formatDate(t.transactionDate)}
+                          {' · '}
+                          {TRANSACTION_TYPE_LABELS[t.transactionType as TransactionType] ??
+                            t.transactionType}
+                        </p>
+                      </div>
+                      <p className="font-mono text-sm text-foreground tabular-nums">
+                        {formatCurrency(t.amount)}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
               )}
             </CardContent>
           </Card>
