@@ -19,6 +19,15 @@ export const SALES_SOURCES = ['square_api', 'square_csv', 'manual', 'calculated'
 export type SalesSource = (typeof SALES_SOURCES)[number]
 
 /**
+ * Named constants for the source values, so callers writing rows do not repeat
+ * string literals that a typo would turn into an unranked, invisible source.
+ */
+export const SOURCE_API: SalesSource = 'square_api'
+export const SOURCE_CSV: SalesSource = 'square_csv'
+export const SOURCE_MANUAL: SalesSource = 'manual'
+export const SOURCE_CALCULATED: SalesSource = 'calculated'
+
+/**
  * Higher number wins.
  *
  * `manual` sits above the Square feeds on purpose: if the owner has typed a

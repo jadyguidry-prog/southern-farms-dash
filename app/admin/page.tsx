@@ -1,7 +1,14 @@
 import { PageHeader } from '@/components/page-header'
 import { AdminPanel } from '@/components/admin/admin-panel'
+import { SquareCsvImport } from '@/components/admin/square-csv-import'
 import { createClient } from '@/lib/supabase/server'
 import { ADMIN_TABLES } from '@/lib/admin-config'
+import {
+  preflightDailyImport,
+  importDailyCsv,
+  importItemsCsv,
+  getCsvImportBatches,
+} from './square-import-actions'
 
 export const dynamic = 'force-dynamic'
 
@@ -20,6 +27,7 @@ export default async function AdminPage() {
   )
 
   const data = Object.fromEntries(results) as Record<string, Record<string, unknown>[]>
+  const batches = await getCsvImportBatches()
 
   return (
     <div>
@@ -27,6 +35,48 @@ export default async function AdminPage() {
         title="Admin — Data Management"
         description="Add, import, and manage the financial records that power your dashboard. Changes appear across all pages immediately."
       />
+      <div className="mb-6 flex flex-col gap-4">
+        <SquareCsvImport
+          onPreflight={preflightDailyImport}
+          onImportDaily={importDailyCsv}
+          onImportItems={importItemsCsv}
+        />
+
+        {batches.length > 0 && (
+          <section
+            aria-labelledby="csv-history"
+            className="rounded-lg border border-border p-4"
+          >
+            <h2 id="csv-history" className="text-sm font-medium">
+              Recent Square imports
+            </h2>
+            <ul className="mt-2 flex flex-col divide-y divide-border">
+              {batches.map((b) => (
+                <li
+                  key={b.id}
+                  className="flex flex-wrap items-center justify-between gap-2 py-2.5 first:pt-0 last:pb-0"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm">{b.fileName ?? 'Untitled file'}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {b.reportType === 'items' ? 'Item sales' : 'Daily sales'}
+                      {b.periodStart && b.periodEnd
+                        ? ` · ${b.periodStart} to ${b.periodEnd}`
+                        : ''}
+                    </p>
+                  </div>
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {b.importedCount} imported
+                    {b.skippedCount > 0 && ` · ${b.skippedCount} skipped`}
+                    {b.rejectedCount > 0 && ` · ${b.rejectedCount} unreadable`}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+      </div>
+
       <AdminPanel data={data} />
     </div>
   )
