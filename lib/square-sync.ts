@@ -45,7 +45,23 @@ const OVERLAP_MINUTES = 90
 const ORDER_PAGE_SIZE = 500
 
 /** Safety valve so a misconfiguration can't spin forever. */
-const MAX_PAGES = 200
+/**
+ * Runaway-loop guard for Square's cursor pagination, not a data limit.
+ *
+ * At 200 it silently truncated a real account at exactly 20,000 payments
+ * (200 pages x 100). A cap that stops quietly understates revenue, so it is
+ * raised well past any plausible page count and hitting it is now reported as
+ * a truncation warning rather than passing for a clean sync.
+ */
+const MAX_PAGES = 5000
+
+function warnIfTruncated(resource: string, pages: number) {
+  if (pages < MAX_PAGES) return false
+  console.warn(
+    `[v0] ${resource}: hit the ${MAX_PAGES}-page ceiling; data is TRUNCATED and totals will be understated.`,
+  )
+  return true
+}
 
 export type SyncResource =
   | 'locations'
@@ -106,6 +122,34 @@ async function getSyncDb() {
     if (!outsideRequest) throw err
     return createServiceClient()
   }
+}
+
+/**
+ * PostgREST caps every select at ~1000 rows and reports no error when it
+ * truncates, so an unpaginated read of a large table silently returns a
+ * fraction of the data. That is exactly how the first real sync produced two
+ * weeks of revenue out of two years of orders: the rollup only ever saw the
+ * first 1000 orders. Every bulk read below must page explicitly.
+ */
+const PAGE_SIZE = 1000
+
+async function fetchAllRows<T>(
+  build: (from: number, to: number) => PromiseLike<{
+    data: T[] | null
+    error: { message: string } | null
+  }>,
+  label: string,
+): Promise<T[]> {
+  const out: T[] = []
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await build(from, from + PAGE_SIZE - 1)
+    if (error) throw new Error(`${label}: ${error.message}`)
+    const batch = data ?? []
+    out.push(...batch)
+    // A short page means this was the last one.
+    if (batch.length < PAGE_SIZE) break
+  }
+  return out
 }
 
 type SyncStateRow = {
@@ -340,7 +384,7 @@ export async function syncCatalog(): Promise<SyncOutcome> {
         })
       }
       pages++
-      if (!page.hasNextPage() || pages >= MAX_PAGES) break
+      if (!page.hasNextPage() || warnIfTruncated(resource, pages)) break
       page = await withRetry(() => page.getNextPage())
     }
 
@@ -487,12 +531,18 @@ export async function syncOrders(opts: {
       }
       cursor = response.cursor
       pages++
-    } while (cursor && pages < MAX_PAGES)
+    } while (cursor && !warnIfTruncated(resource, pages))
 
     // Attach categories so product/category rollups can attribute line items.
-    const { data: catalog } = await supabase
-      .from('square_catalog_objects')
-      .select('square_object_id, object_type, name, category_id, parent_item_id')
+    const catalog = await fetchAllRows(
+      (from, to) =>
+        supabase
+          .from('square_catalog_objects')
+          .select('square_object_id, object_type, name, category_id, parent_item_id')
+          .order('square_object_id', { ascending: true })
+          .range(from, to),
+      'square_catalog_objects',
+    )
     const maps = buildCatalogMaps(
       (catalog ?? []).map((c) => {
         const r = c as {
@@ -688,7 +738,7 @@ export async function syncPayments(opts: {
         })
       }
       pages++
-      if (!page.hasNextPage() || pages >= MAX_PAGES) break
+      if (!page.hasNextPage() || warnIfTruncated(resource, pages)) break
       page = await withRetry(() => page.getNextPage())
     }
 
@@ -785,7 +835,7 @@ export async function syncRefunds(opts: {
         }
       }
       pages++
-      if (!page.hasNextPage() || pages >= MAX_PAGES) break
+      if (!page.hasNextPage() || warnIfTruncated(resource, pages)) break
       page = await withRetry(() => page.getNextPage())
     }
 
@@ -837,27 +887,35 @@ export async function rebuildRollups(opts: {
     const months = new Set<string>()
     for (const d of opts.affectedDates ?? []) months.add(d.slice(0, 7))
 
-    let orderQuery = supabase
-      .from('square_orders')
-      .select(
-        'square_order_id, square_location_id, state, sale_date, channel, gross_sales, net_sales, total_discount, total_tax, total_tip, team_member_id',
-      )
-    if (months.size > 0) {
-      // Bound the read to the affected months so a routine sync doesn't scan
-      // two years of orders.
-      const sorted = [...months].sort()
-      const from = `${sorted[0]}-01`
-      const lastMonth = sorted[sorted.length - 1]
-      orderQuery = orderQuery.gte('sale_date', from).lte('sale_date', endOfMonth(lastMonth))
-    }
-    const { data: orderRows, error: orderErr } = await orderQuery
-    if (orderErr) throw new Error(orderErr.message)
+    // Bound the read to the affected months so a routine sync doesn't scan
+    // two years of orders.
+    const sorted = [...months].sort()
+    const monthFrom = months.size > 0 ? `${sorted[0]}-01` : null
+    const monthTo = months.size > 0 ? endOfMonth(sorted[sorted.length - 1]) : null
 
-    const { data: lineRows } = await supabase
-      .from('square_order_line_items')
-      .select(
-        'square_order_id, line_item_uid, catalog_object_id, name, variation_name, category_id, category_name, quantity, gross_sales, total_discount, total_tax, total_money',
-      )
+    const orderRows = await fetchAllRows((from, to) => {
+      let q = supabase
+        .from('square_orders')
+        .select(
+          'square_order_id, square_location_id, state, sale_date, channel, gross_sales, net_sales, total_discount, total_tax, total_tip, team_member_id',
+        )
+      if (monthFrom && monthTo) q = q.gte('sale_date', monthFrom).lte('sale_date', monthTo)
+      // Order by a unique key: an unordered paged read can repeat or skip rows.
+      return q.order('square_order_id', { ascending: true }).range(from, to)
+    }, 'square_orders')
+
+    const lineRows = await fetchAllRows(
+      (from, to) =>
+        supabase
+          .from('square_order_line_items')
+          .select(
+            'square_order_id, line_item_uid, catalog_object_id, name, variation_name, category_id, category_name, quantity, gross_sales, total_discount, total_tax, total_money',
+          )
+          .order('square_order_id', { ascending: true })
+          .order('line_item_uid', { ascending: true })
+          .range(from, to),
+      'square_order_line_items',
+    )
 
     const linesByOrder = new Map<string, Record<string, unknown>[]>()
     for (const l of lineRows ?? []) {
@@ -908,9 +966,15 @@ export async function rebuildRollups(opts: {
     // Refunds: prefer the freshly synced map, otherwise read them back.
     let refundsByDate = opts.refundsByDate
     if (!refundsByDate) {
-      const { data: refundRows } = await supabase
-        .from('square_refunds')
-        .select('sale_date, amount, status')
+      const refundRows = await fetchAllRows(
+        (from, to) =>
+          supabase
+            .from('square_refunds')
+            .select('sale_date, amount, status, square_refund_id')
+            .order('square_refund_id', { ascending: true })
+            .range(from, to),
+        'square_refunds',
+      )
       refundsByDate = {}
       for (const r of refundRows ?? []) {
         const row = r as { sale_date: string | null; amount: number; status: string | null }
@@ -925,9 +989,15 @@ export async function rebuildRollups(opts: {
     const daily = rollupDaily(orders, refundsByDate)
 
     // Processing fees come from payments, not orders.
-    const { data: feeRows } = await supabase
-      .from('square_payments')
-      .select('sale_date, processing_fee, status')
+    const feeRows = await fetchAllRows(
+      (from, to) =>
+        supabase
+          .from('square_payments')
+          .select('sale_date, processing_fee, status, square_payment_id')
+          .order('square_payment_id', { ascending: true })
+          .range(from, to),
+      'square_payments',
+    )
     const feesByDate: Record<string, number> = {}
     for (const f of feeRows ?? []) {
       const row = f as { sale_date: string | null; processing_fee: number; status: string | null }
@@ -1008,11 +1078,17 @@ export async function rebuildRollups(opts: {
 
     // Products and categories are a full replace of the Square-sourced rows
     // only, so CSV- and manually-sourced rows are preserved.
-    const catalogMapRows = await supabase
-      .from('square_catalog_objects')
-      .select('square_object_id, object_type, name, category_id, parent_item_id')
+    const catalogMapRows = await fetchAllRows(
+      (from, to) =>
+        supabase
+          .from('square_catalog_objects')
+          .select('square_object_id, object_type, name, category_id, parent_item_id')
+          .order('square_object_id', { ascending: true })
+          .range(from, to),
+      'square_catalog_objects',
+    )
     const maps = buildCatalogMaps(
-      (catalogMapRows.data ?? []).map((c) => {
+      (catalogMapRows ?? []).map((c) => {
         const r = c as Record<string, unknown>
         return {
           squareObjectId: String(r.square_object_id),
@@ -1067,9 +1143,15 @@ export async function rebuildRollups(opts: {
     // Employees need payment-level attribution.
     let payments = opts.payments
     if (!payments) {
-      const { data } = await supabase
-        .from('square_payments')
-        .select('team_member_id, amount, sale_date, status')
+      const data = await fetchAllRows(
+        (from, to) =>
+          supabase
+            .from('square_payments')
+            .select('team_member_id, amount, sale_date, status, square_payment_id')
+            .order('square_payment_id', { ascending: true })
+            .range(from, to),
+        'square_payments',
+      )
       payments = (data ?? []).map((p) => {
         const r = p as Record<string, unknown>
         return {
@@ -1081,9 +1163,15 @@ export async function rebuildRollups(opts: {
       })
     }
 
-    const { data: teamRows } = await supabase
-      .from('square_team_members')
-      .select('square_team_member_id, display_name')
+    const teamRows = await fetchAllRows(
+      (from, to) =>
+        supabase
+          .from('square_team_members')
+          .select('square_team_member_id, display_name')
+          .order('square_team_member_id', { ascending: true })
+          .range(from, to),
+      'square_team_members',
+    )
     const nameById: Record<string, string> = {}
     for (const t of teamRows ?? []) {
       const r = t as { square_team_member_id: string; display_name: string | null }
