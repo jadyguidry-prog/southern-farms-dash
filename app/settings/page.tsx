@@ -10,7 +10,15 @@ import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { FinancialTargetsForm } from '@/components/settings/financial-targets-form'
+import { SquareIntegrationPanel } from '@/components/settings/square-integration-panel'
 import { getBusinessSettings } from '@/lib/queries'
+import { getSquareConfigState } from '@/lib/square-client'
+import { getSyncState, getSquareDataCounts } from '@/lib/square-sync'
+import {
+  testConnectionAction,
+  syncNowAction,
+  rebuildRollupAction,
+} from './square-actions'
 
 const alertToggles = [
   { id: 'cash', label: 'Low cash forecast alerts', desc: 'Warn when projected balance nears the minimum buffer', on: true },
@@ -20,7 +28,12 @@ const alertToggles = [
 ]
 
 export default async function SettingsPage() {
-  const settings = await getBusinessSettings()
+  const squareConfig = getSquareConfigState()
+  const [settings, syncState, counts] = await Promise.all([
+    getBusinessSettings(),
+    getSyncState(),
+    getSquareDataCounts(),
+  ])
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -54,6 +67,17 @@ export default async function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+
+        <SquareIntegrationPanel
+          configured={squareConfig.configured}
+          configReason={squareConfig.configured ? null : squareConfig.reason}
+          environment={squareConfig.configured ? squareConfig.environment : null}
+          syncState={syncState}
+          counts={counts}
+          onTest={testConnectionAction}
+          onSync={syncNowAction}
+          onRebuild={rebuildRollupAction}
+        />
 
         <FinancialTargetsForm values={settings} />
 

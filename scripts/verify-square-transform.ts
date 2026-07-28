@@ -39,15 +39,15 @@ function check(name: string, actual: unknown, expected: unknown) {
 }
 
 console.log('\n-- money conversion (cents -> dollars) --')
-check('bigint cents', moneyToDollars({ amount: 12345n }), 123.45)
+check('bigint cents', moneyToDollars({ amount: BigInt(12345) }), 123.45)
 check('number cents', moneyToDollars({ amount: 12345 }), 123.45)
 check('string cents', moneyToDollars({ amount: '12345' }), 123.45)
-check('zero', moneyToDollars({ amount: 0n }), 0)
+check('zero', moneyToDollars({ amount: BigInt(0) }), 0)
 check('null money is 0 not NaN', moneyToDollars(null), 0)
 check('undefined amount is 0', moneyToDollars({}), 0)
 check('garbage string is 0', moneyToDollars({ amount: 'abc' }), 0)
-check('single cent', moneyToDollars({ amount: 1n }), 0.01)
-check('large amount', moneyToDollars({ amount: 3641600n }), 36416)
+check('single cent', moneyToDollars({ amount: BigInt(1) }), 0.01)
+check('large amount', moneyToDollars({ amount: BigInt(3641600) }), 36416)
 check('no float dust', round2(0.1 + 0.2), 0.3)
 
 console.log('\n-- sale date uses closedAt, never a deposit date --')
@@ -97,13 +97,13 @@ const order = normalizeOrder({
   state: 'COMPLETED',
   closedAt: '2026-01-15T16:00:00Z',
   source: { name: 'Square Point of Sale' },
-  totalMoney: { amount: 11800n },
-  totalTaxMoney: { amount: 800n },
-  totalTipMoney: { amount: 1000n },
-  totalDiscountMoney: { amount: 500n },
+  totalMoney: { amount: BigInt(11800) },
+  totalTaxMoney: { amount: BigInt(800) },
+  totalTipMoney: { amount: BigInt(1000) },
+  totalDiscountMoney: { amount: BigInt(500) },
   lineItems: [
-    { uid: 'A', name: 'Tomatoes', quantity: '2', grossSalesMoney: { amount: 6000n } },
-    { uid: 'B', name: 'Eggs', quantity: '1', grossSalesMoney: { amount: 4500n } },
+    { uid: 'A', name: 'Tomatoes', quantity: '2', grossSalesMoney: { amount: BigInt(6000) } },
+    { uid: 'B', name: 'Eggs', quantity: '1', grossSalesMoney: { amount: BigInt(4500) } },
   ],
 })
 check('gross from line items', order?.grossSales, 105)
@@ -118,8 +118,8 @@ const noLines = normalizeOrder({
   id: 'ORD2',
   state: 'COMPLETED',
   closedAt: '2026-01-15T16:00:00Z',
-  totalMoney: { amount: 10800n },
-  totalTaxMoney: { amount: 800n },
+  totalMoney: { amount: BigInt(10800) },
+  totalTaxMoney: { amount: BigInt(800) },
 })
 check('falls back to total when no line items', noLines?.grossSales, 100)
 
@@ -128,7 +128,7 @@ const noUid = normalizeOrder({
   id: 'ORD3',
   state: 'COMPLETED',
   closedAt: '2026-01-15T16:00:00Z',
-  lineItems: [{ name: 'X', grossSalesMoney: { amount: 100n } }],
+  lineItems: [{ name: 'X', grossSalesMoney: { amount: BigInt(100) } }],
 })
 check('index-based uid', noUid?.lineItems[0].lineItemUid, 'idx-0')
 
@@ -148,18 +148,18 @@ const mixed = [
     id: 'C1', locationId: 'L1', state: 'COMPLETED',
     closedAt: '2026-01-15T16:00:00Z',
     source: { name: 'Square Point of Sale' },
-    lineItems: [{ uid: 'a', grossSalesMoney: { amount: 10000n }, name: 'x' }],
+    lineItems: [{ uid: 'a', grossSalesMoney: { amount: BigInt(10000) }, name: 'x' }],
   })!,
   normalizeOrder({
     id: 'C2', locationId: 'L1', state: 'CANCELED',
     closedAt: '2026-01-15T17:00:00Z',
-    lineItems: [{ uid: 'b', grossSalesMoney: { amount: 99900n }, name: 'y' }],
+    lineItems: [{ uid: 'b', grossSalesMoney: { amount: BigInt(99900) }, name: 'y' }],
   })!,
   normalizeOrder({
     id: 'C3', locationId: 'L1', state: 'COMPLETED',
     closedAt: '2026-01-16T17:00:00Z',
     source: { name: 'Invoices' },
-    lineItems: [{ uid: 'c', grossSalesMoney: { amount: 20000n }, name: 'z' }],
+    lineItems: [{ uid: 'c', grossSalesMoney: { amount: BigInt(20000) }, name: 'z' }],
   })!,
 ]
 const daily = rollupDaily(mixed, { '2026-01-16': 25 })
@@ -205,7 +205,7 @@ const withCat = attachCategories(
   [normalizeOrder({
     id: 'P1', state: 'COMPLETED', closedAt: '2026-01-15T16:00:00Z',
     lineItems: [{ uid: 'a', name: 'Tomatoes', variationName: 'Pint',
-      catalogObjectId: 'VAR1', quantity: '2', grossSalesMoney: { amount: 800n } }],
+      catalogObjectId: 'VAR1', quantity: '2', grossSalesMoney: { amount: BigInt(800) } }],
   })!],
   maps,
 )

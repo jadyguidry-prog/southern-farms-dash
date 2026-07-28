@@ -94,6 +94,63 @@ export async function getSyncState(): Promise<SyncStateRow[]> {
   return (data ?? []) as SyncStateRow[]
 }
 
+export type SquareDataCounts = {
+  orders: number
+  payments: number
+  refunds: number
+  catalogItems: number
+  salesDays: number
+  earliestSale: string | null
+  latestSale: string | null
+}
+
+/**
+ * Row counts for the settings screen, so the owner can see at a glance whether
+ * Square data actually landed rather than having to trust a "success" message.
+ */
+export async function getSquareDataCounts(): Promise<SquareDataCounts> {
+  const supabase = await createClient()
+
+  const count = async (table: string) => {
+    const { count: c } = await supabase
+      .from(table)
+      .select('*', { count: 'exact', head: true })
+    return c ?? 0
+  }
+
+  const [orders, payments, refunds, catalogItems, salesDays] = await Promise.all([
+    count('square_orders'),
+    count('square_payments'),
+    count('square_refunds'),
+    count('square_catalog_objects'),
+    count('sales_daily'),
+  ])
+
+  // Range of real sale dates, so an empty state can say *why* it is empty.
+  const { data: earliest } = await supabase
+    .from('sales_daily')
+    .select('sale_date')
+    .order('sale_date', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+  const { data: latest } = await supabase
+    .from('sales_daily')
+    .select('sale_date')
+    .order('sale_date', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  return {
+    orders,
+    payments,
+    refunds,
+    catalogItems,
+    salesDays,
+    earliestSale: (earliest as { sale_date?: string } | null)?.sale_date ?? null,
+    latestSale: (latest as { sale_date?: string } | null)?.sale_date ?? null,
+  }
+}
+
 async function readState(resource: SyncResource): Promise<SyncStateRow | null> {
   const supabase = await createClient()
   const { data } = await supabase
@@ -202,16 +259,16 @@ export async function syncCatalog(): Promise<SyncOutcome> {
     const supabase = await createClient()
 
     const rows: Record<string, unknown>[] = []
-    let cursor: string | undefined
     let pages = 0
 
-    do {
-      const response = await withRetry(() =>
-        client.catalog.list({ types: 'ITEM,ITEM_VARIATION,CATEGORY', cursor }),
-      )
-      // The SDK exposes pages via an async iterator; `data` holds this page.
-      const objects = (response as { data?: unknown[] }).data ?? []
-      for (const raw of objects) {
+    // `catalog.list` returns a core.Page, which paginates via
+    // hasNextPage()/getNextPage() -- there is no `.cursor` on the page object.
+    let page = await withRetry(() =>
+      client.catalog.list({ types: 'ITEM,ITEM_VARIATION,CATEGORY' }),
+    )
+
+    for (;;) {
+      for (const raw of page.data ?? []) {
         const o = raw as {
           id?: string
           type?: string
@@ -251,9 +308,10 @@ export async function syncCatalog(): Promise<SyncOutcome> {
           synced_at: new Date().toISOString(),
         })
       }
-      cursor = (response as { cursor?: string }).cursor
       pages++
-    } while (cursor && pages < MAX_PAGES)
+      if (!page.hasNextPage() || pages >= MAX_PAGES) break
+      page = await withRetry(() => page.getNextPage())
+    }
 
     if (rows.length > 0) {
       const { error } = await supabase
@@ -532,20 +590,19 @@ export async function syncPayments(opts: {
 
     const rows: Record<string, unknown>[] = []
     const forRollup: PaymentSyncResult['payments'] = []
-    let cursor: string | undefined
     let pages = 0
 
-    do {
-      const response = await withRetry(() =>
-        client.payments.list({
-          beginTime: start.toISOString(),
-          endTime: runStart.toISOString(),
-          cursor,
-          sortOrder: 'ASC',
-        }),
-      )
-      const payments = (response as { data?: unknown[] }).data ?? []
-      for (const raw of payments) {
+    // `payments.list` returns a core.Page: walk it with hasNextPage()/getNextPage().
+    let page = await withRetry(() =>
+      client.payments.list({
+        beginTime: start.toISOString(),
+        endTime: runStart.toISOString(),
+        sortOrder: 'ASC',
+      }),
+    )
+
+    for (;;) {
+      for (const raw of page.data ?? []) {
         const p = raw as {
           id?: string
           orderId?: string
@@ -599,9 +656,10 @@ export async function syncPayments(opts: {
           status: p.status ?? null,
         })
       }
-      cursor = (response as { cursor?: string }).cursor
       pages++
-    } while (cursor && pages < MAX_PAGES)
+      if (!page.hasNextPage() || pages >= MAX_PAGES) break
+      page = await withRetry(() => page.getNextPage())
+    }
 
     for (const chunk of chunked(rows, 500)) {
       const { error } = await supabase
@@ -643,20 +701,19 @@ export async function syncRefunds(opts: {
 
     const rows: Record<string, unknown>[] = []
     const refundsByDate: Record<string, number> = {}
-    let cursor: string | undefined
     let pages = 0
 
-    do {
-      const response = await withRetry(() =>
-        client.refunds.list({
-          beginTime: start.toISOString(),
-          endTime: runStart.toISOString(),
-          cursor,
-          sortOrder: 'ASC',
-        }),
-      )
-      const refunds = (response as { data?: unknown[] }).data ?? []
-      for (const raw of refunds) {
+    // `refunds.list` returns a core.Page: walk it with hasNextPage()/getNextPage().
+    let page = await withRetry(() =>
+      client.refunds.list({
+        beginTime: start.toISOString(),
+        endTime: runStart.toISOString(),
+        sortOrder: 'ASC',
+      }),
+    )
+
+    for (;;) {
+      for (const raw of page.data ?? []) {
         const r = raw as {
           id?: string
           paymentId?: string
@@ -696,9 +753,10 @@ export async function syncRefunds(opts: {
           refundsByDate[saleDate] = round2((refundsByDate[saleDate] ?? 0) + amount)
         }
       }
-      cursor = (response as { cursor?: string }).cursor
       pages++
-    } while (cursor && pages < MAX_PAGES)
+      if (!page.hasNextPage() || pages >= MAX_PAGES) break
+      page = await withRetry(() => page.getNextPage())
+    }
 
     for (const chunk of chunked(rows, 500)) {
       const { error } = await supabase
