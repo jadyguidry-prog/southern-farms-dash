@@ -59,7 +59,9 @@ export function StatCard({
               ) : (
                 <ArrowDownRight className="size-3" aria-hidden="true" />
               )}
-              {Math.abs(change!)}%
+              {/* Round here rather than trusting callers: an unrounded ratio
+                  renders as "13.564812408387292%" and breaks the layout. */}
+              {Math.abs(change!).toFixed(1)}%
             </span>
           )}
           {(changeLabel || hint) && (
