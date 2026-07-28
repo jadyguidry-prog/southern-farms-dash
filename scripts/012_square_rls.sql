@@ -5,11 +5,15 @@
 -- already protected, so this closes an inconsistency rather than adding a new
 -- policy model.
 --
--- Access model matches the existing tables: any authenticated staff user can
--- read and write. There is no per-user ownership in this app — it is a single
--- business with a shared set of books.
+-- Access model is copied verbatim from the existing tables (verified against
+-- pg_policies for sales_monthly / sales_by_product / business_settings): RLS
+-- enabled, with four separate permissive policies named <table>_select /
+-- _insert / _update / _delete, each scoped to the `authenticated` role with a
+-- `true` predicate. There is no per-user ownership in this app -- it is a
+-- single business with one shared set of books.
 --
--- Additive and idempotent: safe to re-run.
+-- Additive and idempotent: safe to re-run. Nothing is dropped or modified
+-- except the policies this script itself owns.
 
 do $$
 declare
@@ -26,8 +30,7 @@ declare
     'square_csv_imports',
     'sales_daily',
     'sales_by_category',
-    'sales_by_employee',
-    'sales_source_rules'
+    'sales_by_employee'
   ];
 begin
   foreach t in array square_tables loop
@@ -41,12 +44,34 @@ begin
 
     execute format('alter table public.%I enable row level security', t);
 
-    -- Drop-then-create keeps the migration idempotent without needing
-    -- "create policy if not exists" (which Postgres does not support).
-    execute format('drop policy if exists %I on public.%I', t || '_rw', t);
+    -- Drop-then-create keeps this idempotent: Postgres has no
+    -- "create policy if not exists".
+    execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format(
-      'create policy %I on public.%I for all to authenticated using (true) with check (true)',
-      t || '_rw', t
+      'create policy %I on public.%I for select to authenticated using (true)',
+      t || '_select', t
     );
+
+    execute format('drop policy if exists %I on public.%I', t || '_insert', t);
+    execute format(
+      'create policy %I on public.%I for insert to authenticated with check (true)',
+      t || '_insert', t
+    );
+
+    execute format('drop policy if exists %I on public.%I', t || '_update', t);
+    execute format(
+      'create policy %I on public.%I for update to authenticated using (true) with check (true)',
+      t || '_update', t
+    );
+
+    execute format('drop policy if exists %I on public.%I', t || '_delete', t);
+    execute format(
+      'create policy %I on public.%I for delete to authenticated using (true)',
+      t || '_delete', t
+    );
+
+    -- Remove the earlier single-policy form, if a prior run of this script
+    -- created it, so the final state matches the project convention exactly.
+    execute format('drop policy if exists %I on public.%I', t || '_rw', t);
   end loop;
 end $$;
