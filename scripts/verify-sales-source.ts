@@ -9,7 +9,7 @@
 import {
   resolveMonthSales,
   resolveWinner,
-  asSalesSource,
+  asSalesDataSource,
   explainResolution,
   SOURCE_RANK,
 } from '../lib/sales-source'
@@ -34,10 +34,10 @@ eq(SOURCE_RANK.manual > SOURCE_RANK.square_api, true, 'rank: manual beats API')
 eq(SOURCE_RANK.square_api > SOURCE_RANK.square_csv, true, 'rank: API beats CSV')
 eq(SOURCE_RANK.square_csv > SOURCE_RANK.calculated, true, 'rank: CSV beats bank estimate')
 
-/* ---------------- asSalesSource ---------------- */
-eq(asSalesSource('manual'), 'manual', 'narrow: valid')
-eq(asSalesSource('nonsense'), null, 'narrow: invalid is null')
-eq(asSalesSource(null), null, 'narrow: null')
+/* ---------------- asSalesDataSource ---------------- */
+eq(asSalesDataSource('manual'), 'manual', 'narrow: valid')
+eq(asSalesDataSource('nonsense'), null, 'narrow: invalid is null')
+eq(asSalesDataSource(null), null, 'narrow: null')
 
 /* ---------------- resolveWinner ---------------- */
 eq(

@@ -14,18 +14,18 @@
  * Pure functions, no DB access, so the precedence rules can be tested directly.
  */
 
-export const SALES_SOURCES = ['square_api', 'square_csv', 'manual', 'calculated'] as const
+export const SALES_DATA_SOURCES = ['square_api', 'square_csv', 'manual', 'calculated'] as const
 
-export type SalesSource = (typeof SALES_SOURCES)[number]
+export type SalesDataSource = (typeof SALES_DATA_SOURCES)[number]
 
 /**
  * Named constants for the source values, so callers writing rows do not repeat
  * string literals that a typo would turn into an unranked, invisible source.
  */
-export const SOURCE_API: SalesSource = 'square_api'
-export const SOURCE_CSV: SalesSource = 'square_csv'
-export const SOURCE_MANUAL: SalesSource = 'manual'
-export const SOURCE_CALCULATED: SalesSource = 'calculated'
+export const SOURCE_API: SalesDataSource = 'square_api'
+export const SOURCE_CSV: SalesDataSource = 'square_csv'
+export const SOURCE_MANUAL: SalesDataSource = 'manual'
+export const SOURCE_CALCULATED: SalesDataSource = 'calculated'
 
 /**
  * Higher number wins.
@@ -35,21 +35,21 @@ export const SOURCE_CALCULATED: SalesSource = 'calculated'
  * (bank-derived) is the weakest because it is an estimate of sales, not a
  * record of them.
  */
-export const SOURCE_RANK: Record<SalesSource, number> = {
+export const SOURCE_RANK: Record<SalesDataSource, number> = {
   manual: 40,
   square_api: 30,
   square_csv: 20,
   calculated: 10,
 }
 
-export const SOURCE_LABELS: Record<SalesSource, string> = {
+export const SOURCE_LABELS: Record<SalesDataSource, string> = {
   square_api: 'Square (live sync)',
   square_csv: 'Square (CSV import)',
   manual: 'Entered by you',
   calculated: 'Estimated from bank deposits',
 }
 
-export const SOURCE_DESCRIPTIONS: Record<SalesSource, string> = {
+export const SOURCE_DESCRIPTIONS: Record<SalesDataSource, string> = {
   square_api: 'Pulled directly from your Square account.',
   square_csv: 'Imported from a Square CSV export.',
   manual: 'You typed this figure in, so it overrides the Square feeds.',
@@ -58,15 +58,15 @@ export const SOURCE_DESCRIPTIONS: Record<SalesSource, string> = {
 }
 
 /** Narrow an unknown string to a known source, or null. */
-export function asSalesSource(value: string | null | undefined): SalesSource | null {
+export function asSalesDataSource(value: string | null | undefined): SalesDataSource | null {
   if (!value) return null
-  return (SALES_SOURCES as readonly string[]).includes(value)
-    ? (value as SalesSource)
+  return (SALES_DATA_SOURCES as readonly string[]).includes(value)
+    ? (value as SalesDataSource)
     : null
 }
 
 export type SourceCandidate = {
-  source: SalesSource
+  source: SalesDataSource
   /** Null means "this source has no figure for this month". */
   value: number | null
 }
@@ -96,11 +96,11 @@ export type MonthSourceInput = {
 
 export type ResolvedMonth = {
   value: number | null
-  source: SalesSource | null
+  source: SalesDataSource | null
   /** True when more than one source has a figure and they disagree. */
   conflict: boolean
   /** Sources that disagree with the winner, for showing an explanation. */
-  competing: { source: SalesSource; value: number }[]
+  competing: { source: SalesDataSource; value: number }[]
   locked: boolean
 }
 
