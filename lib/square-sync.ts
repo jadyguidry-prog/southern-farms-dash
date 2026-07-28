@@ -16,6 +16,7 @@
  */
 import 'server-only'
 import { createClient } from '@/lib/supabase/server'
+import { createServiceClient } from '@/lib/supabase/service'
 import {
   getSquareClient,
   describeSquareError,
@@ -77,6 +78,36 @@ export type FullSyncResult = {
 /* Sync state                                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Resolve the Supabase client for sync work.
+ *
+ * The sync runs in two very different contexts:
+ *  - From the Settings screen ("Sync now"), inside a request, where the
+ *    cookie-bound client is correct and RLS applies as the signed-in user.
+ *  - From a schedule or a script, where there is no request and therefore no
+ *    `cookies()`. Without this fallback a scheduled sync is impossible, which
+ *    would defeat the point of using the API instead of manual CSV exports.
+ *
+ * Only the specific "outside a request scope" failure falls through to the
+ * service-role client. Any other error is rethrown, so a genuine Supabase
+ * misconfiguration surfaces instead of being silently upgraded to a
+ * privileged client.
+ */
+async function getSyncDb() {
+  try {
+    return await createClient()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    const outsideRequest =
+      message.includes('was called outside a request scope') ||
+      message.includes('requestAsyncStorage') ||
+      message.includes('work-unit-async-storage')
+
+    if (!outsideRequest) throw err
+    return createServiceClient()
+  }
+}
+
 type SyncStateRow = {
   resource: string
   cursor: string | null
@@ -89,7 +120,7 @@ type SyncStateRow = {
 }
 
 export async function getSyncState(): Promise<SyncStateRow[]> {
-  const supabase = await createClient()
+  const supabase = await getSyncDb()
   const { data } = await supabase.from('square_sync_state').select('*')
   return (data ?? []) as SyncStateRow[]
 }
@@ -109,7 +140,7 @@ export type SquareDataCounts = {
  * Square data actually landed rather than having to trust a "success" message.
  */
 export async function getSquareDataCounts(): Promise<SquareDataCounts> {
-  const supabase = await createClient()
+  const supabase = await getSyncDb()
 
   const count = async (table: string) => {
     const { count: c } = await supabase
@@ -152,7 +183,7 @@ export async function getSquareDataCounts(): Promise<SquareDataCounts> {
 }
 
 async function readState(resource: SyncResource): Promise<SyncStateRow | null> {
-  const supabase = await createClient()
+  const supabase = await getSyncDb()
   const { data } = await supabase
     .from('square_sync_state')
     .select('*')
@@ -165,7 +196,7 @@ async function writeState(
   resource: SyncResource,
   patch: Partial<Omit<SyncStateRow, 'resource'>>,
 ): Promise<void> {
-  const supabase = await createClient()
+  const supabase = await getSyncDb()
   await supabase
     .from('square_sync_state')
     .upsert(
@@ -197,7 +228,7 @@ export async function syncLocations(): Promise<SyncOutcome> {
   await writeState(resource, { last_run_at: new Date().toISOString(), status: 'running' })
   try {
     const client = getSquareClient()
-    const supabase = await createClient()
+    const supabase = await getSyncDb()
     const response = await withRetry(() => client.locations.list())
     const locations = response.locations ?? []
 
@@ -237,7 +268,7 @@ export async function syncLocations(): Promise<SyncOutcome> {
 
 /** The default location's timezone, used to bucket sales into the right day. */
 export async function getLocationTimezone(): Promise<string | null> {
-  const supabase = await createClient()
+  const supabase = await getSyncDb()
   const { data } = await supabase
     .from('square_locations')
     .select('timezone, is_default')
@@ -256,7 +287,7 @@ export async function syncCatalog(): Promise<SyncOutcome> {
   await writeState(resource, { last_run_at: new Date().toISOString(), status: 'running' })
   try {
     const client = getSquareClient()
-    const supabase = await createClient()
+    const supabase = await getSyncDb()
 
     const rows: Record<string, unknown>[] = []
     let pages = 0
@@ -339,7 +370,7 @@ export async function syncTeam(): Promise<SyncOutcome> {
   await writeState(resource, { last_run_at: new Date().toISOString(), status: 'running' })
   try {
     const client = getSquareClient()
-    const supabase = await createClient()
+    const supabase = await getSyncDb()
 
     const response = await withRetry(() => client.teamMembers.search({}))
     const members = response.teamMembers ?? []
@@ -405,7 +436,7 @@ export async function syncOrders(opts: {
   const empty = { orders: [] as NormalizedOrder[], affectedDates: [] as string[] }
   try {
     const client = getSquareClient()
-    const supabase = await createClient()
+    const supabase = await getSyncDb()
 
     let locationIds = opts.locationIds
     if (!locationIds || locationIds.length === 0) {
@@ -582,7 +613,7 @@ export async function syncPayments(opts: {
   await writeState(resource, { last_run_at: new Date().toISOString(), status: 'running' })
   try {
     const client = getSquareClient()
-    const supabase = await createClient()
+    const supabase = await getSyncDb()
     const state = await readState(resource)
     const defaultStart = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000)
     const start = opts.since ?? windowStart(state, defaultStart)
@@ -693,7 +724,7 @@ export async function syncRefunds(opts: {
   await writeState(resource, { last_run_at: new Date().toISOString(), status: 'running' })
   try {
     const client = getSquareClient()
-    const supabase = await createClient()
+    const supabase = await getSyncDb()
     const state = await readState(resource)
     const defaultStart = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000)
     const start = opts.since ?? windowStart(state, defaultStart)
@@ -799,7 +830,7 @@ export async function rebuildRollups(opts: {
   const resource: SyncResource = 'rollups'
   await writeState(resource, { last_run_at: new Date().toISOString(), status: 'running' })
   try {
-    const supabase = await createClient()
+    const supabase = await getSyncDb()
 
     // Recompute whole months, not just the changed days: a month's figure is a
     // sum over its days, so a partial-day update still needs the month total.
