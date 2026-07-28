@@ -251,12 +251,35 @@ export type Insight = {
   impact: string
 }
 
+/**
+ * Square point-of-sale figures for advisor insights.
+ *
+ * Optional throughout: when Square is not connected these stay undefined and no
+ * Square insights are produced, rather than insights built on zeros.
+ */
+export type SquareInsightInput = {
+  /** Trailing-week net sales, null when Square has no data. */
+  weeklyNetSales?: number | null
+  priorWeeklyNetSales?: number | null
+  /** Totals across all recorded Square history. */
+  totalNetSales?: number | null
+  totalRefunds?: number
+  totalProcessingFees?: number
+  /** Most recent day Square has data for, used to detect a stale feed. */
+  latestDate?: string | null
+  /** Days where two sources disagreed, surfaced as a data-quality warning. */
+  conflictDayCount?: number
+}
+
 type InsightInput = {
   settings: BusinessSettings
   pillars: HealthPillars
   /** Obligations still missing a due date, so scheduling can't be projected. */
   obligationsMissingDueDate?: { name: string; amount: number }[]
   overdueObligations?: number
+  square?: SquareInsightInput
+  /** Injectable clock so staleness tests are deterministic. */
+  now?: Date
 }
 
 /**
@@ -268,6 +291,8 @@ export function generateInsights({
   pillars,
   obligationsMissingDueDate = [],
   overdueObligations = 0,
+  square,
+  now,
 }: InsightInput): Insight[] {
   const out: Insight[] = []
   const { payroll, cash, sales } = pillars
@@ -387,6 +412,111 @@ export function generateInsights({
       detail: `You have ${overdueObligations} unpaid obligation${overdueObligations === 1 ? '' : 's'} with a due date in the past. Clearing or rescheduling ${overdueObligations === 1 ? 'it' : 'them'} keeps vendor terms and your forecast accurate.`,
       impact: 'Vendor standing',
     })
+  }
+
+  // --- Square point of sale ---
+  // Every branch below requires a real figure. Square being connected but empty
+  // must not manufacture insights about $0 of sales.
+  if (square) {
+    const {
+      weeklyNetSales,
+      priorWeeklyNetSales,
+      totalNetSales,
+      totalRefunds = 0,
+      totalProcessingFees = 0,
+      latestDate,
+      conflictDayCount = 0,
+    } = square
+
+    // Week-over-week movement, only when both weeks have real data.
+    if (
+      weeklyNetSales != null &&
+      priorWeeklyNetSales != null &&
+      priorWeeklyNetSales > 0
+    ) {
+      const delta =
+        ((weeklyNetSales - priorWeeklyNetSales) / priorWeeklyNetSales) * 100
+      if (delta <= -15) {
+        out.push({
+          id: 'auto-square-week-down',
+          severity: 'warning',
+          category: 'Sales',
+          title: `Register sales fell ${Math.abs(delta).toFixed(0)}% versus the prior week`,
+          detail: `Square recorded ${formatCurrency(weeklyNetSales)} this week against ${formatCurrency(priorWeeklyNetSales)} the week before. Check whether this is seasonal, a staffing gap, or stock running out on your best sellers.`,
+          impact: `${formatCurrency(priorWeeklyNetSales - weeklyNetSales)} lower`,
+        })
+      } else if (delta >= 15) {
+        out.push({
+          id: 'auto-square-week-up',
+          severity: 'opportunity',
+          category: 'Sales',
+          title: `Register sales rose ${delta.toFixed(0)}% versus the prior week`,
+          detail: `Square recorded ${formatCurrency(weeklyNetSales)} this week against ${formatCurrency(priorWeeklyNetSales)} the week before. Worth noting what drove it so you can repeat it.`,
+          impact: `${formatCurrency(weeklyNetSales - priorWeeklyNetSales)} higher`,
+        })
+      }
+    }
+
+    // Refund rate, as a share of net sales.
+    if (totalNetSales != null && totalNetSales > 0 && totalRefunds > 0) {
+      const refundRate = (totalRefunds / totalNetSales) * 100
+      if (refundRate >= 5) {
+        out.push({
+          id: 'auto-square-refunds',
+          severity: 'warning',
+          category: 'Sales',
+          title: `Refunds are ${refundRate.toFixed(1)}% of Square sales`,
+          detail: `${formatCurrency(totalRefunds)} has been refunded against ${formatCurrency(totalNetSales)} in net sales. A rate this high usually points to a product quality issue, a pricing error at the register, or repeated mis-rings.`,
+          impact: `${formatCurrency(totalRefunds)} refunded`,
+        })
+      }
+    }
+
+    // Card processing cost, which is easy to overlook because Square nets it out.
+    if (totalNetSales != null && totalNetSales > 0 && totalProcessingFees > 0) {
+      const feeRate = (totalProcessingFees / totalNetSales) * 100
+      if (feeRate >= 3.5) {
+        out.push({
+          id: 'auto-square-fees',
+          severity: 'warning',
+          category: 'Sales',
+          title: `Card processing is costing ${feeRate.toFixed(2)}% of sales`,
+          detail: `You have paid ${formatCurrency(totalProcessingFees)} in Square processing fees on ${formatCurrency(totalNetSales)} of net sales. Above roughly 3.5% it is worth reviewing your Square plan or encouraging cash on small purchases.`,
+          impact: `${formatCurrency(totalProcessingFees)} in fees`,
+        })
+      }
+    }
+
+    // A feed that has quietly stopped is worse than no feed, because the
+    // dashboard keeps showing an old number as if it were current.
+    if (latestDate) {
+      const reference = now ?? new Date()
+      const last = new Date(`${latestDate}T00:00:00Z`)
+      const daysBehind = Math.floor(
+        (reference.getTime() - last.getTime()) / 86_400_000,
+      )
+      if (daysBehind >= 7) {
+        out.push({
+          id: 'auto-square-stale',
+          severity: daysBehind >= 30 ? 'critical' : 'warning',
+          category: 'Setup',
+          title: `Square sales data is ${daysBehind} days behind`,
+          detail: `The most recent Square sale on record is from ${latestDate}. Any sales since then are missing from your dashboard and reports. Run a sync from Settings, or import a fresh CSV export.`,
+          impact: `${daysBehind} days missing`,
+        })
+      }
+    }
+
+    if (conflictDayCount > 0) {
+      out.push({
+        id: 'auto-square-conflicts',
+        severity: 'warning',
+        category: 'Setup',
+        title: `${conflictDayCount} day${conflictDayCount === 1 ? '' : 's'} of Square sales disagree between sources`,
+        detail: `For ${conflictDayCount} day${conflictDayCount === 1 ? '' : 's'}, the live Square sync and an imported CSV report different totals. The live sync is used, and each day is only counted once, but the mismatch is worth a look — it usually means the CSV covered a partial day.`,
+        impact: 'Data accuracy',
+      })
+    }
   }
 
   return out

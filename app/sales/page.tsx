@@ -11,16 +11,32 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
+import { SquareSalesSection } from '@/components/sales/square-sales-section'
 import { formatCurrency } from '@/lib/data'
 import { getSalesByProduct } from '@/lib/queries'
 import { getMonthlySalesDetail, previewCalculatedSales } from '@/lib/sales-service'
+import {
+  getSquareDailySales,
+  summarizeDailyRows,
+  getSquareCategoryBreakdown,
+} from '@/lib/square-sales-service'
+import { getSquareConfigState } from '@/lib/square-client'
 
 export default async function SalesPage() {
-  const [monthly, salesByProduct, preview] = await Promise.all([
-    getMonthlySalesDetail(),
-    getSalesByProduct(),
-    previewCalculatedSales(),
-  ])
+  const squareConfig = getSquareConfigState()
+  const [monthly, salesByProduct, preview, squareDaily, squareCategories] =
+    await Promise.all([
+      getMonthlySalesDetail(),
+      getSalesByProduct(),
+      previewCalculatedSales(),
+      getSquareDailySales(),
+      getSquareCategoryBreakdown(),
+    ])
+
+  const squareSummary = summarizeDailyRows(
+    squareDaily.rows,
+    squareDaily.conflictDays,
+  )
 
   // Derive the headline figures from the stored months themselves. The old
   // `weeklySales`/`grossProfitPct` KPI rows were never populated, so those cards
@@ -103,6 +119,15 @@ export default async function SalesPage() {
             <SalesTrendChart data={salesTrend} height={320} />
           </CardContent>
         </Card>
+      </div>
+
+      <div className="mt-4">
+        <SquareSalesSection
+          summary={squareSummary}
+          daily={squareDaily.rows}
+          categories={squareCategories}
+          configured={squareConfig.configured}
+        />
       </div>
 
       <div className="mt-4">

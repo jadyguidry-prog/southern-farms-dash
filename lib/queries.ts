@@ -8,6 +8,11 @@ import {
   generateInsights,
   resolveNextDueDate,
 } from '@/lib/health'
+import {
+  getSquareDailySales,
+  computeWeeklySales,
+  summarizeDailyRows,
+} from '@/lib/square-sales-service'
 
 // ---------- Types ----------
 export type KpiRow = {
@@ -700,8 +705,21 @@ export const getCashDebtSummary = cache(async () => {
  * both always agree, and every threshold comes from business_settings.
  */
 export async function getHealthSnapshot() {
-  const [rawKpis, summary] = await Promise.all([getKpis(), getCashDebtSummary()])
+  const [rawKpis, summary, squareDaily] = await Promise.all([
+    getKpis(),
+    getCashDebtSummary(),
+    getSquareDailySales(),
+  ])
   const settings = summary.settings
+
+  // Square is the only source that actually measures weekly sales. The stored
+  // `weeklySales` KPI was never populated, so without this the sales pillar sat
+  // permanently at "unknown".
+  const squareWeekly = computeWeeklySales(squareDaily.rows)
+  const squareSummary = summarizeDailyRows(
+    squareDaily.rows,
+    squareDaily.conflictDays,
+  )
 
   // Balance-sheet figures are always derived from the live account, receivable,
   // and obligation records rather than the stored `kpis` snapshot, so editing an
@@ -732,7 +750,14 @@ export async function getHealthSnapshot() {
   }
 
   const payrollValue = kpi(kpis, 'payrollPct').value
-  const weeklySalesValue = kpi(kpis, 'weeklySales').value
+  const storedWeeklySales = kpi(kpis, 'weeklySales').value
+
+  // Prefer the measured Square figure; fall back to the stored KPI so a farm
+  // without Square keeps its existing behaviour.
+  const weeklySalesValue =
+    squareWeekly.netSales != null && squareWeekly.netSales > 0
+      ? squareWeekly.netSales
+      : storedWeeklySales
 
   const pillars = {
     payroll: payrollHealth(payrollValue, settings, payrollValue > 0),
@@ -747,9 +772,46 @@ export async function getHealthSnapshot() {
     pillars,
     obligationsMissingDueDate: summary.obligationsMissingDueDate,
     overdueObligations: summary.overdueObligationsCount,
+    square: {
+      weeklyNetSales: squareWeekly.netSales,
+      priorWeeklyNetSales: squareWeekly.priorNetSales,
+      totalNetSales: squareSummary.netSales,
+      totalRefunds: squareSummary.refunds,
+      totalProcessingFees: squareSummary.processingFees,
+      latestDate: squareWeekly.latestDate,
+      conflictDayCount: squareSummary.conflictDays.length,
+    },
   })
 
-  return { kpis, settings, summary, pillars, composite, insights }
+  // Surface the weekly figure on the KPI the dashboard already renders, so the
+  // card and the health pillar can never show different numbers.
+  const kpisWithSquare: Kpis = {
+    ...kpis,
+    weeklySales: {
+      ...kpi(kpis, 'weeklySales'),
+      value: weeklySalesValue,
+      meta: {
+        ...kpi(kpis, 'weeklySales').meta,
+        ...(squareWeekly.netSales != null && squareWeekly.netSales > 0
+          ? {
+              source: 'Square',
+              daysCovered: squareWeekly.daysCovered,
+              throughDate: squareWeekly.latestDate ?? '',
+            }
+          : {}),
+      },
+    },
+  }
+
+  return {
+    kpis: kpisWithSquare,
+    settings,
+    summary,
+    pillars,
+    composite,
+    insights,
+    square: { weekly: squareWeekly, summary: squareSummary },
+  }
 }
 
 export async function getRecommendations() {
