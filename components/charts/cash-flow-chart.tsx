@@ -1,6 +1,6 @@
 'use client'
 
-import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts'
+import { Bar, BarChart, CartesianGrid, Cell, XAxis, YAxis } from 'recharts'
 import {
   ChartContainer,
   ChartTooltip,
@@ -15,11 +15,22 @@ const config = {
   outflow: { label: 'Cash Out', color: 'var(--chart-2)' },
 } satisfies ChartConfig
 
+/**
+ * `complete` is optional so existing callers keep working. When a month is
+ * flagged incomplete its bars are faded, because a month whose bank statement
+ * wasn't imported shows no deposits and would otherwise read as a total loss.
+ */
 export function CashFlowChart({
   data,
 }: {
-  data: { month: string; inflow: number; outflow: number }[]
+  data: {
+    month: string
+    inflow: number
+    outflow: number
+    complete?: boolean
+  }[]
 }) {
+  const fadeFor = (i: number) => (data[i]?.complete === false ? 0.35 : 1)
   return (
     <ChartContainer config={config} className="aspect-auto h-[300px] w-full">
       <BarChart data={data} margin={{ left: 4, right: 8, top: 8 }}>
@@ -37,8 +48,16 @@ export function CashFlowChart({
           }
         />
         <ChartLegend content={<ChartLegendContent />} />
-        <Bar dataKey="inflow" fill="var(--color-inflow)" radius={[4, 4, 0, 0]} />
-        <Bar dataKey="outflow" fill="var(--color-outflow)" radius={[4, 4, 0, 0]} />
+        <Bar dataKey="inflow" fill="var(--color-inflow)" radius={[4, 4, 0, 0]}>
+          {data.map((d, i) => (
+            <Cell key={`in-${d.month}`} fillOpacity={fadeFor(i)} />
+          ))}
+        </Bar>
+        <Bar dataKey="outflow" fill="var(--color-outflow)" radius={[4, 4, 0, 0]}>
+          {data.map((d, i) => (
+            <Cell key={`out-${d.month}`} fillOpacity={fadeFor(i)} />
+          ))}
+        </Bar>
       </BarChart>
     </ChartContainer>
   )

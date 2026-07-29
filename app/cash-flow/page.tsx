@@ -3,6 +3,8 @@ import { PageHeader } from '@/components/page-header'
 import { StatCard } from '@/components/stat-card'
 import { CashFlowChart } from '@/components/charts/cash-flow-chart'
 import { CashForecastChart } from '@/components/charts/cash-forecast-chart'
+import { WhereMoneyWent } from '@/components/cash-flow/where-money-went'
+import { SpendByCategory } from '@/components/cash-flow/spend-by-category'
 import {
   Card,
   CardContent,
@@ -25,14 +27,17 @@ import {
   getCashFlowMonthly,
   getCashForecast,
 } from '@/lib/queries'
+import { getCashFlowInsight, monthLabel } from '@/lib/cash-flow-service'
 
 export default async function CashFlowPage() {
-  const [bankAccounts, summary, cashFlowMonthly, cashForecast] = await Promise.all([
-    getBankAccounts(),
-    getCashDebtSummary(),
-    getCashFlowMonthly(),
-    getCashForecast(),
-  ])
+  const [bankAccounts, summary, cashFlowMonthly, cashForecast, insight] =
+    await Promise.all([
+      getBankAccounts(),
+      getCashDebtSummary(),
+      getCashFlowMonthly(),
+      getCashForecast(),
+      getCashFlowInsight(),
+    ])
 
   // Credit lines are a borrowing facility, not cash on hand, so they're listed
   // separately and excluded from the cash total.
