@@ -14,6 +14,21 @@ import {
   buildPayeeGroups,
   type GroupInputRow,
 } from '@/lib/transaction-groups'
+import {
+  UNCATEGORIZED,
+  CATEGORY_ALIASES,
+  CATEGORY_MERGE_SUGGESTIONS,
+  canonicalCategory,
+} from '@/lib/categories'
+
+// Re-exported so existing importers of these constants keep working after the
+// definitions moved to the DB-free `lib/categories` module.
+export {
+  UNCATEGORIZED,
+  CATEGORY_ALIASES,
+  CATEGORY_MERGE_SUGGESTIONS,
+  canonicalCategory,
+}
 
 /* ------------------------------------------------------------------ */
 /* Money direction                                                     */
@@ -306,56 +321,11 @@ export function summarizeOutflowsByPayee(
 /* ------------------------------------------------------------------ */
 /* Categories                                                          */
 /* ------------------------------------------------------------------ */
-
-export const UNCATEGORIZED = 'Uncategorized'
-
-/**
- * Reporting-only merges for values that are the same bucket spelled differently.
- *
- * Applied at display time; the stored `expense_category` and `vendors.category`
- * values are never rewritten. Every entry below was taken from values actually
- * present in the data, not an invented taxonomy. Ambiguous pairs are NOT here —
- * see `CATEGORY_MERGE_SUGGESTIONS`.
- */
-export const CATEGORY_ALIASES: Record<string, string> = {
-  // Packaging, spelled three ways across transactions and vendors.
-  'packaging': 'Packaging & Labels',
-  'labels & packaging': 'Packaging & Labels',
-  // Software.
-  'software': 'Software & Communications',
-  // Pest control.
-  'pest control': 'Facilities & Pest Control',
-  // Shipping.
-  'shipping': 'Shipping & Postage',
-  // Cost of goods, tracked as four separate product lines.
-  'meat / cogs': 'COGS',
-  'food / cogs': 'COGS',
-  'inventory / cogs': 'COGS',
-  'bakery / cogs': 'COGS',
-}
-
-/**
- * Pairs that look mergeable but mean different things depending on the owner's
- * intent. Surfaced in the UI as a question rather than merged automatically,
- * because collapsing them would change reported numbers without consent.
- */
-export const CATEGORY_MERGE_SUGGESTIONS: { values: string[]; note: string }[] = [
-  {
-    values: ['Equipment & Supplies', 'Equipment & Technology'],
-    note: 'Both cover equipment but may separate physical supplies from technology.',
-  },
-  {
-    values: ['Operating Supplies', 'General Supplies', 'Processing Supplies'],
-    note: 'Three supply buckets that may or may not be the same spend.',
-  },
-]
-
-/** Canonical display name for a stored category value. */
-export function canonicalCategory(raw: string): string {
-  const trimmed = (raw ?? '').trim()
-  if (!trimmed) return UNCATEGORIZED
-  return CATEGORY_ALIASES[trimmed.toLowerCase()] ?? trimmed
-}
+// The taxonomy constants (UNCATEGORIZED, CATEGORY_ALIASES,
+// CATEGORY_MERGE_SUGGESTIONS, canonicalCategory) live in the DB-free
+// `lib/categories` module and are imported + re-exported at the top of this
+// file. Only the row-shaped resolver below stays here, since it depends on
+// CashFlowInputRow.
 
 /**
  * Resolve a transaction's spending category.
