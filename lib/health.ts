@@ -637,7 +637,7 @@ export function generateInsights({
         severity: 'opportunity',
         category: 'Setup',
         title: `${mistypedCategoryCount} income categor${mistypedCategoryCount === 1 ? 'y is' : 'ies are'} attached to expense rows`,
-        detail: `Some transactions are typed as expenses but carry an income category such as a sales deposit. They are excluded from category spend totals to avoid overstating costs, but correcting the transaction type keeps future reports clean.`,
+        detail: `Some transactions are typed as expenses but carry an income category such as a sales deposit. They are still counted as spending, because the imported transaction type is what decides direction and nothing is changed automatically. If they are really deposits, correcting the transaction type on the Vendors page will lower reported spend.`,
         impact: 'Data accuracy',
       })
     }
