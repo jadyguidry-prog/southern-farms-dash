@@ -181,9 +181,9 @@ export default async function CashFlowPage() {
             <CashForecastChart data={cashForecast} />
             {summary.unscheduledObligations > 0 && (
               <p className="mt-2 text-xs text-muted-foreground text-pretty">
-                {formatCurrency(summary.unscheduledObligations)} in obligations has
-                no due date and is excluded. Add due dates on the Cash &amp; Debt
-                page for a complete forecast.
+                {formatCurrency(summary.unscheduledObligations)}{' '}
+                in obligations has no due date and is excluded. Add due dates on
+                the Cash &amp; Debt page for a complete forecast.
               </p>
             )}
           </CardContent>

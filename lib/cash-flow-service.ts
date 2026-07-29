@@ -554,7 +554,9 @@ export type CashFlowInsight = {
  * Returns empty structures rather than throwing when nothing is imported, so
  * the page can show an honest empty state instead of an error.
  */
-export async function getCashFlowInsight(): Promise<CashFlowInsight> {
+export async function getCashFlowInsight(
+  options: { months?: number } = {},
+): Promise<CashFlowInsight> {
   const [rows, vendorCategories] = await Promise.all([
     fetchAllTransactions(),
     fetchVendorCategories(),
@@ -566,7 +568,7 @@ export async function getCashFlowInsight(): Promise<CashFlowInsight> {
     .sort()
 
   return {
-    monthly: deriveMonthlyCashFlow(rows),
+    monthly: deriveMonthlyCashFlow(rows, options),
     outflows: summarizeOutflowsByPayee(rows),
     spendByCategory: summarizeSpendByCategory(rows, vendorCategories),
     transactionCount: rows.length,

@@ -1,6 +1,8 @@
 import { PageHeader } from '@/components/page-header'
 import { AdminPanel } from '@/components/admin/admin-panel'
 import { SquareCsvImport } from '@/components/admin/square-csv-import'
+import { CashFlowReport } from '@/components/admin/cash-flow-report'
+import { getCashFlowInsight } from '@/lib/cash-flow-service'
 import { createClient } from '@/lib/supabase/server'
 import { ADMIN_TABLES } from '@/lib/admin-config'
 import {
@@ -27,7 +29,12 @@ export default async function AdminPage() {
   )
 
   const data = Object.fromEntries(results) as Record<string, Record<string, unknown>[]>
-  const batches = await getCsvImportBatches()
+  const [batches, cashFlowInsight] = await Promise.all([
+    getCsvImportBatches(),
+    // Reporting shows every imported month, not the dashboard's trailing 12, so
+    // the Total reconciles against the full set of statements on file.
+    getCashFlowInsight({ months: Number.MAX_SAFE_INTEGER }),
+  ])
 
   return (
     <div>
@@ -36,6 +43,8 @@ export default async function AdminPage() {
         description="Add, import, and manage the financial records that power your dashboard. Changes appear across all pages immediately."
       />
       <div className="mb-6 flex flex-col gap-4">
+        <CashFlowReport insight={cashFlowInsight} />
+
         <SquareCsvImport
           onPreflight={preflightDailyImport}
           onImportDaily={importDailyCsv}

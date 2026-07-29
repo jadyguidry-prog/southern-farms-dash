@@ -10,6 +10,7 @@ import {
   Sparkles,
   ArrowRight,
   AlertTriangle,
+  Scale,
 } from 'lucide-react'
 import { PageHeader } from '@/components/page-header'
 import { StatCard } from '@/components/stat-card'
@@ -61,6 +62,7 @@ export default async function DashboardPage() {
           complete: m.complete,
         }))
       : cashFlowMonthly
+  const latestComplete = cashFlow.monthly.latestCompleteMonth
 
   const cashOnHand = kpi(kpis, 'cashOnHand')
   const lineOfCredit = kpi(kpis, 'lineOfCredit')
@@ -148,6 +150,17 @@ export default async function DashboardPage() {
           trend={asTrend(inventoryValue.trend)}
           changeLabel="at cost"
         />
+        {/* Actual money in vs out for the last month with a full picture.
+            Rendered only when real transactions exist — a month missing its
+            deposit account would read as a loss rather than as missing data. */}
+        {latestComplete && (
+          <StatCard
+            label={`Net Cash Movement — ${latestComplete.month}`}
+            value={formatCurrency(latestComplete.net)}
+            icon={Scale}
+            hint={`${formatCurrency(latestComplete.inflow, { compact: true })} in · ${formatCurrency(latestComplete.outflow, { compact: true })} out`}
+          />
+        )}
         <Card className="gap-0 py-0">
           <CardContent className="p-5">
             <div className="flex items-start justify-between gap-3">
