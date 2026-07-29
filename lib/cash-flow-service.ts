@@ -19,6 +19,8 @@ import {
   CATEGORY_ALIASES,
   CATEGORY_MERGE_SUGGESTIONS,
   canonicalCategory,
+  buildApprovedAliasMap,
+  type CategoryAliasMap,
 } from '@/lib/categories'
 
 // Re-exported so existing importers of these constants keep working after the
@@ -337,14 +339,22 @@ export function summarizeOutflowsByPayee(
 export function resolveExpenseCategory(
   row: Pick<CashFlowInputRow, 'expenseCategory' | 'vendorId'>,
   vendorCategories: Map<string, string>,
+  approvedAliases?: CategoryAliasMap,
 ): { category: string; source: 'transaction' | 'vendor' | 'none' } {
   const own = (row.expenseCategory ?? '').trim()
-  if (own) return { category: canonicalCategory(own), source: 'transaction' }
+  if (own) {
+    return { category: canonicalCategory(own, approvedAliases), source: 'transaction' }
+  }
 
   const vendorCat = row.vendorId
     ? (vendorCategories.get(row.vendorId) ?? '').trim()
     : ''
-  if (vendorCat) return { category: canonicalCategory(vendorCat), source: 'vendor' }
+  if (vendorCat) {
+    return {
+      category: canonicalCategory(vendorCat, approvedAliases),
+      source: 'vendor',
+    }
+  }
 
   return { category: UNCATEGORIZED, source: 'none' }
 }
@@ -385,6 +395,7 @@ const INCOME_CATEGORY_HINTS = ['sales deposit', 'loan proceeds', 'deposit', 'inc
 export function summarizeSpendByCategory(
   rows: CashFlowInputRow[],
   vendorCategories: Map<string, string>,
+  approvedAliases?: CategoryAliasMap,
 ): SpendByCategory {
   const buckets = new Map<
     string,
@@ -399,7 +410,11 @@ export function summarizeSpendByCategory(
 
     const magnitude = Math.abs(Number(row.amount) || 0)
     const signed = direction === 'out' ? magnitude : -magnitude
-    const { category } = resolveExpenseCategory(row, vendorCategories)
+    const { category } = resolveExpenseCategory(
+      row,
+      vendorCategories,
+      approvedAliases,
+    )
 
     const raw = (row.expenseCategory ?? '').trim()
     if (raw && INCOME_CATEGORY_HINTS.includes(raw.toLowerCase())) {
@@ -510,6 +525,26 @@ async function fetchVendorCategories(): Promise<Map<string, string>> {
   return map
 }
 
+/**
+ * Owner-approved category merges, as a display-only alias map. Approving a merge
+ * NEVER rewrites a stored `expense_category`; it records an approved proposal
+ * here, and this map folds those labels together only for reporting.
+ */
+async function fetchApprovedAliasMap(): Promise<CategoryAliasMap> {
+  const supabase = await createClient()
+  const { data } = await supabase
+    .from('category_merge_proposals')
+    .select('from_categories, to_category')
+    .eq('status', 'approved')
+
+  return buildApprovedAliasMap(
+    (data ?? []).map((p) => ({
+      fromCategories: (p.from_categories as string[]) ?? [],
+      toCategory: String(p.to_category ?? ''),
+    })),
+  )
+}
+
 export type CashFlowInsight = {
   monthly: MonthlyCashFlowResult
   outflows: OutflowsByPayee
@@ -527,9 +562,10 @@ export type CashFlowInsight = {
 export async function getCashFlowInsight(
   options: { months?: number } = {},
 ): Promise<CashFlowInsight> {
-  const [rows, vendorCategories] = await Promise.all([
+  const [rows, vendorCategories, approvedAliases] = await Promise.all([
     fetchAllTransactions(),
     fetchVendorCategories(),
+    fetchApprovedAliasMap(),
   ])
 
   const dates = rows
@@ -540,7 +576,11 @@ export async function getCashFlowInsight(
   return {
     monthly: deriveMonthlyCashFlow(rows, options),
     outflows: summarizeOutflowsByPayee(rows),
-    spendByCategory: summarizeSpendByCategory(rows, vendorCategories),
+    spendByCategory: summarizeSpendByCategory(
+      rows,
+      vendorCategories,
+      approvedAliases,
+    ),
     transactionCount: rows.length,
     dateRange:
       dates.length > 0

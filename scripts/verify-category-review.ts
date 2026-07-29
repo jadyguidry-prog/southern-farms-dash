@@ -11,6 +11,8 @@
 import {
   normalizeCategoryKey,
   proposeCategoryMerges,
+  canonicalCategory,
+  buildApprovedAliasMap,
   type CategoryUsage,
 } from '../lib/categories'
 import {
@@ -186,6 +188,43 @@ function check(
 
 eq(summarizeChecks([]).totalChecks, 0, 'checks: empty input')
 eq(summarizeChecks([]).numberRange, null, 'checks: empty range is null')
+
+/* ---------------- approved-merge aliases (the preservation guarantee) ------ */
+{
+  // An approved merge is a DISPLAY alias only. These tests lock in that
+  // canonicalCategory folds approved source labels into the target without any
+  // stored value being involved, and that undoing (empty map) reverts cleanly.
+  const aliases = buildApprovedAliasMap([
+    { fromCategories: ['Packaging', 'Labels & Packaging'], toCategory: 'Packaging & Labels' },
+    { fromCategories: ['Meat / COGS', 'Food / COGS'], toCategory: 'COGS' },
+  ])
+  eq(aliases['packaging'], 'Packaging & Labels', 'alias: source folds to target (lowercased key)')
+  eq(aliases['labels & packaging'], 'Packaging & Labels', 'alias: second source folds too')
+  eq(aliases['meat / cogs'], 'COGS', 'alias: second proposal captured')
+
+  eq(
+    canonicalCategory('Packaging', aliases),
+    'Packaging & Labels',
+    'canonical: approved alias applies',
+  )
+  // Approved alias overrides the static seed for the same key.
+  eq(
+    canonicalCategory('software', { software: 'Tech' }),
+    'Tech',
+    'canonical: approved alias beats static seed',
+  )
+  // With no approved map, an un-seeded label passes through unchanged — i.e.
+  // undoing a merge (removing its alias) restores the original display value.
+  eq(
+    canonicalCategory('Consulting', {}),
+    'Consulting',
+    'canonical: no alias leaves value untouched (undo restores display)',
+  )
+  // Blank stays Uncategorized regardless of alias map.
+  eq(canonicalCategory('', aliases), 'Uncategorized', 'canonical: blank stays Uncategorized')
+}
+
+eq(buildApprovedAliasMap([]).packaging, undefined, 'alias: empty approvals yield empty map')
 
 /* ---------------- report ---------------- */
 console.log(`\ncategory-review + check-review: ${pass} passed, ${fail} failed`)

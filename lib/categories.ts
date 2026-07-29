@@ -50,11 +50,48 @@ export const CATEGORY_MERGE_SUGGESTIONS: { values: string[]; note: string }[] = 
   },
 ]
 
-/** Canonical display name for a stored category value. */
-export function canonicalCategory(raw: string): string {
+/**
+ * A display-only alias map keyed by lowercased raw category label. Built at
+ * runtime from the owner's *approved* merge proposals and layered on top of the
+ * static seed aliases. This is how an approved merge takes effect: purely at
+ * display time, without ever rewriting a stored `expense_category`.
+ */
+export type CategoryAliasMap = Record<string, string>
+
+/**
+ * Canonical display name for a stored category value.
+ *
+ * `approvedAliases` (owner-approved merges) take precedence over the static
+ * seed map so a later decision can override the shipped default. Passing
+ * nothing preserves the original pure behaviour, which the unit tests rely on.
+ */
+export function canonicalCategory(
+  raw: string,
+  approvedAliases?: CategoryAliasMap,
+): string {
   const trimmed = (raw ?? '').trim()
   if (!trimmed) return UNCATEGORIZED
-  return CATEGORY_ALIASES[trimmed.toLowerCase()] ?? trimmed
+  const key = trimmed.toLowerCase()
+  return approvedAliases?.[key] ?? CATEGORY_ALIASES[key] ?? trimmed
+}
+
+/**
+ * Turn the owner's approved merges into a display alias map. Each approved
+ * proposal folds every `fromCategories` label into its `toCategory`.
+ */
+export function buildApprovedAliasMap(
+  approved: { fromCategories: string[]; toCategory: string }[],
+): CategoryAliasMap {
+  const map: CategoryAliasMap = {}
+  for (const p of approved) {
+    const to = (p.toCategory ?? '').trim()
+    if (!to) continue
+    for (const from of p.fromCategories ?? []) {
+      const key = (from ?? '').trim().toLowerCase()
+      if (key) map[key] = to
+    }
+  }
+  return map
 }
 
 /**

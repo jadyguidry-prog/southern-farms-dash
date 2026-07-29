@@ -77,38 +77,19 @@ export async function approveMerge(input: {
   const actor = await actorEmail(supabase)
   const bulkActionId = randomUUID()
 
-  // Only rows that still carry one of the source labels need changing.
+  // A merge is display-only. We deliberately DO NOT touch any stored
+  // `expense_category`; instead we measure the impact for the confirmation
+  // record and persist an approved proposal, which the reporting layer reads as
+  // an alias. The owner's raw data is never overwritten, so a merge is always
+  // perfectly reversible by simply retiring the proposal.
   const { data: rows, error: fetchErr } = await supabase
     .from('financial_transactions')
-    .select('id, expense_category, amount, vendor_id')
+    .select('amount, vendor_id')
     .is('deleted_at', null)
     .in('expense_category', from)
-
   if (fetchErr) return { ok: false, error: fetchErr.message }
+
   const targets = rows ?? []
-
-  if (targets.length > 0) {
-    const audit = targets.map((r) => ({
-      transaction_id: r.id,
-      field: 'expense_category',
-      previous_value: String(r.expense_category ?? ''),
-      new_value: to,
-      action: 'category_merge',
-      bulk_action_id: bulkActionId,
-      actor_email: actor,
-      reason: input.reason ?? `Merged ${from.length} labels into ${to}.`,
-    }))
-    const auditErr = await insertAuditInChunks(supabase, audit)
-    if (auditErr) return { ok: false, error: auditErr }
-
-    const updErr = await updateInChunks(
-      supabase,
-      targets.map((r) => String(r.id)),
-      { expense_category: to },
-    )
-    if (updErr) return { ok: false, error: updErr }
-  }
-
   const totalAmount = targets.reduce(
     (s, r) => s + Math.abs(Number(r.amount) || 0),
     0,
@@ -132,6 +113,24 @@ export async function approveMerge(input: {
       proposed_reason: input.reason ?? null,
     })
   if (propErr) return { ok: false, error: propErr.message }
+
+  // One history row (not tied to any transaction) so the merge shows in
+  // "Recent changes" and can be undone through the same path as other actions.
+  const auditErr = await insertAuditInChunks(supabase, [
+    {
+      transaction_id: null,
+      field: '_category_merge',
+      previous_value: from.join(', '),
+      new_value: to,
+      action: 'category_merge',
+      bulk_action_id: bulkActionId,
+      actor_email: actor,
+      reason:
+        input.reason ??
+        `Grouped ${from.length} labels under ${to} for reporting (display only).`,
+    },
+  ])
+  if (auditErr) return { ok: false, error: auditErr }
 
   revalidateAll()
   return { ok: true, updated: targets.length, bulkActionId }
@@ -275,9 +274,16 @@ export async function revertBulkAction(bulkActionId: string): Promise<ActionResu
     return { ok: false, error: 'Nothing to undo — already reverted.' }
   }
 
+  // Merge history rows (`_category_merge`) never changed a transaction, so there
+  // is nothing to restore — only rows that recorded a real column change and
+  // carry a transaction_id get their previous value put back.
+  const dataEntries = entries.filter(
+    (e) => e.transaction_id && e.field !== '_category_merge',
+  )
+
   // Group by (field, previous_value) so each distinct restore is one update.
   const groups = new Map<string, { field: string; value: string; ids: string[] }>()
-  for (const e of entries) {
+  for (const e of dataEntries) {
     const field = String(e.field)
     const value = e.previous_value == null ? '' : String(e.previous_value)
     const key = `${field}::${value}`
@@ -299,10 +305,11 @@ export async function revertBulkAction(bulkActionId: string): Promise<ActionResu
     .eq('bulk_action_id', bulkActionId)
     .is('reverted_at', null)
 
-  // A reverted merge returns to a pending decision so it can be re-proposed.
+  // A reverted merge is retired to 'rejected' so its alias stops applying and it
+  // is not re-suggested; the owner can always merge again from scratch.
   await supabase
     .from('category_merge_proposals')
-    .update({ status: 'pending', decided_at: null, decided_by: null })
+    .update({ status: 'rejected', decided_at: now })
     .eq('bulk_action_id', bulkActionId)
 
   revalidateAll()
