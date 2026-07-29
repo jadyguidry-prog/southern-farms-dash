@@ -11,6 +11,7 @@ import {
   ShoppingCart,
   Truck,
   Receipt,
+  ListChecks,
   Store,
   Landmark,
   Wallet,
@@ -48,6 +49,7 @@ const navSections = [
     items: [
       { label: 'Vendor Management', href: '/vendors', icon: Truck },
       { label: 'Transactions', href: '/vendors/transactions', icon: Receipt },
+      { label: 'Category Review', href: '/category-review', icon: ListChecks },
       { label: 'Wholesale Customers', href: '/wholesale', icon: Store },
     ],
   },

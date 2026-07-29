@@ -17,6 +17,7 @@ import { StatCard } from '@/components/stat-card'
 import { CashForecastChart } from '@/components/charts/cash-forecast-chart'
 import { CashFlowChart } from '@/components/charts/cash-flow-chart'
 import { RadialStat } from '@/components/charts/radial-stat'
+import { ReviewNudge } from '@/components/cash-flow/review-nudge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -90,6 +91,8 @@ export default async function DashboardPage() {
         title="Good morning — here's your business at a glance"
         description="Southern Farms Specialty Meats · Fiscal Year 2026. A real-time view of cash, credit, receivables, and operating performance."
       />
+
+      <ReviewNudge insight={cashFlow} className="mb-6" />
 
       {/* Primary KPIs */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">

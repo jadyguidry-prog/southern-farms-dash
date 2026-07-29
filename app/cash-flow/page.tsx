@@ -5,6 +5,7 @@ import { CashFlowChart } from '@/components/charts/cash-flow-chart'
 import { CashForecastChart } from '@/components/charts/cash-forecast-chart'
 import { WhereMoneyWent } from '@/components/cash-flow/where-money-went'
 import { SpendByCategory } from '@/components/cash-flow/spend-by-category'
+import { ReviewNudge } from '@/components/cash-flow/review-nudge'
 import {
   Card,
   CardContent,
@@ -92,6 +93,8 @@ export default async function CashFlowPage() {
         title="Cash Flow"
         description="Track inflows, outflows, and projected liquidity across all operating accounts."
       />
+
+      <ReviewNudge insight={insight} className="mb-4" />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
