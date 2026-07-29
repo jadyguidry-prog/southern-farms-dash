@@ -271,6 +271,33 @@ export type SquareInsightInput = {
   conflictDayCount?: number
 }
 
+/**
+ * Bank-derived cash movement for advisor insights.
+ *
+ * Optional throughout, like the Square group: with no imported transactions
+ * these stay undefined and no cash-flow insights are produced, rather than
+ * insights asserted from zeros.
+ */
+export type CashFlowInsightInput = {
+  /** Newest month having both deposits and spending. */
+  latestCompleteMonth?: {
+    month: string
+    inflow: number
+    outflow: number
+    net: number
+  } | null
+  /** Largest identified outflow destination. */
+  topPayee?: { payee: string; amount: number; share: number } | null
+  /** Spend the bank never attributed to a payee, e.g. plain `CHECK` lines. */
+  unidentifiedOutflow?: { amount: number; count: number; share: number } | null
+  /** Share of spend carrying a category, measured in dollars. */
+  categoryCoverage?: number | null
+  /** Months present but missing their deposit account. */
+  incompleteMonthCount?: number
+  /** Categories that look like income but sit on expense rows. */
+  mistypedCategoryCount?: number
+}
+
 type InsightInput = {
   settings: BusinessSettings
   pillars: HealthPillars
@@ -278,6 +305,7 @@ type InsightInput = {
   obligationsMissingDueDate?: { name: string; amount: number }[]
   overdueObligations?: number
   square?: SquareInsightInput
+  cashFlow?: CashFlowInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
 }
@@ -292,6 +320,7 @@ export function generateInsights({
   obligationsMissingDueDate = [],
   overdueObligations = 0,
   square,
+  cashFlow,
   now,
 }: InsightInput): Insight[] {
   const out: Insight[] = []
@@ -514,6 +543,101 @@ export function generateInsights({
         category: 'Setup',
         title: `${conflictDayCount} day${conflictDayCount === 1 ? '' : 's'} of Square sales disagree between sources`,
         detail: `For ${conflictDayCount} day${conflictDayCount === 1 ? '' : 's'}, the live Square sync and an imported CSV report different totals. The live sync is used, and each day is only counted once, but the mismatch is worth a look — it usually means the CSV covered a partial day.`,
+        impact: 'Data accuracy',
+      })
+    }
+  }
+
+  // --- Bank cash flow ---
+  if (cashFlow) {
+    const {
+      latestCompleteMonth,
+      topPayee,
+      unidentifiedOutflow,
+      categoryCoverage,
+      incompleteMonthCount = 0,
+      mistypedCategoryCount = 0,
+    } = cashFlow
+
+    // Net movement for the newest trustworthy month. A card-only month is
+    // deliberately excluded upstream, since it shows spending with no deposits
+    // and would read as a total loss.
+    if (latestCompleteMonth) {
+      const { month, inflow, outflow, net } = latestCompleteMonth
+      if (net < 0) {
+        out.push({
+          id: 'auto-cashflow-negative',
+          severity: 'warning',
+          category: 'Cash',
+          title: `${month} spent ${formatCurrency(Math.abs(net))} more than it took in`,
+          detail: `Bank activity for ${month} shows ${formatCurrency(inflow)} in and ${formatCurrency(outflow)} out. One month of negative movement isn't necessarily a problem, but repeated months draw down the cash reserve.`,
+          impact: `Net ${formatCurrency(net)} in ${month}`,
+        })
+      } else {
+        out.push({
+          id: 'auto-cashflow-positive',
+          severity: 'opportunity',
+          category: 'Cash',
+          title: `${month} finished cash positive`,
+          detail: `Bank activity for ${month} shows ${formatCurrency(inflow)} in against ${formatCurrency(outflow)} out, adding ${formatCurrency(net)} to cash.`,
+          impact: `Net ${formatCurrency(net)} in ${month}`,
+        })
+      }
+    }
+
+    // Concentration risk: one payee taking an outsized share of spend.
+    if (topPayee && topPayee.share >= 0.1) {
+      out.push({
+        id: 'auto-cashflow-top-payee',
+        severity: topPayee.share >= 0.25 ? 'warning' : 'opportunity',
+        category: 'Cash',
+        title: `${topPayee.payee} is ${formatPercent(topPayee.share * 100, 0)} of identified spending`,
+        detail: `${formatCurrency(topPayee.amount)} has gone to ${topPayee.payee}. A supplier this large is worth a pricing or terms conversation, and concentration is a risk if they raise prices.`,
+        impact: `${formatCurrency(topPayee.amount)} total`,
+      })
+    }
+
+    // The honest ceiling on this whole module: unattributed spend.
+    if (unidentifiedOutflow && unidentifiedOutflow.share >= 0.2) {
+      out.push({
+        id: 'auto-cashflow-unidentified',
+        severity: 'warning',
+        category: 'Setup',
+        title: `${formatPercent(unidentifiedOutflow.share * 100, 0)} of spending has no identifiable payee`,
+        detail: `${formatCurrency(unidentifiedOutflow.amount)} across ${unidentifiedOutflow.count} transactions is described only as a check or generic withdrawal, so no rule can attribute it automatically. Your bank export carries no payee or check number for these. Reconciling them against check stubs is the only way to see where that money actually went.`,
+        impact: `${formatCurrency(unidentifiedOutflow.amount)} unattributed`,
+      })
+    }
+
+    if (categoryCoverage != null && categoryCoverage < 0.8) {
+      out.push({
+        id: 'auto-cashflow-coverage',
+        severity: 'opportunity',
+        category: 'Setup',
+        title: `Only ${formatPercent(categoryCoverage * 100, 0)} of spending is categorized`,
+        detail: `Category totals cover ${formatPercent(categoryCoverage * 100, 0)} of dollars spent, so the breakdown is partial. Assigning categories to your largest vendors lifts coverage fastest, since spending is concentrated in a handful of payees.`,
+        impact: 'Reporting completeness',
+      })
+    }
+
+    if (incompleteMonthCount > 0) {
+      out.push({
+        id: 'auto-cashflow-incomplete-months',
+        severity: 'warning',
+        category: 'Setup',
+        title: `${incompleteMonthCount} month${incompleteMonthCount === 1 ? ' is' : 's are'} missing bank deposits`,
+        detail: `${incompleteMonthCount} month${incompleteMonthCount === 1 ? ' has' : 's have'} card activity but no deposit account imported, so ${incompleteMonthCount === 1 ? 'it shows' : 'they show'} spending with no income. Importing the matching checking statements will correct those months.`,
+        impact: 'Data completeness',
+      })
+    }
+
+    if (mistypedCategoryCount > 0) {
+      out.push({
+        id: 'auto-cashflow-mistyped',
+        severity: 'opportunity',
+        category: 'Setup',
+        title: `${mistypedCategoryCount} income categor${mistypedCategoryCount === 1 ? 'y is' : 'ies are'} attached to expense rows`,
+        detail: `Some transactions are typed as expenses but carry an income category such as a sales deposit. They are excluded from category spend totals to avoid overstating costs, but correcting the transaction type keeps future reports clean.`,
         impact: 'Data accuracy',
       })
     }

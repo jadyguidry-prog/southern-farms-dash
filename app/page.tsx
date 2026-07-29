@@ -45,9 +45,22 @@ export default async function DashboardPage() {
     getRecommendations(),
   ])
 
-  const { kpis, settings, pillars, composite, insights } = snapshot
+  const { kpis, settings, pillars, composite, insights, cashFlow } = snapshot
   // Generated insights lead, followed by anything entered manually.
   const recommendations = [...insights, ...saved]
+
+  // Prefer cash flow derived from real bank transactions; the legacy
+  // cash_flow_monthly table is empty and has no year column to order by.
+  const derivedCashFlow = cashFlow.monthly.series
+  const cashFlowData =
+    derivedCashFlow.length > 0
+      ? derivedCashFlow.map((m) => ({
+          month: m.month,
+          inflow: m.inflow,
+          outflow: m.outflow,
+          complete: m.complete,
+        }))
+      : cashFlowMonthly
 
   const cashOnHand = kpi(kpis, 'cashOnHand')
   const lineOfCredit = kpi(kpis, 'lineOfCredit')
@@ -305,7 +318,16 @@ export default async function DashboardPage() {
             <CardDescription>Monthly operating cash flow · trailing 12 months</CardDescription>
           </CardHeader>
           <CardContent>
-            <CashFlowChart data={cashFlowMonthly} />
+            {cashFlowData.length > 0 ? (
+              <CashFlowChart data={cashFlowData} />
+            ) : (
+              <div className="flex h-[300px] items-center justify-center">
+                <p className="max-w-xs text-center text-sm text-muted-foreground text-pretty">
+                  No bank transactions imported yet. Import statements from the
+                  Vendors page to see monthly cash in and out.
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

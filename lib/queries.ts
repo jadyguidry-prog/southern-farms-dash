@@ -13,6 +13,7 @@ import {
   computeWeeklySales,
   summarizeDailyRows,
 } from '@/lib/square-sales-service'
+import { getCashFlowInsight } from '@/lib/cash-flow-service'
 
 // ---------- Types ----------
 export type KpiRow = {
@@ -705,10 +706,11 @@ export const getCashDebtSummary = cache(async () => {
  * both always agree, and every threshold comes from business_settings.
  */
 export async function getHealthSnapshot() {
-  const [rawKpis, summary, squareDaily] = await Promise.all([
+  const [rawKpis, summary, squareDaily, cashFlowInsight] = await Promise.all([
     getKpis(),
     getCashDebtSummary(),
     getSquareDailySales(),
+    getCashFlowInsight(),
   ])
   const settings = summary.settings
 
@@ -781,6 +783,39 @@ export async function getHealthSnapshot() {
       latestDate: squareWeekly.latestDate,
       conflictDayCount: squareSummary.conflictDays.length,
     },
+    // Only pass the group when transactions actually exist, so a farm with no
+    // imported bank data gets no cash-flow insights rather than ones built on
+    // zeros.
+    cashFlow:
+      cashFlowInsight.transactionCount > 0
+        ? {
+            latestCompleteMonth: cashFlowInsight.monthly.latestCompleteMonth
+              ? {
+                  month: cashFlowInsight.monthly.latestCompleteMonth.month,
+                  inflow: cashFlowInsight.monthly.latestCompleteMonth.inflow,
+                  outflow: cashFlowInsight.monthly.latestCompleteMonth.outflow,
+                  net: cashFlowInsight.monthly.latestCompleteMonth.net,
+                }
+              : null,
+            topPayee: cashFlowInsight.outflows.payees[0]
+              ? {
+                  payee: cashFlowInsight.outflows.payees[0].payee,
+                  amount: cashFlowInsight.outflows.payees[0].amount,
+                  share: cashFlowInsight.outflows.payees[0].share,
+                }
+              : null,
+            unidentifiedOutflow: {
+              amount: cashFlowInsight.outflows.unidentified.amount,
+              count: cashFlowInsight.outflows.unidentified.count,
+              share: cashFlowInsight.outflows.unidentified.share,
+            },
+            categoryCoverage: cashFlowInsight.spendByCategory.coverage,
+            incompleteMonthCount:
+              cashFlowInsight.monthly.incompleteMonths.length,
+            mistypedCategoryCount:
+              cashFlowInsight.spendByCategory.suspectedMistyped.length,
+          }
+        : undefined,
   })
 
   // Surface the weekly figure on the KPI the dashboard already renders, so the
@@ -811,6 +846,9 @@ export async function getHealthSnapshot() {
     composite,
     insights,
     square: { weekly: squareWeekly, summary: squareSummary },
+    // Exposed so the dashboard and reporting render the same cash-flow figures
+    // the advisor reasons about.
+    cashFlow: cashFlowInsight,
   }
 }
 

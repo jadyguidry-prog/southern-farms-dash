@@ -66,7 +66,25 @@ export default async function CashFlowPage() {
     .reduce((s, r) => s + Math.max(r.amount - r.amountPaid, 0), 0)
 
   const net30 = inflows30 - outflows30
-  const hasHistory = cashFlowMonthly.length > 0
+
+  // Prefer the series derived from real bank transactions. The legacy
+  // cash_flow_monthly table stays as a fallback but is empty in practice, and
+  // it has no year column, so its rows would interleave across years.
+  const derived = insight.monthly.series
+  const chartData =
+    derived.length > 0
+      ? derived.map((m) => ({
+          month: m.month,
+          inflow: m.inflow,
+          outflow: m.outflow,
+          complete: m.complete,
+        }))
+      : cashFlowMonthly
+  const hasHistory = chartData.length > 0
+  const usingDerived = derived.length > 0
+
+  const incompleteLabels = insight.monthly.incompleteMonths.map(monthLabel)
+  const gapLabels = insight.monthly.gapMonths.map(monthLabel)
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -110,11 +128,34 @@ export default async function CashFlowPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Cash In vs Cash Out</CardTitle>
-            <CardDescription>Monthly, trailing 12 months</CardDescription>
+            <CardDescription>
+              {usingDerived
+                ? `Monthly, from ${insight.transactionCount.toLocaleString()} imported bank transactions`
+                : 'Monthly, trailing 12 months'}
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {hasHistory ? (
-              <CashFlowChart data={cashFlowMonthly} />
+              <>
+                <CashFlowChart data={chartData} />
+                {usingDerived && (incompleteLabels.length > 0 || gapLabels.length > 0) && (
+                  <div className="mt-3 space-y-1">
+                    {incompleteLabels.length > 0 && (
+                      <p className="text-xs text-muted-foreground text-pretty">
+                        Faded bars ({incompleteLabels.join(', ')}) show months where
+                        only a card statement was imported. They have spending but no
+                        deposits, so they understate income rather than showing a real
+                        loss.
+                      </p>
+                    )}
+                    {gapLabels.length > 0 && (
+                      <p className="text-xs text-muted-foreground text-pretty">
+                        No transactions at all were imported for {gapLabels.join(', ')}.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </>
             ) : (
               <div className="flex h-[300px] flex-col items-center justify-center gap-2 text-center">
                 <p className="text-sm font-medium text-foreground">
@@ -147,6 +188,11 @@ export default async function CashFlowPage() {
             )}
           </CardContent>
         </Card>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <WhereMoneyWent outflows={insight.outflows} />
+        <SpendByCategory data={insight.spendByCategory} />
       </div>
 
       <div className="mt-4">
