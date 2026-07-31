@@ -6,6 +6,7 @@
 // live in `app/category-review/actions.ts`.
 
 import { createClient } from '@/lib/supabase/server'
+import { fetchAllPages } from '@/lib/paginate'
 import { SPEND_TYPES, SPEND_OFFSET_TYPES } from '@/lib/transactions'
 import {
   proposeCategoryMerges,
@@ -178,6 +179,64 @@ function isSpendRow(row: RawRow): boolean {
  */
 const INCOME_CATEGORY_HINTS = ['sales deposit', 'loan proceeds', 'deposit', 'income']
 
+/** How many recent bulk actions the "Recent changes" list shows. */
+const RECENT_ACTION_LIMIT = 10
+
+type RawAuditRow = {
+  bulk_action_id: string | null
+  transaction_id: string | null
+  action: string | null
+  field: string | null
+  previous_value: string | null
+  new_value: string | null
+  created_at: string | null
+  reverted_at: string | null
+}
+
+/**
+ * Recent bulk actions, with *every* entry belonging to them.
+ *
+ * Fetched in two steps on purpose. A single capped query cannot do this job:
+ * one write logs one entry per changed *field* (a recategorize logs both
+ * `expense_category` and `review_status`), so entries outnumber rows and a flat
+ * `.limit()` can slice a bulk action in half — leaving the history to report a
+ * fraction of what actually changed. So: identify the newest action ids first,
+ * then page in all of their entries.
+ */
+async function fetchRecentAuditEntries(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+): Promise<{ data: RawAuditRow[] }> {
+  const { data: recent } = await supabase
+    .from('transaction_audit_log')
+    .select('bulk_action_id, created_at')
+    .not('bulk_action_id', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(2000)
+
+  const ids: string[] = []
+  for (const r of recent ?? []) {
+    const id = String(r.bulk_action_id)
+    if (!ids.includes(id)) ids.push(id)
+    if (ids.length >= RECENT_ACTION_LIMIT) break
+  }
+  if (ids.length === 0) return { data: [] }
+
+  const data = await fetchAllPages<RawAuditRow>(
+    (from, to) =>
+      supabase
+        .from('transaction_audit_log')
+        .select(
+          'bulk_action_id, transaction_id, action, field, previous_value, new_value, created_at, reverted_at',
+        )
+        .in('bulk_action_id', ids)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, to),
+    'category-review recent audit entries',
+  )
+  return { data }
+}
+
 export async function getCategoryReviewData(): Promise<CategoryReviewData> {
   const supabase = await createClient()
 
@@ -190,12 +249,7 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
       )
       // Oldest first so a later decision on the same merge wins below.
       .order('created_at', { ascending: true }),
-    supabase
-      .from('transaction_audit_log')
-      .select('bulk_action_id, action, field, previous_value, new_value, created_at, reverted_at')
-      .not('bulk_action_id', 'is', null)
-      .order('created_at', { ascending: false })
-      .limit(500),
+    fetchRecentAuditEntries(supabase),
   ])
 
   // Category usages from spend rows only.
@@ -328,14 +382,34 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
   const checkSummary = summarizeChecks(checkRows)
 
   // Audit history, collapsed to one entry per bulk action.
+  //
+  // `count` is the number of transactions the owner actually changed, so it is a
+  // count of DISTINCT transaction ids — not of log entries. One write logs an
+  // entry per changed field, so counting entries reported a 47-row correction as
+  // "94 rows" and made a correct change look like it had hit twice as much data.
+  const seenTx = new Map<string, Set<string>>()
   const byBulk = new Map<string, AuditEntry>()
   for (const a of auditRes.data ?? []) {
     const id = String(a.bulk_action_id)
+    // Fall back to the entry's own identity when a legacy row has no
+    // transaction_id, so it still counts once rather than vanishing.
+    const txId = a.transaction_id ? String(a.transaction_id) : `entry:${a.created_at}:${a.field}`
     const existing = byBulk.get(id)
     if (existing) {
-      existing.count += 1
+      const set = seenTx.get(id)!
+      set.add(txId)
+      existing.count = set.size
+      // The action counts as undone only when every entry in it is undone.
       existing.reverted = existing.reverted && Boolean(a.reverted_at)
+      // Prefer showing the category change over the review_status bookkeeping,
+      // which is what the owner recognises.
+      if (String(a.field ?? '') === 'expense_category') {
+        existing.field = 'expense_category'
+        existing.sampleFrom = a.previous_value ? String(a.previous_value) : null
+        existing.sampleTo = a.new_value ? String(a.new_value) : null
+      }
     } else {
+      seenTx.set(id, new Set([txId]))
       byBulk.set(id, {
         bulkActionId: id,
         action: String(a.action ?? ''),
