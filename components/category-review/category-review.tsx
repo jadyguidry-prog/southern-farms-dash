@@ -28,6 +28,8 @@ import { formatCurrency } from '@/lib/data'
 import type {
   CategoryReviewData,
   ReviewableMerge,
+  DecidedMerge,
+  MistypedFlag,
 } from '@/lib/category-review-service'
 import {
   approveMerge,
@@ -46,6 +48,11 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
   // Confirmation dialog state for an in-flight merge.
   const [confirmMerge, setConfirmMerge] = useState<ReviewableMerge | null>(null)
   const [chosenTarget, setChosenTarget] = useState<string>('')
+
+  // Confirmation dialog for a type reclassification, with impact preview.
+  const [confirmReclassify, setConfirmReclassify] = useState<MistypedFlag | null>(
+    null,
+  )
 
   // CHECK cluster categorization dialog.
   const [checkCategory, setCheckCategory] = useState('')
@@ -68,8 +75,15 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
     })
   }
 
-  const proposals = data.proposals.filter((p) => p.priorStatus !== 'approved')
-  const approvedCount = data.proposals.filter((p) => p.priorStatus === 'approved').length
+  // `data.proposals` is already only the undecided queue. Everything the owner
+  // has acted on lives in `data.decisions`, grouped here for the status board.
+  const proposals = data.proposals
+  const byStatus = {
+    approved: data.decisions.filter((d) => d.status === 'approved'),
+    rejected: data.decisions.filter((d) => d.status === 'rejected'),
+    undone: data.decisions.filter((d) => d.status === 'undone'),
+    pending: data.decisions.filter((d) => d.status === 'pending'),
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -101,17 +115,33 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
         <TabsContent value="merges" className="mt-4 flex flex-col gap-4">
           <p className="text-sm leading-relaxed text-muted-foreground text-pretty">
             These are stored spending categories that appear to be the same
-            bucket spelled differently. Nothing here changes your reports until
-            you approve it, and every approval can be undone. Merges only affect
-            how categories are grouped for display &mdash; your original
-            transaction data is never overwritten.
-            {approvedCount > 0 && (
-              <span className="mt-1 block text-foreground">
-                {approvedCount} merge{approvedCount === 1 ? '' : 's'} already
-                approved.
-              </span>
-            )}
+            bucket spelled differently. Until you approve one, each label is
+            reported separately &mdash; a pending suggestion has no effect on any
+            total. Approving only changes how categories are grouped for
+            display; your original transaction data is never overwritten, and
+            undoing an approval restores the ungrouped view immediately.
           </p>
+
+          <MergeStatusBoard
+            pendingCount={proposals.length + byStatus.pending.length}
+            byStatus={byStatus}
+            pending={pending}
+            busy={busy}
+            onUndo={(id) =>
+              run(`undo:${id}`, () => revertBulkAction(id), 'Merge undone')
+            }
+            onReapprove={(d) =>
+              run(
+                `approve:${d.signature}`,
+                () =>
+                  approveMerge({
+                    fromCategories: d.fromCategories,
+                    toCategory: d.toCategory,
+                  }),
+                'Categories merged',
+              )
+            }
+          />
 
           {proposals.length === 0 ? (
             <EmptyState
@@ -195,10 +225,12 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
         {/* -------------------------------------------------------------- */}
         <TabsContent value="mistyped" className="mt-4 flex flex-col gap-4">
           <p className="text-sm leading-relaxed text-muted-foreground text-pretty">
-            These transactions carry an income-style category but are stored as
-            spending, so they currently count against your outflow. Reclassify
-            them to income if they are deposits &mdash; this moves them out of
-            the spending totals. You can undo it afterward.
+            These transactions carry an income-style category but were imported
+            as spending, so they currently count against your outflow. They stay
+            flagged exactly as imported until you decide &mdash; nothing is
+            reclassified automatically. Reviewing shows the full before-and-after
+            impact first, and the original imported type is kept in history so
+            you can undo it.
           </p>
 
           {data.mistyped.length === 0 ? (
@@ -215,25 +247,26 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
                   className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 sm:flex-row sm:items-center sm:justify-between"
                 >
                   <div>
-                    <p className="font-medium text-foreground">{m.category}</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium text-foreground">{m.category}</p>
+                      <Badge variant="secondary">flagged, not changed</Badge>
+                    </div>
                     <p className="mt-1 text-sm text-muted-foreground">
                       {m.count} row{m.count === 1 ? '' : 's'} &middot;{' '}
                       {formatCurrency(m.amount)} currently counted as spending
+                      {m.months.length > 0 && (
+                        <> &middot; {m.months.length} month
+                          {m.months.length === 1 ? '' : 's'} affected</>
+                      )}
                     </p>
                   </div>
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={pending && busy === `income:${m.category}`}
-                    onClick={() =>
-                      run(
-                        `income:${m.category}`,
-                        () => reclassifyToIncome(m.transactionIds),
-                        'Reclassified to income',
-                      )
-                    }
+                    disabled={pending}
+                    onClick={() => setConfirmReclassify(m)}
                   >
-                    Reclassify to income
+                    Review reclassification
                   </Button>
                 </li>
               ))}
@@ -315,6 +348,126 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
           </ul>
         </section>
       )}
+
+      {/* Reclassification confirmation, with before-and-after cash impact. */}
+      <Dialog
+        open={confirmReclassify !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirmReclassify(null)
+        }}
+      >
+        <DialogContent className="max-h-[90svh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Reclassify {confirmReclassify?.category} to income</DialogTitle>
+            <DialogDescription>
+              This changes the transaction type from expense to income. The
+              original imported type is kept in history, so this can be undone.
+            </DialogDescription>
+          </DialogHeader>
+
+          {confirmReclassify && (
+            <div className="flex flex-col gap-4 text-sm">
+              <dl className="grid grid-cols-2 gap-3">
+                <Stat
+                  label="Affected transactions"
+                  value={String(confirmReclassify.count)}
+                />
+                <Stat
+                  label="Total amount"
+                  value={formatCurrency(confirmReclassify.amount)}
+                />
+              </dl>
+
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">
+                  Affected months ({confirmReclassify.months.length})
+                </p>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {confirmReclassify.months.map((mo) => (
+                    <Badge key={mo} variant="outline">
+                      {mo}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-md border border-border">
+                <table className="w-full text-left">
+                  <caption className="sr-only">
+                    Cash-in and cash-out totals before and after this change
+                  </caption>
+                  <thead>
+                    <tr className="border-b border-border text-xs text-muted-foreground">
+                      <th scope="col" className="p-2 font-medium">
+                        Total
+                      </th>
+                      <th scope="col" className="p-2 text-right font-medium">
+                        Now
+                      </th>
+                      <th scope="col" className="p-2 text-right font-medium">
+                        After
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="tabular-nums">
+                    <tr className="border-b border-border">
+                      <th scope="row" className="p-2 font-normal text-muted-foreground">
+                        Cash in
+                      </th>
+                      <td className="p-2 text-right text-foreground">
+                        {formatCurrency(data.currentCashIn)}
+                      </td>
+                      <td className="p-2 text-right font-medium text-foreground">
+                        {formatCurrency(confirmReclassify.resultingCashIn)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <th scope="row" className="p-2 font-normal text-muted-foreground">
+                        Cash out
+                      </th>
+                      <td className="p-2 text-right text-foreground">
+                        {formatCurrency(data.currentCashOut)}
+                      </td>
+                      <td className="p-2 text-right font-medium text-foreground">
+                        {formatCurrency(confirmReclassify.resultingCashOut)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <p className="text-xs leading-relaxed text-muted-foreground text-pretty">
+                {formatCurrency(confirmReclassify.amount)} moves out of cash-out
+                and expense-category totals and into cash-in. The dashboard,
+                cash-flow reports and Advisor insights recalculate for all{' '}
+                {confirmReclassify.months.length} affected month
+                {confirmReclassify.months.length === 1 ? '' : 's'}.
+              </p>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirmReclassify(null)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={pending}
+              onClick={() => {
+                if (!confirmReclassify) return
+                const flag = confirmReclassify
+                setConfirmReclassify(null)
+                run(
+                  `income:${flag.category}`,
+                  () => reclassifyToIncome(flag.transactionIds),
+                  'Reclassified to income',
+                )
+              }}
+            >
+              Reclassify {confirmReclassify?.count} to income
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Merge confirmation dialog. */}
       <Dialog
@@ -534,6 +687,146 @@ function CheckQueue({
           })}
         </ul>
       )}
+    </div>
+  )
+}
+
+/**
+ * The four-state board for merge decisions. Makes the reporting consequence of
+ * each state explicit, because only "Approved" changes any number on screen.
+ */
+function MergeStatusBoard({
+  pendingCount,
+  byStatus,
+  pending,
+  busy,
+  onUndo,
+  onReapprove,
+}: {
+  pendingCount: number
+  byStatus: Record<'pending' | 'approved' | 'rejected' | 'undone', DecidedMerge[]>
+  pending: boolean
+  busy: Busy
+  onUndo: (bulkActionId: string) => void
+  onReapprove: (d: DecidedMerge) => void
+}) {
+  const groups = [
+    {
+      key: 'pending' as const,
+      label: 'Pending',
+      count: pendingCount,
+      note: 'Not affecting any report.',
+      items: [] as DecidedMerge[],
+    },
+    {
+      key: 'approved' as const,
+      label: 'Approved',
+      count: byStatus.approved.length,
+      note: 'Grouped for display only.',
+      items: byStatus.approved,
+    },
+    {
+      key: 'rejected' as const,
+      label: 'Rejected',
+      count: byStatus.rejected.length,
+      note: 'Declined; kept separate.',
+      items: byStatus.rejected,
+    },
+    {
+      key: 'undone' as const,
+      label: 'Undone',
+      count: byStatus.undone.length,
+      note: 'Grouping removed again.',
+      items: byStatus.undone,
+    },
+  ]
+
+  return (
+    <section
+      aria-labelledby="merge-status"
+      className="rounded-lg border border-border bg-card p-4"
+    >
+      <h3 id="merge-status" className="text-sm font-semibold text-foreground">
+        Merge status
+      </h3>
+      <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {groups.map((g) => (
+          <div key={g.key} className="rounded-md border border-border p-3">
+            <dt className="text-xs font-medium text-muted-foreground">{g.label}</dt>
+            <dd className="mt-1 text-2xl font-semibold tabular-nums text-foreground">
+              {g.count}
+            </dd>
+            <p className="mt-1 text-xs text-muted-foreground text-pretty">{g.note}</p>
+          </div>
+        ))}
+      </dl>
+
+      {groups
+        .filter((g) => g.items.length > 0)
+        .map((g) => (
+          <div key={g.key} className="mt-4">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              {g.label}
+            </h4>
+            <ul className="mt-2 flex flex-col divide-y divide-border">
+              {g.items.map((d) => (
+                <li
+                  key={d.id}
+                  className="flex flex-col gap-2 py-2 text-sm sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <span className="min-w-0 text-muted-foreground">
+                    <span className="text-foreground">
+                      {d.fromCategories.join(', ')}
+                    </span>{' '}
+                    &rarr; <span className="text-foreground">{d.toCategory}</span>
+                    {d.transactionCount > 0 && (
+                      <span className="hidden sm:inline">
+                        {' '}
+                        &middot; {d.transactionCount} row
+                        {d.transactionCount === 1 ? '' : 's'} &middot;{' '}
+                        {formatCurrency(d.totalAmount)}
+                      </span>
+                    )}
+                  </span>
+                  <span className="shrink-0">
+                    {g.key === 'approved' && d.bulkActionId ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={pending && busy === `undo:${d.bulkActionId}`}
+                        onClick={() => onUndo(d.bulkActionId as string)}
+                      >
+                        <Undo2 className="size-4" aria-hidden />
+                        Undo
+                      </Button>
+                    ) : g.key === 'undone' || g.key === 'rejected' ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={pending && busy === `approve:${d.signature}`}
+                        onClick={() => onReapprove(d)}
+                      >
+                        Group again
+                      </Button>
+                    ) : null}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+    </section>
+  )
+}
+
+/** One labelled figure inside the reclassification impact preview. */
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border p-3">
+      <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
+      <dd className="mt-1 text-lg font-semibold tabular-nums text-foreground">
+        {value}
+      </dd>
     </div>
   )
 }

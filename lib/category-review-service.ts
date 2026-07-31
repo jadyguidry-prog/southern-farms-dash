@@ -76,10 +76,33 @@ export function proposalSignature(fromCategories: string[], toCategory: string):
   return `${[...fromCategories].sort().join('|')}=>${toCategory}`
 }
 
+/**
+ * Lifecycle of a merge decision.
+ *  - `pending`  — detected or saved, but NOT affecting any report yet.
+ *  - `approved` — the only state that groups anything, and display-only.
+ *  - `rejected` — the owner declined; never suggested again.
+ *  - `undone`   — was approved, then reverted; grouping already removed.
+ */
+export type MergeDecisionStatus = 'pending' | 'approved' | 'rejected' | 'undone'
+
 export type ReviewableMerge = MergeProposal & {
   signature: string
   /** Prior decision, when the owner has already acted on this exact merge. */
-  priorStatus: 'pending' | 'approved' | 'rejected' | null
+  priorStatus: MergeDecisionStatus | null
+}
+
+/** A decision the owner has already recorded, for the status board. */
+export type DecidedMerge = {
+  id: string
+  signature: string
+  fromCategories: string[]
+  toCategory: string
+  status: MergeDecisionStatus
+  transactionCount: number
+  totalAmount: number
+  bulkActionId: string | null
+  decidedAt: string | null
+  decidedBy: string | null
 }
 
 export type MistypedFlag = {
@@ -87,6 +110,11 @@ export type MistypedFlag = {
   count: number
   amount: number
   transactionIds: string[]
+  /** Calendar months (yyyy-mm) the flagged rows fall in. */
+  months: string[]
+  /** Cash totals if the owner approves reclassifying this group to income. */
+  resultingCashIn: number
+  resultingCashOut: number
 }
 
 export type AuditEntry = {
@@ -102,12 +130,17 @@ export type AuditEntry = {
 
 export type CategoryReviewData = {
   proposals: ReviewableMerge[]
+  /** Every recorded decision, for the pending/approved/rejected/undone board. */
+  decisions: DecidedMerge[]
   distinctSpendCategories: number
   checks: CheckReviewSummary & { transactionIds: string[] }
   /** Income-style categories sitting on spend rows — likely a mis-type. */
   mistyped: MistypedFlag[]
   recentActions: AuditEntry[]
   transactionCount: number
+  /** Live cash totals, so a reclassification can show before-and-after. */
+  currentCashIn: number
+  currentCashOut: number
 }
 
 function isSpendRow(row: RawRow): boolean {
@@ -128,7 +161,11 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
     fetchRows(),
     supabase
       .from('category_merge_proposals')
-      .select('from_categories, to_category, status'),
+      .select(
+        'id, from_categories, to_category, status, transaction_count, total_amount, bulk_action_id, decided_at, decided_by',
+      )
+      // Oldest first so a later decision on the same merge wins below.
+      .order('created_at', { ascending: true }),
     supabase
       .from('transaction_audit_log')
       .select('bulk_action_id, action, field, previous_value, new_value, created_at, reverted_at')
@@ -142,7 +179,27 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
     string,
     { value: string; count: number; total: number; vendors: Set<string> }
   >()
-  const mistypedMap = new Map<string, MistypedFlag>()
+  type MistypedAcc = {
+    category: string
+    count: number
+    amount: number
+    transactionIds: string[]
+    months: Set<string>
+  }
+  const mistypedMap = new Map<string, MistypedAcc>()
+
+  // Live cash totals, computed from the same rows so the reclassification
+  // preview is measured against what the reports actually show right now.
+  let currentCashIn = 0
+  let currentCashOut = 0
+  for (const row of rows) {
+    if (row.reviewStatus === 'excluded') continue
+    const magnitude = Math.abs(Number(row.amount) || 0)
+    const type = row.transactionType
+    if (type === 'income') currentCashIn += magnitude
+    else if (SPEND_TYPES.includes(type as never)) currentCashOut += magnitude
+    else if (SPEND_OFFSET_TYPES.includes(type as never)) currentCashOut -= magnitude
+  }
 
   for (const row of rows) {
     if (!isSpendRow(row)) continue
@@ -160,10 +217,17 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
     if (INCOME_CATEGORY_HINTS.includes(value.toLowerCase())) {
       const m =
         mistypedMap.get(value) ??
-        { category: value, count: 0, amount: 0, transactionIds: [] }
+        {
+          category: value,
+          count: 0,
+          amount: 0,
+          transactionIds: [],
+          months: new Set<string>(),
+        }
       m.count += 1
       m.amount += Math.abs(Number(row.amount) || 0)
       m.transactionIds.push(row.id)
+      if (row.transactionDate) m.months.add(row.transactionDate.slice(0, 7))
       mistypedMap.set(value, m)
     }
   }
@@ -175,14 +239,28 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
     vendorCount: b.vendors.size,
   }))
 
-  // Persisted decisions, keyed by signature.
-  const priorStatus = new Map<string, 'pending' | 'approved' | 'rejected'>()
+  // Persisted decisions, keyed by signature. Rows arrive oldest-first, so the
+  // last write for a signature is the current decision (approve → undo → ...).
+  const priorStatus = new Map<string, MergeDecisionStatus>()
+  const decisions: DecidedMerge[] = []
   for (const d of decisionsRes.data ?? []) {
-    const sig = proposalSignature(
-      (d.from_categories ?? []) as string[],
-      String(d.to_category ?? ''),
-    )
-    priorStatus.set(sig, d.status as 'pending' | 'approved' | 'rejected')
+    const fromCategories = ((d.from_categories ?? []) as string[]) ?? []
+    const toCategory = String(d.to_category ?? '')
+    const signature = proposalSignature(fromCategories, toCategory)
+    const status = String(d.status ?? 'pending') as MergeDecisionStatus
+    priorStatus.set(signature, status)
+    decisions.push({
+      id: String(d.id),
+      signature,
+      fromCategories,
+      toCategory,
+      status,
+      transactionCount: Number(d.transaction_count ?? 0),
+      totalAmount: Number(d.total_amount ?? 0),
+      bulkActionId: d.bulk_action_id ? String(d.bulk_action_id) : null,
+      decidedAt: d.decided_at ? String(d.decided_at) : null,
+      decidedBy: d.decided_by ? String(d.decided_by) : null,
+    })
   }
 
   const proposals: ReviewableMerge[] = proposeCategoryMerges(usages)
@@ -190,8 +268,10 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
       const signature = proposalSignature(p.fromCategories, p.toCategory)
       return { ...p, signature, priorStatus: priorStatus.get(signature) ?? null }
     })
-    // A merge the owner already rejected should not keep nagging.
-    .filter((p) => p.priorStatus !== 'rejected')
+    // Only genuinely undecided merges belong in the pending queue. Rejected and
+    // undone merges must not nag, and approved ones are already grouped — but
+    // they all stay visible on the status board via `decisions`.
+    .filter((p) => p.priorStatus === null || p.priorStatus === 'pending')
 
   // CHECK review queue: bank lines that name no payee.
   const checkRows: CheckRow[] = rows
@@ -231,12 +311,30 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
     }
   }
 
+  // Reclassifying a flagged group to income moves its dollars out of cash-out
+  // and into cash-in, so the resulting totals are the current ones shifted by
+  // exactly that group's amount.
+  const mistyped: MistypedFlag[] = [...mistypedMap.values()]
+    .sort((a, b) => b.amount - a.amount)
+    .map((m) => ({
+      category: m.category,
+      count: m.count,
+      amount: m.amount,
+      transactionIds: m.transactionIds,
+      months: [...m.months].sort(),
+      resultingCashIn: currentCashIn + m.amount,
+      resultingCashOut: currentCashOut - m.amount,
+    }))
+
   return {
     proposals,
+    decisions,
     distinctSpendCategories: usages.length,
     checks: { ...checkSummary, transactionIds: checkRows.map((r) => r.id) },
-    mistyped: [...mistypedMap.values()].sort((a, b) => b.amount - a.amount),
+    mistyped,
     recentActions: [...byBulk.values()].slice(0, 25),
     transactionCount: rows.length,
+    currentCashIn,
+    currentCashOut,
   }
 }

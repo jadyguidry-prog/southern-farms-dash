@@ -18,6 +18,7 @@ import {
   UNCATEGORIZED,
   type CashFlowInputRow,
 } from '../lib/cash-flow-service'
+import { buildApprovedAliasMap } from '../lib/categories'
 import type { ReviewStatus, TransactionType } from '../lib/transactions'
 
 let pass = 0
@@ -237,11 +238,18 @@ eq(
 eq(summarizeOutflowsByPayee([]).totalOutflow, 0, 'payees: empty input')
 
 /* ---------------- category canonicalisation ---------------- */
-eq(canonicalCategory('Packaging'), 'Packaging & Labels', 'canon: packaging merged')
-eq(canonicalCategory('Labels & Packaging'), 'Packaging & Labels', 'canon: labels merged')
-eq(canonicalCategory('Meat / COGS'), 'COGS', 'canon: meat cogs merged')
-eq(canonicalCategory('Bakery / COGS'), 'COGS', 'canon: bakery cogs merged')
-eq(canonicalCategory('Software'), 'Software & Communications', 'canon: software merged')
+// Nothing groups without an approval. The shipped seed suggestions must have
+// ZERO effect on reporting until the owner approves them, so every stored label
+// reports under its own name here.
+eq(canonicalCategory('Packaging'), 'Packaging', 'canon: seed alias does NOT group')
+eq(
+  canonicalCategory('Labels & Packaging'),
+  'Labels & Packaging',
+  'canon: second seed variant stays separate',
+)
+eq(canonicalCategory('Meat / COGS'), 'Meat / COGS', 'canon: cogs line stays separate')
+eq(canonicalCategory('Bakery / COGS'), 'Bakery / COGS', 'canon: cogs line stays separate')
+eq(canonicalCategory('Software'), 'Software', 'canon: software stays separate')
 eq(canonicalCategory('Payroll'), 'Payroll', 'canon: unmapped value preserved')
 eq(canonicalCategory(''), UNCATEGORIZED, 'canon: blank is uncategorized')
 // Ambiguous pairs must NOT be merged silently.
@@ -250,6 +258,24 @@ eq(
   'Equipment & Supplies',
   'canon: ambiguous equipment left alone',
 )
+// An APPROVED alias is the only thing that groups, and only for display.
+{
+  const approved = buildApprovedAliasMap([
+    { fromCategories: ['Packaging', 'Labels & Packaging'], toCategory: 'Packaging & Labels' },
+  ])
+  eq(
+    canonicalCategory('Packaging', approved),
+    'Packaging & Labels',
+    'canon: approved alias groups',
+  )
+  eq(
+    canonicalCategory('Payroll', approved),
+    'Payroll',
+    'canon: unrelated label untouched by approval',
+  )
+  // Undo is modelled by dropping the alias — the ungrouped view returns at once.
+  eq(canonicalCategory('Packaging', {}), 'Packaging', 'canon: undo restores ungrouped')
+}
 
 /* ---------------- category resolution order ---------------- */
 {
@@ -298,11 +324,55 @@ eq(
   eq(result.totalSpend, 375, 'spend: income excluded from total')
   eq(result.categories[0].category, 'Fuel', 'spend: largest first')
   eq(result.categories[0].amount, 200, 'spend: vendor default applied')
-  const packaging = result.categories.find((c) => c.category === 'Packaging & Labels')
-  eq(packaging?.amount, 150, 'spend: aliases merged into one bucket')
-  eq(packaging?.mergedFrom, ['Labels & Packaging', 'Packaging'], 'spend: merge is disclosed')
+  // Without an approval the two packaging spellings report SEPARATELY.
+  eq(
+    result.categories.find((c) => c.category === 'Packaging & Labels'),
+    undefined,
+    'spend: no grouped bucket without approval',
+  )
+  eq(
+    result.categories.find((c) => c.category === 'Packaging')?.amount,
+    100,
+    'spend: raw Packaging reported on its own',
+  )
+  eq(
+    result.categories.find((c) => c.category === 'Labels & Packaging')?.amount,
+    50,
+    'spend: raw Labels & Packaging reported on its own',
+  )
   eq(result.uncategorizedSpend, 25, 'spend: uncategorized tracked')
   eq(Math.round(result.coverage * 100), 93, 'spend: coverage measured in dollars')
+}
+
+// Approving the merge groups those same rows — display only, same total spend.
+{
+  const vendors = new Map([['v1', 'Fuel']])
+  const rows = [
+    row({ transactionDate: '2025-06-01', amount: -100, expenseCategory: 'Packaging' }),
+    row({ transactionDate: '2025-06-02', amount: -50, expenseCategory: 'Labels & Packaging' }),
+  ]
+  const before = summarizeSpendByCategory(rows, vendors)
+  const after = summarizeSpendByCategory(
+    rows,
+    vendors,
+    buildApprovedAliasMap([
+      {
+        fromCategories: ['Packaging', 'Labels & Packaging'],
+        toCategory: 'Packaging & Labels',
+      },
+    ]),
+  )
+  eq(before.categories.length, 2, 'spend: ungrouped shows both labels')
+  eq(after.categories.length, 1, 'spend: approved merge shows one bucket')
+  eq(after.categories[0].category, 'Packaging & Labels', 'spend: grouped under target')
+  eq(after.categories[0].amount, 150, 'spend: grouped amount is the sum')
+  eq(
+    after.categories[0].mergedFrom,
+    ['Labels & Packaging', 'Packaging'],
+    'spend: merge is disclosed',
+  )
+  // The dollars never move — grouping is presentational.
+  eq(after.totalSpend, before.totalSpend, 'spend: approval does not change total')
 }
 
 // The mistyped Sales Deposit expense rows are flagged, not silently edited.

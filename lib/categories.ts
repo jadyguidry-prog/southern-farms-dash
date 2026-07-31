@@ -8,14 +8,14 @@
 export const UNCATEGORIZED = 'Uncategorized'
 
 /**
- * Reporting-only merges for values that are the same bucket spelled
- * differently. Applied at display time; stored values are never rewritten by
- * this map. Every entry was taken from values actually present in the owner's
- * data, not an invented taxonomy. Ambiguous pairs are NOT here — see
- * `CATEGORY_MERGE_SUGGESTIONS`.
+ * Known groupings of values that are the same bucket spelled differently.
  *
- * This remains the seed for the review screen: each alias becomes a
- * pre-filled, owner-approvable proposal rather than a silent rewrite.
+ * This map is a SEED FOR PROPOSALS ONLY. It is never applied to reporting on
+ * its own — `canonicalCategory` ignores it entirely. Each entry becomes a
+ * pre-filled proposal on the review screen that the owner must approve before
+ * any number changes. Every entry was taken from values actually present in the
+ * owner's data, not an invented taxonomy. Ambiguous pairs are NOT here — see
+ * `CATEGORY_MERGE_SUGGESTIONS`.
  */
 export const CATEGORY_ALIASES: Record<string, string> = {
   // Packaging, spelled three ways across transactions and vendors.
@@ -61,9 +61,12 @@ export type CategoryAliasMap = Record<string, string>
 /**
  * Canonical display name for a stored category value.
  *
- * `approvedAliases` (owner-approved merges) take precedence over the static
- * seed map so a later decision can override the shipped default. Passing
- * nothing preserves the original pure behaviour, which the unit tests rely on.
+ * ONLY the owner's approved merges (`approvedAliases`) group anything. The seed
+ * `CATEGORY_ALIASES` map is deliberately NOT consulted here: it is a source of
+ * *proposals*, not a silent regrouping. Until a proposal is approved, every
+ * stored label reports under its own name, so an unapproved suggestion has zero
+ * effect on any total. Undoing an approval simply removes its alias, which
+ * immediately restores the ungrouped view.
  */
 export function canonicalCategory(
   raw: string,
@@ -71,8 +74,7 @@ export function canonicalCategory(
 ): string {
   const trimmed = (raw ?? '').trim()
   if (!trimmed) return UNCATEGORIZED
-  const key = trimmed.toLowerCase()
-  return approvedAliases?.[key] ?? CATEGORY_ALIASES[key] ?? trimmed
+  return approvedAliases?.[trimmed.toLowerCase()] ?? trimmed
 }
 
 /**

@@ -13,6 +13,7 @@ import {
   proposeCategoryMerges,
   canonicalCategory,
   buildApprovedAliasMap,
+  CATEGORY_ALIASES,
   type CategoryUsage,
 } from '../lib/categories'
 import {
@@ -225,6 +226,33 @@ eq(summarizeChecks([]).numberRange, null, 'checks: empty range is null')
 }
 
 eq(buildApprovedAliasMap([]).packaging, undefined, 'alias: empty approvals yield empty map')
+
+/* ---------------- seed aliases are proposals, never silent merges --------- */
+{
+  // The shipped seed map must have NO reporting effect on its own. Every one of
+  // its keys has to pass through canonicalCategory unchanged, otherwise an
+  // unapproved suggestion would be quietly altering the owner's numbers.
+  const leaked = Object.keys(CATEGORY_ALIASES).filter(
+    (key) => canonicalCategory(key) !== key,
+  )
+  eq(leaked, [], 'seed: no seed alias affects reporting without approval')
+
+  // ...but the seed still drives the proposal, so the merge remains offerable.
+  const proposals = proposeCategoryMerges([
+    usage('Meat / COGS', 10, 5000, 3),
+    usage('Food / COGS', 5, 2000, 2),
+  ])
+  const cogs = proposals.find((p) => p.toCategory === 'COGS')
+  ok(!!cogs, 'seed: COGS still proposed for approval')
+  eq(cogs?.kind, 'family', 'seed: proposal comes from the seed family')
+
+  // Approving is what makes it group — and only then.
+  const approved = buildApprovedAliasMap([
+    { fromCategories: cogs!.fromCategories, toCategory: cogs!.toCategory },
+  ])
+  eq(canonicalCategory('Meat / COGS'), 'Meat / COGS', 'seed: separate before approval')
+  eq(canonicalCategory('Meat / COGS', approved), 'COGS', 'seed: grouped after approval')
+}
 
 /* ---------------- report ---------------- */
 console.log(`\ncategory-review + check-review: ${pass} passed, ${fail} failed`)

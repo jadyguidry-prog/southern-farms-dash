@@ -180,20 +180,35 @@ export async function reclassifyToIncome(
 
   const { data: rows, error: fetchErr } = await supabase
     .from('financial_transactions')
-    .select('id, transaction_type')
+    .select('id, transaction_type, review_status')
     .in('id', ids)
   if (fetchErr) return { ok: false, error: fetchErr.message }
 
-  const audit = (rows ?? []).map((r) => ({
-    transaction_id: r.id,
-    field: 'transaction_type',
-    previous_value: String(r.transaction_type ?? ''),
-    new_value: 'income',
-    action: 'reclassify_type',
-    bulk_action_id: bulkActionId,
-    actor_email: actor,
-    reason: 'Deposit recorded as an expense; reclassified to income.',
-  }))
+  // Log BOTH columns this action writes. The imported `transaction_type` is
+  // preserved as `previous_value`, which is what makes the change explainable
+  // later and lets Undo restore the row exactly as it was imported.
+  const audit = (rows ?? []).flatMap((r) => [
+    {
+      transaction_id: r.id,
+      field: 'transaction_type',
+      previous_value: String(r.transaction_type ?? ''),
+      new_value: 'income',
+      action: 'reclassify_type',
+      bulk_action_id: bulkActionId,
+      actor_email: actor,
+      reason: 'Deposit recorded as an expense; reclassified to income.',
+    },
+    {
+      transaction_id: r.id,
+      field: 'review_status',
+      previous_value: String(r.review_status ?? ''),
+      new_value: 'matched',
+      action: 'reclassify_type',
+      bulk_action_id: bulkActionId,
+      actor_email: actor,
+      reason: 'Marked reviewed alongside the type change.',
+    },
+  ])
   const auditErr = await insertAuditInChunks(supabase, audit)
   if (auditErr) return { ok: false, error: auditErr }
 
@@ -227,20 +242,33 @@ export async function categorizeTransactions(input: {
 
   const { data: rows, error: fetchErr } = await supabase
     .from('financial_transactions')
-    .select('id, expense_category')
+    .select('id, expense_category, review_status')
     .in('id', ids)
   if (fetchErr) return { ok: false, error: fetchErr.message }
 
-  const audit = (rows ?? []).map((r) => ({
-    transaction_id: r.id,
-    field: 'expense_category',
-    previous_value: String(r.expense_category ?? ''),
-    new_value: category,
-    action: 'categorize_checks',
-    bulk_action_id: bulkActionId,
-    actor_email: actor,
-    reason: `Assigned "${category}" to ${ids.length} check(s).`,
-  }))
+  // Both written columns are logged so Undo restores the row completely.
+  const audit = (rows ?? []).flatMap((r) => [
+    {
+      transaction_id: r.id,
+      field: 'expense_category',
+      previous_value: String(r.expense_category ?? ''),
+      new_value: category,
+      action: 'categorize_checks',
+      bulk_action_id: bulkActionId,
+      actor_email: actor,
+      reason: `Assigned "${category}" to ${ids.length} check(s).`,
+    },
+    {
+      transaction_id: r.id,
+      field: 'review_status',
+      previous_value: String(r.review_status ?? ''),
+      new_value: 'matched',
+      action: 'categorize_checks',
+      bulk_action_id: bulkActionId,
+      actor_email: actor,
+      reason: 'Marked reviewed alongside the category assignment.',
+    },
+  ])
   const auditErr = await insertAuditInChunks(supabase, audit)
   if (auditErr) return { ok: false, error: auditErr }
 
@@ -305,11 +333,12 @@ export async function revertBulkAction(bulkActionId: string): Promise<ActionResu
     .eq('bulk_action_id', bulkActionId)
     .is('reverted_at', null)
 
-  // A reverted merge is retired to 'rejected' so its alias stops applying and it
-  // is not re-suggested; the owner can always merge again from scratch.
+  // A reverted merge becomes 'undone': its alias stops applying immediately, so
+  // reporting returns to the ungrouped view, and it stays visible on the status
+  // board (distinct from a deliberate 'rejected') where it can be re-approved.
   await supabase
     .from('category_merge_proposals')
-    .update({ status: 'rejected', decided_at: now })
+    .update({ status: 'undone', decided_at: now })
     .eq('bulk_action_id', bulkActionId)
 
   revalidateAll()
