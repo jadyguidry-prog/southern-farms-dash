@@ -810,6 +810,10 @@ export async function getHealthSnapshot() {
           unpricedBy: labor.unpricedBy,
           likelyMissedClockOuts: labor.likelyMissedClockOuts,
           salesPerLaborHour: labor.salesPerLaborHour,
+          rolling3Pct: labor.rolling3.laborPct,
+          rolling3Months: labor.rolling3.monthsCounted,
+          allTimePct: labor.allTime.laborPct,
+          allTimeMonths: labor.allTime.monthsCounted,
         }
       : undefined,
     // Only pass the group when transactions actually exist, so a farm with no

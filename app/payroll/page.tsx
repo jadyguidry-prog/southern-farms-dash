@@ -35,6 +35,7 @@ import {
   summarizeLabor,
   deriveMonthlyLabor,
   latestCompleteLaborMonth,
+  laborPctWindow,
   groupLabor,
   flagLongShifts,
   monthEnd,
@@ -104,6 +105,10 @@ export default async function PayrollPage({
   const summary = summarizeLabor(shifts, dataset.coverage)
   const monthly = deriveMonthlyLabor(shifts, dataset.coverage)
   const headline = latestCompleteLaborMonth(monthly)
+  // Computed from the FILTERED series on purpose, so the comparison windows
+  // describe the same rows the rest of the page is showing.
+  const rolling3 = laborPctWindow(monthly, 3)
+  const allTime = laborPctWindow(monthly, null)
   const groups = groupLabor(shifts, groupBy)
   const flags = flagLongShifts(shifts)
 
@@ -194,7 +199,17 @@ export default async function PayrollPage({
             : {})}
           hint={
             headline
-              ? `${headline.month} — last month with complete sales coverage`
+              ? // The headline is one month; the wider windows say whether it is
+                // representative. Both are dollar-weighted over complete months.
+                `${headline.month} — last month with complete sales coverage${
+                  rolling3.laborPct != null
+                    ? ` · last ${rolling3.monthsCounted} mo ${formatPercent(rolling3.laborPct)}`
+                    : ''
+                }${
+                  allTime.laborPct != null
+                    ? ` · all ${allTime.monthsCounted} mo ${formatPercent(allTime.laborPct)}`
+                    : ''
+                }`
               : 'No month has complete sales coverage yet'
           }
         />

@@ -19,6 +19,7 @@ import {
   summarizeLabor,
   deriveMonthlyLabor,
   latestCompleteLaborMonth,
+  laborPctWindow,
   groupLabor,
   flagLongShifts,
   filterShifts,
@@ -274,6 +275,146 @@ eq(weekStartOf('2026-07-26'), '2026-07-26', 'week start: Sunday is its own start
     deriveMonthlyLabor(shifts, coverage).map((m) => m.monthKey),
     ['2025-01', '2025-12', '2026-01'],
     'ordering: sorted by real month key, so Dec 25 cannot land beside Jan 25',
+  )
+}
+
+/* ---------------- comparison windows ---------------- */
+// The headline is one month; these windows are the context around it. The trap
+// is averaging the monthly percentages, which lets a tiny month count as much as
+// a huge one. These build a series where the two answers differ sharply.
+{
+  // Mar: 100 labor / 200 sales = 50%. Apr: 100 / 1800 = 5.56%.
+  // Mean of percentages = 27.8%. Dollar-weighted = 200/2000 = 10%.
+  const coverage = deriveSalesCoverage([
+    { saleDate: '2025-03-01', netSales: 100 },
+    { saleDate: '2025-03-31', netSales: 100 },
+    { saleDate: '2025-04-01', netSales: 900 },
+    { saleDate: '2025-04-30', netSales: 900 },
+  ])
+  // $10/h × 10 h = $100 of labor in each month.
+  const { shifts } = normalizeShifts([
+    shift({ start_at: '2025-03-10T14:00:00Z', end_at: '2025-03-11T00:00:00Z' }),
+    shift({ start_at: '2025-04-10T14:00:00Z', end_at: '2025-04-11T00:00:00Z' }),
+  ])
+  const monthly = deriveMonthlyLabor(shifts, coverage)
+  const all = laborPctWindow(monthly, null)
+  near(all.laborPct ?? -1, 10, 'window: dollar-weighted, not a mean of monthly percentages')
+  eq(all.monthsCounted, 2, 'window: counts both complete months')
+  near(all.estimatedGrossLabor, 200, 'window: labor summed across the window')
+  near(all.netSales, 2000, 'window: sales summed across the window')
+  eq([all.firstMonth, all.lastMonth], ["Mar '25", "Apr '25"], 'window: reports the range it used')
+
+  // Narrower window takes the NEWEST months, not the oldest.
+  const one = laborPctWindow(monthly, 1)
+  eq(one.monthsCounted, 1, 'window: honors the requested length')
+  near(one.laborPct ?? -1, 5.56, 'window: last 1 month is April, the newest', 0.01)
+
+  // Asking for more months than exist must report what it actually covered
+  // rather than implying a longer history.
+  const wide = laborPctWindow(monthly, 12)
+  eq(wide.monthsCounted, 2, 'window: cannot invent months it does not have')
+}
+{
+  // A partial month must be skipped entirely, not counted as zero sales — its
+  // labor would otherwise inflate the ratio exactly like the 129% bug.
+  const coverage = deriveSalesCoverage([
+    { saleDate: '2025-05-01', netSales: 500 },
+    { saleDate: '2025-05-31', netSales: 500 },
+    { saleDate: '2025-06-01', netSales: 10 },
+  ])
+  const { shifts } = normalizeShifts([
+    shift({ start_at: '2025-05-10T14:00:00Z', end_at: '2025-05-11T00:00:00Z' }),
+    shift({ start_at: '2025-06-10T14:00:00Z', end_at: '2025-06-11T00:00:00Z' }),
+  ])
+  const monthly = deriveMonthlyLabor(shifts, coverage)
+  const all = laborPctWindow(monthly, null)
+  eq(all.monthsCounted, 1, 'window: partial month excluded from the window')
+  near(all.laborPct ?? -1, 10, 'window: partial month cannot inflate the ratio')
+  near(all.estimatedGrossLabor, 100, 'window: partial labor left out of the weighted total')
+
+  // A window of only partial months has no answer — never 0%, which would read
+  // as excellent.
+  const onlyPartial = laborPctWindow(
+    monthly.filter((m) => m.partial),
+    null,
+  )
+  eq(onlyPartial.laborPct, null, 'window: no complete months yields null, not 0%')
+  eq(onlyPartial.monthsCounted, 0, 'window: counts nothing when all months are partial')
+}
+eq(laborPctWindow([], null).laborPct, null, 'window: empty series yields null')
+eq(laborPctWindow([], 3).monthsCounted, 0, 'window: empty series counts nothing')
+
+/* ---------------- trend insight ---------------- */
+// The point of showing three windows is telling a trend from a one-month blip.
+// These two cases must produce different advice.
+{
+  const base = {
+    ...SETTING_DEFAULTS,
+    rows: [],
+  }
+  const pillars = {
+    payroll: payrollHealth(14, base, true),
+    cash: { status: 'unknown', label: '', message: '', score: null } as const,
+    sales: { status: 'unknown', label: '', message: '', score: null } as const,
+  }
+  const labor = {
+    laborPct: 14,
+    monthLabel: "Jun '26",
+    estimatedGrossLabor: 1000,
+    payableHours: 100,
+    overtimeHours: 0,
+    estimatedOvertimeCost: 0,
+    unpricedHours: 0,
+    unpricedShifts: 0,
+    unpricedBy: [],
+    likelyMissedClockOuts: 0,
+    salesPerLaborHour: null,
+  }
+
+  // Recent window well above the long run: a real climb.
+  const rising = generateInsights({
+    settings: base,
+    pillars,
+    labor: { ...labor, rolling3Pct: 15, rolling3Months: 3, allTimePct: 12, allTimeMonths: 24 },
+  }).map((i) => i.id)
+  eq(rising.includes('auto-labor-trend-up'), true, 'trend: rising labor share is called a trend')
+  eq(rising.includes('auto-labor-month-outlier'), false, 'trend: a real climb is not called an outlier')
+
+  // Wider windows flat but the month diverges: a blip, and the opposite advice.
+  const blip = generateInsights({
+    settings: base,
+    pillars,
+    labor: { ...labor, laborPct: 18, rolling3Pct: 12.2, rolling3Months: 3, allTimePct: 12, allTimeMonths: 24 },
+  }).map((i) => i.id)
+  eq(blip.includes('auto-labor-month-outlier'), true, 'trend: a diverging month over a flat trend is an outlier')
+  eq(blip.includes('auto-labor-trend-up'), false, 'trend: a flat wider window is not called a climb')
+
+  // Improving.
+  const falling = generateInsights({
+    settings: base,
+    pillars,
+    labor: { ...labor, rolling3Pct: 11, rolling3Months: 3, allTimePct: 14, allTimeMonths: 24 },
+  }).map((i) => i.id)
+  eq(falling.includes('auto-labor-trend-down'), true, 'trend: falling labor share is recognized')
+
+  // One complete month cannot support any trend claim at all.
+  const single = generateInsights({
+    settings: base,
+    pillars,
+    labor: { ...labor, rolling3Pct: 14, rolling3Months: 1, allTimePct: 14, allTimeMonths: 1 },
+  }).map((i) => i.id)
+  eq(
+    single.some((i) => i.startsWith('auto-labor-trend') || i === 'auto-labor-month-outlier'),
+    false,
+    'trend: no trend asserted from a single month',
+  )
+
+  // Missing windows must produce no trend claim either.
+  const noWindows = generateInsights({ settings: base, pillars, labor }).map((i) => i.id)
+  eq(
+    noWindows.some((i) => i.startsWith('auto-labor-trend') || i === 'auto-labor-month-outlier'),
+    false,
+    'trend: absent windows produce no trend insight',
   )
 }
 
@@ -552,6 +693,12 @@ async function reconcile() {
     unpricedBy: sum.unpricedBy,
     likelyMissedClockOuts: sum.likelyMissedClockOuts,
     salesPerLaborHour: headline?.salesPerLaborHour ?? null,
+    // Same trio the dashboard and report render, so the trend insight is
+    // exercised against the owner's real numbers rather than only fixtures.
+    rolling3Pct: laborPctWindow(monthly, 3).laborPct,
+    rolling3Months: laborPctWindow(monthly, 3).monthsCounted,
+    allTimePct: laborPctWindow(monthly, null).laborPct,
+    allTimeMonths: laborPctWindow(monthly, null).monthsCounted,
   }
   const liveSettings = {
     ...SETTING_DEFAULTS,
@@ -626,6 +773,60 @@ async function reconcile() {
 
   console.log(`\nDashboard payroll pillar: ${dashboardPct.toFixed(2)}% (${headline?.month}) vs target ${target}% / warning ${warning}% → ${pillarStatus}`)
   console.log(`Range-wide average would have been ${rangeWidePct.toFixed(2)}% — correctly not used.`)
+
+  /*
+   * The three windows on live data. All surfaces show the same trio, so they must
+   * agree — and the headline must remain the headline, not silently become one of
+   * the averages.
+   */
+  const liveRolling3 = laborPctWindow(monthly, 3)
+  const liveAllTime = laborPctWindow(monthly, null)
+
+  if (liveRolling3.monthsCounted <= 3) pass++
+  else {
+    fail++
+    failures.push(`windows: rolling window covers ${liveRolling3.monthsCounted} months, more than the 3 requested`)
+  }
+
+  // The all-time window must cover every complete month and no partial ones.
+  const completeCount = monthly.filter((m) => !m.partial && m.netSales != null).length
+  if (liveAllTime.monthsCounted === completeCount) pass++
+  else {
+    fail++
+    failures.push(`windows: all-time covers ${liveAllTime.monthsCounted} months but ${completeCount} are complete`)
+  }
+
+  // The headline must differ from both averages here, which is the whole reason
+  // for showing all three. If they collapse to one number the display is
+  // redundant and the earlier concern about hiding a bad month was unfounded.
+  if (
+    liveAllTime.laborPct != null &&
+    Math.abs(dashboardPct - liveAllTime.laborPct) > 0.01
+  ) pass++
+  else {
+    fail++
+    failures.push('windows: headline month equals the all-time rate — verify the headline is still the month, not an average')
+  }
+
+  // Dollar-weighting check: the all-time figure must not equal the plain mean of
+  // the monthly percentages, or the weighting was lost somewhere.
+  const completeMonths = monthly.filter((m) => !m.partial && m.laborPct != null)
+  const meanOfPcts =
+    completeMonths.reduce((a, m) => a + (m.laborPct ?? 0), 0) / completeMonths.length
+  if (
+    liveAllTime.laborPct != null &&
+    Math.abs(liveAllTime.laborPct - meanOfPcts) > 0.01
+  ) pass++
+  else {
+    fail++
+    failures.push(
+      `windows: all-time ${liveAllTime.laborPct?.toFixed(2)}% matches the unweighted mean ${meanOfPcts.toFixed(2)}% — dollar weighting appears lost`,
+    )
+  }
+
+  console.log(
+    `Windows → headline ${dashboardPct.toFixed(2)}% (${headline?.month}) · last ${liveRolling3.monthsCounted} mo ${liveRolling3.laborPct?.toFixed(2)}% · all ${liveAllTime.monthsCounted} mo ${liveAllTime.laborPct?.toFixed(2)}% (unweighted mean would be ${meanOfPcts.toFixed(2)}%)`,
+  )
 
   /*
    * Reporting reconciliation (rule 18's third consumer). The report's Total row

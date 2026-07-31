@@ -249,8 +249,54 @@ export default async function DashboardPage() {
                   ? `Over target by ${formatPercent(payrollOverTarget)}`
                   : `Under target by ${formatPercent(Math.abs(payrollOverTarget))}`}
             </p>
+            {/* A headline month under target while the recent run is over it is
+                not a win — say so on the card, not just in the advisor. */}
+            {payrollPct.value > 0 &&
+            payrollOverTarget <= 0 &&
+            labor.rolling3.laborPct != null &&
+            labor.rolling3.laborPct >= payrollTarget ? (
+              <p className={`text-center text-xs ${HEALTH_TEXT.yellow}`}>
+                but the last {labor.rolling3.monthsCounted} months averaged over
+                target
+              </p>
+            ) : null}
+            {/* The gauge is one month. These two windows say whether that month
+                is a blip or the direction of travel. */}
+            {labor.hasData && labor.rolling3.laborPct != null ? (
+              <dl className="mt-3 flex justify-center gap-6 border-t pt-3 text-center">
+                <div>
+                  <dt className="text-xs text-muted-foreground">
+                    Last {labor.rolling3.monthsCounted} mo
+                  </dt>
+                  {/* Colored against the same target as the gauge. Without this
+                      the headline can read "under target" while the recent run
+                      is over it — the exact thing showing three windows is for. */}
+                  <dd
+                    className={`text-sm font-medium tabular-nums ${
+                      labor.rolling3.laborPct >= payrollWarning
+                        ? HEALTH_TEXT.red
+                        : labor.rolling3.laborPct >= payrollTarget
+                          ? HEALTH_TEXT.yellow
+                          : ''
+                    }`}
+                  >
+                    {formatPercent(labor.rolling3.laborPct)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted-foreground">
+                    All {labor.allTime.monthsCounted} mo
+                  </dt>
+                  <dd className="text-sm font-medium tabular-nums">
+                    {labor.allTime.laborPct == null
+                      ? '—'
+                      : formatPercent(labor.allTime.laborPct)}
+                  </dd>
+                </div>
+              </dl>
+            ) : null}
             {labor.hasData && labor.unpricedHours > 0 ? (
-              <p className="mt-1 text-center text-xs text-muted-foreground">
+              <p className="mt-2 text-center text-xs text-muted-foreground">
                 At least — {Math.round(labor.unpricedHours).toLocaleString()} h
                 have no wage on file.{' '}
                 <Link href="/payroll" className="underline">

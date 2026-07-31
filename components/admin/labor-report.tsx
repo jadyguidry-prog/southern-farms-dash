@@ -1,5 +1,10 @@
-import { formatCurrency } from '@/lib/data'
-import type { LaborSummary, LaborMonth } from '@/lib/labor-service'
+import { formatCurrency, formatPercent } from '@/lib/data'
+import {
+  laborPctWindow,
+  latestCompleteLaborMonth,
+  type LaborSummary,
+  type LaborMonth,
+} from '@/lib/labor-service'
 
 /**
  * Reporting view of the Square-timecard labor cost (rule 18's third consumer,
@@ -43,6 +48,12 @@ export function LaborReport({
   // Newest first: reconciling almost always starts from the latest pay period.
   const rows = [...monthly].reverse()
 
+  // Derived here rather than passed in, so this table and its headline strip can
+  // never disagree — both read the same `monthly` series.
+  const headline = latestCompleteLaborMonth(monthly)
+  const rolling3 = laborPctWindow(monthly, 3)
+  const allTime = laborPctWindow(monthly, null)
+
   return (
     <section
       aria-labelledby="labor-report"
@@ -58,6 +69,55 @@ export function LaborReport({
         . Unpaid breaks are deducted, so these are payable hours rather than
         time on the clock.
       </p>
+
+      {/* All three windows side by side. The headline month leads because the
+          owner's target is a monthly ratio, but the two wider windows are shown
+          at equal precision so a single month is never read as the trend. */}
+      {headline && rolling3.laborPct != null ? (
+        <dl className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="rounded-md border border-border bg-muted/40 p-3">
+            <dt className="text-xs text-muted-foreground">
+              {headline.month} (headline)
+            </dt>
+            <dd className="mt-0.5 text-lg font-semibold tabular-nums">
+              {formatPercent(headline.laborPct ?? 0)}
+            </dd>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Latest complete month
+            </p>
+          </div>
+          <div className="rounded-md border border-border p-3">
+            <dt className="text-xs text-muted-foreground">
+              Last {rolling3.monthsCounted} months
+            </dt>
+            <dd className="mt-0.5 text-lg font-semibold tabular-nums">
+              {formatPercent(rolling3.laborPct)}
+            </dd>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {rolling3.firstMonth} to {rolling3.lastMonth}
+            </p>
+          </div>
+          <div className="rounded-md border border-border p-3">
+            <dt className="text-xs text-muted-foreground">
+              All {allTime.monthsCounted} complete months
+            </dt>
+            <dd className="mt-0.5 text-lg font-semibold tabular-nums">
+              {allTime.laborPct == null ? '—' : formatPercent(allTime.laborPct)}
+            </dd>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {allTime.firstMonth} to {allTime.lastMonth}
+            </p>
+          </div>
+        </dl>
+      ) : null}
+      {headline && rolling3.laborPct != null && allTime.laborPct != null ? (
+        <p className="mt-2 text-xs text-muted-foreground text-pretty">
+          Each figure is dollar-weighted — total labor over total net sales for
+          that window — not an average of monthly percentages, so a slow month
+          cannot carry the same weight as a busy one. Partial-sales months are
+          excluded from all three.
+        </p>
+      ) : null}
 
       <div className="mt-3 overflow-x-auto">
         <table className="w-full min-w-[40rem] border-collapse text-sm">

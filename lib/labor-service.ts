@@ -731,6 +731,57 @@ export function latestCompleteLaborMonth(series: LaborMonth[]): LaborMonth | nul
   return null
 }
 
+export type LaborPctWindow = {
+  /** How many complete months the ratio actually covers. */
+  monthsCounted: number
+  laborPct: number | null
+  estimatedGrossLabor: number
+  netSales: number
+  /** Range actually used, so the UI never implies more coverage than it has. */
+  firstMonth: string | null
+  lastMonth: string | null
+}
+
+/**
+ * Labor as a share of net sales across the most recent `months` COMPLETE months
+ * (or every complete month when `months` is null).
+ *
+ * Two deliberate choices:
+ *
+ * 1. **Dollar-weighted, not an average of percentages.** Summing labor and sales
+ *    separately keeps a low-sales month from carrying the same weight as a busy
+ *    one — a mean of the monthly ratios would silently misstate the real cost.
+ * 2. **Partial months are skipped entirely**, not counted as zero. They have no
+ *    trustworthy `netSales`, so including their labor would inflate the ratio.
+ *    This means the window can cover fewer months than requested, and
+ *    `monthsCounted` reports the truth so callers can label it honestly.
+ */
+export function laborPctWindow(
+  series: LaborMonth[],
+  months: number | null,
+): LaborPctWindow {
+  const complete = series.filter((m) => !m.partial && m.netSales != null)
+  const used =
+    months == null ? complete : complete.slice(Math.max(0, complete.length - months))
+
+  let labor = 0
+  let sales = 0
+  for (const m of used) {
+    labor += m.estimatedGrossLabor
+    sales += m.netSales ?? 0
+  }
+
+  return {
+    monthsCounted: used.length,
+    // Guard the divide: no sales means no ratio, never a 0% that reads as good.
+    laborPct: sales > 0 ? (labor / sales) * 100 : null,
+    estimatedGrossLabor: labor,
+    netSales: sales,
+    firstMonth: used.length > 0 ? used[0].month : null,
+    lastMonth: used.length > 0 ? used[used.length - 1].month : null,
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Breakdowns                                                          */
 /* ------------------------------------------------------------------ */
@@ -975,6 +1026,13 @@ export type LaborHealthSnapshot = {
   /** Which month `laborPct` describes, for labelling. */
   monthKey: string | null
   monthLabel: string | null
+  /**
+   * Context for the headline, never a replacement for it. Labor is trending up,
+   * so a single month read alone can look like noise; these two windows show
+   * whether it is noise or a trend.
+   */
+  rolling3: LaborPctWindow
+  allTime: LaborPctWindow
   estimatedGrossLabor: number
   payableHours: number
   overtimeHours: number
@@ -997,9 +1055,11 @@ export type LaborHealthSnapshot = {
  * The labor figures the dashboard and AI Advisor need, derived from the same
  * service the Payroll page uses so all three can never disagree.
  *
- * Deliberately reports the latest complete month rather than a range-wide
- * average: the owner's target is a monthly operating ratio, and averaging a
- * two-year range would hide a bad month behind good ones.
+ * The headline stays the latest complete month, because the owner's target is a
+ * monthly operating ratio and averaging a two-year range would hide a bad month
+ * behind good ones. The 3-month and all-time windows ride alongside it as
+ * context, so a single month is never mistaken for a trend — or dismissed as
+ * noise when it is one.
  */
 export async function getLaborHealthSnapshot(): Promise<LaborHealthSnapshot> {
   const dataset = await getLaborDataset()
@@ -1011,6 +1071,8 @@ export async function getLaborHealthSnapshot(): Promise<LaborHealthSnapshot> {
     laborPct: headline?.laborPct ?? null,
     monthKey: headline?.monthKey ?? null,
     monthLabel: headline?.month ?? null,
+    rolling3: laborPctWindow(series, 3),
+    allTime: laborPctWindow(series, null),
     estimatedGrossLabor: summary.estimatedGrossLabor,
     payableHours: summary.payableHours,
     overtimeHours: summary.overtimeHours,

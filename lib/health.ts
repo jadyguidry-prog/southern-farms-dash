@@ -307,6 +307,14 @@ export type LaborInsightInput = {
   /** Labor as a share of net sales for the latest COMPLETE month. */
   laborPct: number | null
   monthLabel: string | null
+  /**
+   * Dollar-weighted ratios over wider windows, for trend context. Optional so a
+   * caller with only a single complete month produces no trend claim.
+   */
+  rolling3Pct?: number | null
+  rolling3Months?: number
+  allTimePct?: number | null
+  allTimeMonths?: number
   estimatedGrossLabor: number
   payableHours: number
   overtimeHours: number
@@ -457,6 +465,55 @@ export function generateInsights({
         detail: `About ${Math.round(labor.overtimeHours).toLocaleString()} hours were worked past 40 in a week, carrying an estimated ${formatCurrency(labor.estimatedOvertimeCost)} in half-time premium. Spreading those hours across more staff, or shifting them earlier in the week, converts most of that premium back into regular pay.`,
         impact: `${formatCurrency(labor.estimatedOvertimeCost)} premium`,
       })
+    }
+
+    /*
+     * Trend across the three windows. A single month can be dismissed as noise
+     * and a long average can hide a climb; comparing them is what distinguishes
+     * the two. Requires at least 2 months in the rolling window so "the trend"
+     * is never asserted from one data point.
+     */
+    if (
+      labor.laborPct != null &&
+      labor.rolling3Pct != null &&
+      labor.allTimePct != null &&
+      (labor.rolling3Months ?? 0) >= 2 &&
+      (labor.allTimeMonths ?? 0) > (labor.rolling3Months ?? 0)
+    ) {
+      const recentVsAll = labor.rolling3Pct - labor.allTimePct
+      const monthVsRecent = labor.laborPct - labor.rolling3Pct
+      // One point of payroll ratio is material on a shop this size; below that
+      // the windows are effectively flat and no trend claim is warranted.
+      if (recentVsAll >= 1) {
+        out.push({
+          id: 'auto-labor-trend-up',
+          severity: 'warning',
+          category: 'Payroll',
+          title: 'Labor is a growing share of sales, not a one-month blip',
+          detail: `The last ${labor.rolling3Months} complete months ran ${formatPercent(labor.rolling3Pct)} of sales against ${formatPercent(labor.allTimePct)} across all ${labor.allTimeMonths} months — ${formatPercent(recentVsAll)} higher. ${labor.monthLabel} alone was ${formatPercent(labor.laborPct)}${Math.abs(monthVsRecent) >= 1 ? `, ${monthVsRecent > 0 ? 'above' : 'below'} even the recent run` : ', in line with the recent run'}. Because the wider window moved too, this is a direction of travel rather than one unusual month, so it is worth addressing at the scheduling level instead of waiting for it to correct itself.`,
+          impact: `${formatPercent(recentVsAll)} above the long-run rate`,
+        })
+      } else if (recentVsAll <= -1) {
+        out.push({
+          id: 'auto-labor-trend-down',
+          severity: 'opportunity',
+          category: 'Payroll',
+          title: 'Labor is a shrinking share of sales',
+          detail: `The last ${labor.rolling3Months} complete months ran ${formatPercent(labor.rolling3Pct)} of sales against ${formatPercent(labor.allTimePct)} across all ${labor.allTimeMonths} months — ${formatPercent(Math.abs(recentVsAll))} lower. ${labor.monthLabel} came in at ${formatPercent(labor.laborPct)}. Whatever changed in scheduling or sales mix is working; worth identifying so it can be kept.`,
+          impact: `${formatPercent(Math.abs(recentVsAll))} below the long-run rate`,
+        })
+      } else if (Math.abs(monthVsRecent) >= 1) {
+        // Wider window flat but the month diverges — the opposite reading, and
+        // the one where reacting to a single month would be a mistake.
+        out.push({
+          id: 'auto-labor-month-outlier',
+          severity: 'opportunity',
+          category: 'Payroll',
+          title: `${labor.monthLabel} sits apart from an otherwise steady trend`,
+          detail: `${labor.monthLabel} ran ${formatPercent(labor.laborPct)} of sales while the last ${labor.rolling3Months} months averaged ${formatPercent(labor.rolling3Pct)} and the full ${labor.allTimeMonths}-month record ${formatPercent(labor.allTimePct)}. The wider windows barely moved, so this looks like a single-month swing — a slow sales week or a one-off schedule — rather than a shift worth restructuring around. Worth a look before acting on it.`,
+          impact: `${formatPercent(Math.abs(monthVsRecent))} vs recent months`,
+        })
+      }
     }
 
     if (labor.salesPerLaborHour != null && labor.monthLabel) {
