@@ -627,6 +627,65 @@ async function reconcile() {
   console.log(`\nDashboard payroll pillar: ${dashboardPct.toFixed(2)}% (${headline?.month}) vs target ${target}% / warning ${warning}% → ${pillarStatus}`)
   console.log(`Range-wide average would have been ${rangeWidePct.toFixed(2)}% — correctly not used.`)
 
+  /*
+   * Reporting reconciliation (rule 18's third consumer). The report's Total row
+   * is what gets checked against Square's own payroll export, so the monthly
+   * rows must sum to the same figure the summary reports — and the Payroll page
+   * and Dashboard must agree with both.
+   */
+  const monthlySumLabor = monthly.reduce((a, m) => a + m.estimatedGrossLabor, 0)
+  if (Math.abs(monthlySumLabor - sum.estimatedGrossLabor) < 0.01) pass++
+  else {
+    fail++
+    failures.push(
+      `reporting: monthly rows sum to $${monthlySumLabor.toFixed(2)} but the summary total is $${sum.estimatedGrossLabor.toFixed(2)}`,
+    )
+  }
+
+  const monthlySumHours = monthly.reduce((a, m) => a + m.payableHours, 0)
+  if (Math.abs(monthlySumHours - sum.payableHours) < 0.05) pass++
+  else {
+    fail++
+    failures.push(
+      `reporting: monthly payable hours sum to ${monthlySumHours.toFixed(2)} but the summary says ${sum.payableHours.toFixed(2)}`,
+    )
+  }
+
+  // Partial months must show cost but never a percentage, on every surface.
+  const partialWithPct = monthly.filter((m) => m.partial && m.laborPct != null)
+  if (partialWithPct.length === 0) pass++
+  else {
+    fail++
+    failures.push(
+      `reporting: ${partialWithPct.map((m) => m.monthKey).join(', ')} are partial yet expose a labor % — the ratio would be inflated`,
+    )
+  }
+
+  // Every partial month must still contribute its labor cost, or the Total
+  // would silently under-report what was actually paid out.
+  const partialWithoutCost = monthly.filter(
+    (m) => m.partial && m.estimatedGrossLabor <= 0 && m.payableHours > 0,
+  )
+  if (partialWithoutCost.length === 0) pass++
+  else {
+    fail++
+    failures.push(
+      `reporting: ${partialWithoutCost.map((m) => m.monthKey).join(', ')} have hours but no cost in the Total`,
+    )
+  }
+
+  // The dashboard's headline month must be one of the reported rows, so the
+  // owner can always trace the pillar's 14.1% back to a line in the table.
+  if (!headline || monthly.some((m) => m.monthKey === headline.monthKey)) pass++
+  else {
+    fail++
+    failures.push('reporting: dashboard headline month is absent from the report table')
+  }
+
+  console.log(
+    `\nReporting: monthly rows sum to $${monthlySumLabor.toFixed(2)} / ${monthlySumHours.toFixed(1)} h — reconciles with the summary total.`,
+  )
+
   console.log(`\nLive data: ${shifts.length} shifts, ${sum.payableHours.toFixed(2)} payable hours, $${sum.estimatedGrossLabor.toFixed(2)} estimated gross labor.`)
   console.log(`Sales feed ${coverage.firstDate} to ${coverage.lastDate}.`)
   console.log(`Headline complete month: ${headline?.month} at ${headline?.laborPct}% labor, $${headline?.salesPerLaborHour}/labor hour.`)

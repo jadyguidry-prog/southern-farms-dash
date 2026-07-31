@@ -1,5 +1,5 @@
 import { formatCurrency } from '@/lib/data'
-import type { LaborSummary, MonthlyLabor } from '@/lib/labor-service'
+import type { LaborSummary, LaborMonth } from '@/lib/labor-service'
 
 /**
  * Reporting view of the Square-timecard labor cost (rule 18's third consumer,
@@ -21,7 +21,7 @@ export function LaborReport({
   monthly,
 }: {
   summary: LaborSummary
-  monthly: MonthlyLabor[]
+  monthly: LaborMonth[]
 }) {
   if (summary.shiftCount === 0) {
     return (
@@ -87,7 +87,9 @@ export function LaborReport({
           <tbody>
             {rows.map((m) => (
               <tr key={m.monthKey} className="border-b border-border/60">
-                <th scope="row" className="py-2 pr-3 font-normal">
+                {/* `text-left` is explicit: a bare <th> centres by default,
+                    which would misalign the month under its own header. */}
+                <th scope="row" className="py-2 pr-3 text-left font-normal">
                   {m.month}
                   {m.coverage === 'partial' && (
                     <span className="ml-1.5 text-xs text-muted-foreground">
@@ -194,7 +196,7 @@ export function LaborReport({
               <tbody>
                 {summary.unpricedBy.map((u) => (
                   <tr key={u.label} className="border-b border-border/60">
-                    <th scope="row" className="py-2 pr-3 font-normal">
+                    <th scope="row" className="py-2 pr-3 text-left font-normal">
                       {u.label}
                     </th>
                     <td className="py-2 pr-3 text-right font-mono text-xs">
