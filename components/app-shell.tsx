@@ -15,6 +15,7 @@ import {
   FileQuestion,
   Store,
   Landmark,
+  Megaphone,
   Wallet,
   Sparkles,
   Settings,
@@ -61,6 +62,7 @@ const navSections = [
       { label: 'Cash Flow', href: '/cash-flow', icon: Banknote },
       { label: 'Cash & Debt', href: '/cash-debt', icon: Wallet },
       { label: 'Loans', href: '/loans', icon: Landmark },
+      { label: 'Marketing Budget', href: '/marketing', icon: Megaphone },
     ],
   },
   {

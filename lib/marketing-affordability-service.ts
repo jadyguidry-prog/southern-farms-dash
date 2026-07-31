@@ -1075,6 +1075,7 @@ export type MarketingAffordability = {
     netMonthlyCashFlow: number
     avgDailyOutflow: number
     daysCashOnHand: number
+    daysCashTarget: number
     payrollPct: number
     payrollMonthly: number
     reserveCoverage: number
@@ -1423,6 +1424,7 @@ export async function getMarketingAffordability(
       netMonthlyCashFlow,
       avgDailyOutflow,
       daysCashOnHand,
+      daysCashTarget: cash.daysCashTarget,
       payrollPct,
       payrollMonthly,
       reserveCoverage,
