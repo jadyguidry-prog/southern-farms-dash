@@ -227,6 +227,7 @@ const affordable: MarketingArg = {
   seasonalLabel: 'December',
   seasonalIndex: 1.3,
   uncategorized: null,
+  lapsedChannels: [],
 }
 
 function marketingIds(marketing?: MarketingArg): string[] {
@@ -373,6 +374,98 @@ eq(
   [],
   'marketing: fully categorized books produce no uncategorized warning',
 )
+
+// Regression: the owner states ~$950/mo of marketing (billboards, spokesman,
+// Facebook) but billboards and radio have no charge in months, so every trailing
+// average reads near zero. The advisor must say those channels went quiet rather
+// than advising against a baseline that silently treats them as ended.
+{
+  const lapsed: MarketingArg = {
+    ...affordable,
+    categorizedMonthly: 16,
+    lapsedChannels: [
+      {
+        channel: 'Radio / TV advertising',
+        lastDate: '2025-09-08',
+        monthsSinceLastCharge: 10,
+        typicalMonthly: 875,
+      },
+      {
+        channel: 'Billboards / outdoor',
+        lastDate: '2025-12-05',
+        monthsSinceLastCharge: 7,
+        typicalMonthly: 535,
+      },
+    ],
+  }
+  const insight = generateInsights({ settings, pillars, marketing: lapsed }).find(
+    (i) => i.id === 'auto-marketing-lapsed',
+  )
+  eq(insight?.severity, 'warning', 'marketing: lapsed channels warn')
+  eq(
+    insight?.title,
+    '2 marketing channels stopped appearing in the bank feed',
+    'marketing: the title counts the quiet channels',
+  )
+  eq(
+    insight?.impact,
+    'Marketing baseline understated',
+    'marketing: the impact does not quote an unmeasurable amount',
+  )
+  // Regression: summing the per-channel averages produced "$1,410/mo unaccounted"
+  // against a real ~$950/mo. Those averages cover different, non-overlapping
+  // periods, so adding them asserts a concurrent total that was never paid.
+  eq(
+    /\$1,410/.test(JSON.stringify(insight)),
+    false,
+    'marketing: non-concurrent channel averages are never summed',
+  )
+  eq(
+    insight?.detail.includes('must not be added together'),
+    true,
+    'marketing: the reason the total is unknowable is stated',
+  )
+  // Naming the date is what lets the owner confirm or deny it from memory.
+  eq(
+    insight?.detail.includes('last billed 2025-12-05'),
+    true,
+    'marketing: each channel reports when it was last seen',
+  )
+  // The point is that this is a data gap, not a spending decision.
+  eq(
+    insight?.detail.includes('cannot attribute'),
+    true,
+    'marketing: the reason the money is invisible is stated',
+  )
+  eq(
+    insight?.detail.includes('Confirm whether each channel actually ended'),
+    true,
+    'marketing: the owner is asked to confirm before trusting the budget',
+  )
+}
+// A single quiet channel is named directly rather than counted.
+{
+  const one = generateInsights({
+    settings,
+    pillars,
+    marketing: {
+      ...affordable,
+      lapsedChannels: [
+        {
+          channel: 'Billboards / outdoor',
+          lastDate: '2025-12-05',
+          monthsSinceLastCharge: 7,
+          typicalMonthly: 535,
+        },
+      ],
+    },
+  }).find((i) => i.id === 'auto-marketing-lapsed')
+  eq(
+    one?.title,
+    'Billboards / outdoor stopped appearing in the bank feed',
+    'marketing: a single quiet channel is named in the title',
+  )
+}
 
 /* ---------------- report ---------------- */
 console.log(`\ncash-flow insights: ${pass} passed, ${fail} failed`)

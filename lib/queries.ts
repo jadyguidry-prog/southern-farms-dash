@@ -955,6 +955,12 @@ export async function getHealthSnapshot() {
           confidenceLabel: marketing.confidence.recommendation.label,
           seasonalLabel: marketing.seasonality.nextMonth?.label ?? null,
           seasonalIndex: marketing.seasonality.nextMonth?.index ?? null,
+          lapsedChannels: marketing.reconciliation.lapsed.map((l) => ({
+            channel: l.channel,
+            lastDate: l.lastDate,
+            monthsSinceLastCharge: l.monthsSinceLastCharge,
+            typicalMonthly: l.typicalMonthly,
+          })),
           // Null rather than zeros when the books are clean, so the advisor stays
           // silent instead of reporting "$0 uncategorized".
           uncategorized:

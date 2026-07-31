@@ -403,6 +403,17 @@ type MarketingInsightInput = {
     impliedMonthly: number
     topChannels: string[]
   } | null
+  /**
+   * Channels that billed regularly and then vanished from the bank feed. The
+   * trailing average reads these as "stopped", which is wrong when they are still
+   * being paid by a route the export carries no payee for (usually a check).
+   */
+  lapsedChannels: {
+    channel: string
+    lastDate: string
+    monthsSinceLastCharge: number
+    typicalMonthly: number
+  }[]
 }
 
 type InsightInput = {
@@ -1002,6 +1013,30 @@ export function generateInsights({
         title: `Room to raise marketing to ${formatCurrency(marketing.recommended)} a month`,
         detail: `Cash covers the reserve, bills and payroll with ${formatCurrency(marketing.additionalSafe)} to spare, so marketing can rise from ${formatCurrency(marketing.current)} to ${formatCurrency(marketing.recommended)}.${seasonNote} Based on ${marketing.confidenceLabel.toLowerCase()} confidence data.`,
         impact: `Up to ${formatCurrency(marketing.recommended - marketing.current)}/mo more`,
+      })
+    }
+
+    // Channels that went quiet distort the baseline more than miscategorization
+    // does, because the trailing average scores them as zero rather than merely
+    // misfiling them. Raised first for that reason.
+    if (marketing.lapsedChannels.length > 0) {
+      const worst = marketing.lapsedChannels[0]
+      out.push({
+        id: 'auto-marketing-lapsed',
+        severity: 'warning',
+        category: 'Marketing',
+        title: `${marketing.lapsedChannels.length === 1 ? worst.channel : `${marketing.lapsedChannels.length} marketing channels`} stopped appearing in the bank feed`,
+        // Deliberately NOT a sum of the per-channel rates. Those averages cover
+        // different, non-overlapping periods (one channel was two charges in a
+        // single season), so adding them implies a concurrent monthly total that
+        // was never actually paid — it overstated real spend by roughly 2x.
+        detail: `${marketing.lapsedChannels
+          .map(
+            (l) =>
+              `${l.channel} last billed ${l.lastDate} (${l.monthsSinceLastCharge} months ago, averaging ${formatCurrency(l.typicalMonthly)} in the months it did bill)`,
+          )
+          .join('; ')}. If you are still paying any of these, the money is leaving by a route the bank export cannot attribute — usually a check — so it is missing from the ${formatCurrency(marketing.categorizedMonthly)}/mo figure and from the budget below. How much is missing cannot be measured from this data: those averages cover different periods and must not be added together. Confirm which channels are still running before trusting this recommendation.`,
+        impact: 'Marketing baseline understated',
       })
     }
 

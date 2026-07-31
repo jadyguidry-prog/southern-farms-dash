@@ -124,9 +124,11 @@ export function MarketingSpendPanel({
                   These channels stopped appearing in the bank feed
                 </p>
                 <p className="text-pretty text-sm leading-relaxed text-muted-foreground">
-                  Each billed regularly and then stopped. If you are still paying them,
+                  Each billed for a while and then stopped. If you are still paying them,
                   the charges are arriving by a route this feed cannot identify — most
-                  likely a check — so they are missing from every figure above.
+                  likely a check — so they are missing from every figure above. Each
+                  amount is the average for the months that channel actually billed;
+                  they cover different periods, so they do not add up to a monthly total.
                 </p>
               </div>
               <ul className="flex flex-col gap-1.5">
