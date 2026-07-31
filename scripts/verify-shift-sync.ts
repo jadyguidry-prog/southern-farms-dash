@@ -62,7 +62,7 @@ async function main() {
       limit: 200,
       cursor,
     })
-    apiShifts.push(...((res.shifts ?? []) as Record<string, unknown>[]))
+    apiShifts.push(...((res.shifts ?? []) as unknown as Record<string, unknown>[]))
     cursor = res.cursor ?? undefined
     if (!cursor) break
   }
