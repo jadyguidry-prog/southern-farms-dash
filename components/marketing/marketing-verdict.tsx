@@ -39,12 +39,15 @@ export function MarketingVerdict({
   score,
   recommended,
   currentMonthly,
+  understated,
   targetMonthLabel,
 }: {
   recommendation: MarketingRecommendation
   score: AffordabilityScore
   recommended: number
   currentMonthly: number
+  /** True when advertising exists that was never categorized as marketing. */
+  understated: boolean
   targetMonthLabel: string
 }) {
   const Icon = ACTION_ICON[recommendation.action]
@@ -94,11 +97,19 @@ export function MarketingVerdict({
         <div className="flex flex-col gap-4 border-t border-border pt-5 sm:flex-row sm:gap-8">
           <div className="min-w-0">
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Spending now
+              Categorized spend
             </p>
             <p className="mt-1 font-mono text-lg font-semibold text-foreground">
               {formatCurrency(currentMonthly)}
               <span className="ml-1 font-sans text-xs font-normal text-muted-foreground">/mo</span>
+            </p>
+            {/* "Spending now" implied this was everything the owner spends. It is
+                a 3-month average of rows CATEGORIZED as marketing, which reads as
+                absurdly low when ad spend is filed under a blank category. */}
+            <p className="mt-1 text-xs text-muted-foreground">
+              {understated
+                ? '3-month average — understated, see below'
+                : 'Average of the last 3 months'}
             </p>
           </div>
           <div className="min-w-0">

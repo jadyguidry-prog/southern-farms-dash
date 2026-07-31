@@ -4,6 +4,7 @@ import { formatCurrency } from '@/lib/data'
 import type {
   CurrentMarketingSpend,
   Seasonality,
+  UncategorizedMarketing,
 } from '@/lib/marketing-affordability-service'
 
 function monthLabel(monthKey: string) {
@@ -16,10 +17,12 @@ export function MarketingSpendPanel({
   spend,
   seasonality,
   commitmentMismatch,
+  uncategorizedMarketing,
 }: {
   spend: CurrentMarketingSpend
   seasonality: Seasonality
   commitmentMismatch: { committed: number; actual: number } | null
+  uncategorizedMarketing: UncategorizedMarketing
 }) {
   const peak = Math.max(1, ...spend.monthly.map((m) => m.amount))
   const observed = seasonality.months.filter((m) => m.years > 0)
@@ -53,6 +56,50 @@ export function MarketingSpendPanel({
             ))}
           </dl>
 
+          {/* The usual reason this whole panel reads far too low: real ad spend
+              that was never categorized, so every figure above excludes it. */}
+          {uncategorizedMarketing.channels.length > 0 && (
+            <div className="flex flex-col gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
+              <div className="flex flex-col gap-1.5">
+                <p className="text-pretty text-sm font-semibold text-foreground">
+                  {formatCurrency(uncategorizedMarketing.total)} of advertising is not
+                  counted above because it has no category
+                </p>
+                <p className="text-pretty text-sm leading-relaxed text-foreground">
+                  These charges look like marketing but are filed under a blank
+                  category, so they are missing from every figure on this page. That
+                  is roughly{' '}
+                  <span className="font-mono font-semibold">
+                    {formatCurrency(uncategorizedMarketing.impliedMonthly)}
+                  </span>{' '}
+                  a month across the{' '}
+                  {uncategorizedMarketing.monthsSpanned}{' '}
+                  {uncategorizedMarketing.monthsSpanned === 1 ? 'month' : 'months'} they
+                  appear in. Set their category to Marketing on the Transactions page
+                  and these numbers will reflect what you actually spend.
+                </p>
+              </div>
+              <ul className="flex flex-col gap-1.5">
+                {uncategorizedMarketing.channels.map((c) => (
+                  <li
+                    key={c.channel}
+                    className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5 border-t border-amber-500/20 pt-1.5 text-sm"
+                  >
+                    <span className="font-medium text-foreground">
+                      {c.channel}
+                      <span className="ml-2 font-normal text-muted-foreground">
+                        {c.count} {c.count === 1 ? 'charge' : 'charges'}
+                      </span>
+                    </span>
+                    <span className="font-mono font-semibold text-foreground">
+                      {formatCurrency(c.amount)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {commitmentMismatch && (
             <div className="flex flex-col gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
               <p className="text-sm font-semibold text-foreground text-pretty">
@@ -67,9 +114,12 @@ export function MarketingSpendPanel({
                 <span className="font-mono font-semibold">
                   {formatCurrency(commitmentMismatch.actual)}
                 </span>{' '}
-                is leaving the bank. Either the commitment is stale and is making every cash
-                forecast look worse than reality, or marketing is being paid from somewhere these
-                books do not see.
+                is leaving the bank under that category.{' '}
+                {/* Without this the two callouts contradict each other: one says
+                    $1,192/mo of ads exists, the other that only $16 is spent. */}
+                {uncategorizedMarketing.channels.length > 0
+                  ? 'The uncategorized advertising above almost certainly accounts for this, so fix those categories first and then re-check this figure.'
+                  : 'Either the commitment is stale and is making every cash forecast look worse than reality, or marketing is being paid from somewhere these books do not see.'}
               </p>
             </div>
           )}

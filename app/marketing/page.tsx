@@ -53,6 +53,7 @@ export default async function MarketingPage() {
         score={data.score}
         recommended={data.budget.recommended}
         currentMonthly={data.spend.avg3Month}
+        understated={data.uncategorizedMarketing.channels.length > 0}
         targetMonthLabel={metrics.targetMonthLabel}
       />
 
@@ -70,6 +71,7 @@ export default async function MarketingPage() {
             spend={data.spend}
             seasonality={data.seasonality}
             commitmentMismatch={data.commitmentMismatch}
+            uncategorizedMarketing={data.uncategorizedMarketing}
           />
           <ConfidencePanel confidence={data.confidence} />
         </div>

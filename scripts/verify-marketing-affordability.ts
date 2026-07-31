@@ -17,6 +17,7 @@ import {
   computeConfidence,
   computeRecommendedBudget,
   computeSeasonality,
+  findUncategorizedMarketing,
   placeholderReceivableReason,
   scoreAffordability,
   summarizeCurrentMarketingSpend,
@@ -336,6 +337,72 @@ check(
   marketingChannelName('FACEBK *BBMFW9H6N2 650-543-7818 CA'),
   'Facebook / Meta Ads',
 )
+// Regression: Meta also bills through PayPal as one unspaced word, which the
+// old `META PLATFORMS` pattern missed entirely.
+check(
+  'Meta routed through PayPal is recognised',
+  marketingChannelName('PAYPAL INST XFER METAPLATFOR'),
+  'Facebook / Meta Ads',
+)
+// `\bSIGNS?\b` must not fire on DESIGN, so this falls through to the generic
+// fallback rather than being mislabelled as signage.
+check(
+  'DESIGN must not match the SIGN pattern',
+  marketingChannelName('WEB DESIGN CO'),
+  'WEB DESIGN CO',
+)
+
+console.log('\nUncategorized marketing detection')
+{
+  // Regression: the owner spends ~$1,200/mo but the page reported $16/mo,
+  // because real advertising sat under a BLANK category and so was excluded
+  // from every marketing figure.
+  const rows = [
+    { id: '1', transactionDate: '2025-12-05', description: 'BAYOU SIGNS OUTD SALE', amount: -450, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    { id: '2', transactionDate: '2025-12-10', description: 'PAYPAL INST XFER METAPLATFOR', amount: -92, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    { id: '3', transactionDate: '2025-09-08', description: 'Coastal Broadcas PURCHASE 19712472', amount: -1050, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    { id: '4', transactionDate: '2025-12-05', description: 'PAYPAL INST XFER VISTAPRINT', amount: -618.1, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    // Already categorized: must NOT be offered again as a suggestion.
+    { id: '5', transactionDate: '2025-12-15', description: 'FACEBK *BBMFW9H6N2', amount: -98, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: 'Marketing', vendorId: null },
+    // Genuinely not marketing.
+    { id: '6', transactionDate: '2025-12-16', description: 'ENTERGY LOUISIAN BANK DRAFT', amount: -1800, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    // Excluded rows stay excluded.
+    { id: '7', transactionDate: '2025-12-17', description: 'BAYOU SIGNS OUTD SALE', amount: -9999, transactionType: 'expense', reviewStatus: 'excluded', expenseCategory: '', vendorId: null },
+    // Vendor already marked marketing: counted elsewhere, not a suggestion.
+    { id: '8', transactionDate: '2025-12-18', description: 'LAMAR BILLBOARD', amount: -500, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: 'v-mk' },
+  ]
+  const u = findUncategorizedMarketing(rows as never, new Set(['v-mk']))
+  // 450 + 92 + 1050 + 618.10 = 2,210.10
+  check('uncategorized advertising is totalled', Math.round(u.total * 100) / 100, 2210.1)
+  ok('already-categorized marketing is not re-suggested', !JSON.stringify(u).includes('98,'))
+  ok('a marketing vendor is not re-suggested', !JSON.stringify(u).includes('500'))
+  ok('utilities are not mistaken for marketing', !JSON.stringify(u).includes('1800'))
+  ok('excluded rows stay excluded', !JSON.stringify(u).includes('9999'))
+  check('signage/print, broadcast and Meta are separated', u.channels.length, 3)
+  check('only months actually seen are counted', u.monthsSpanned, 2)
+  ok(
+    'the implied monthly rate is the total over those months',
+    Math.round(u.impliedMonthly) === 1105,
+    `implied ${u.impliedMonthly}`,
+  )
+  // Signage + VistaPrint = $1,068.10, just ahead of broadcast's $1,050.
+  ok(
+    'the biggest channel is listed first so the owner fixes it first',
+    u.channels[0].channel === 'Signage / printing' && u.channels[0].amount > 1_068,
+    JSON.stringify(u.channels.map((c) => `${c.channel}=${c.amount}`)),
+  )
+}
+{
+  // Clean books must produce no noise at all.
+  const u = findUncategorizedMarketing(
+    [
+      { id: '1', transactionDate: '2026-06-01', description: 'FACEBK *AAA', amount: -100, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: 'Marketing', vendorId: null },
+    ] as never,
+    new Set<string>(),
+  )
+  check('fully categorized books report nothing', u.channels.length, 0)
+  check('and no implied monthly figure is invented', u.impliedMonthly, 0)
+}
 
 console.log('\nConfidence')
 {

@@ -97,17 +97,66 @@ export function addMonths(monthKey: string, n: number): string {
  * token per charge, so grouping on the raw string would report 18 separate
  * "channels" for what is one advertising account.
  */
+/**
+ * Description patterns that identify a marketing channel.
+ *
+ * Single source of truth, shared by `marketingChannelName` (naming rows already
+ * known to be marketing) and `findUncategorizedMarketing` (spotting marketing
+ * that was never categorized). Keeping one table stops the two from drifting.
+ *
+ * `confident` marks patterns that are advertising and essentially nothing else.
+ * Only those are used to flag uncategorized spend, because suggesting a
+ * miscategorization is only useful if it is very likely to be right — Adobe or a
+ * domain renewal is just as plausibly Software.
+ */
+const MARKETING_PATTERNS: { test: RegExp; channel: string; confident: boolean }[] = [
+  // Meta bills direct as `FACEBK *<token>`, but also arrives routed through
+  // PayPal as `PAYPAL INST XFER METAPLATFOR` — no space, so a `META PLATFORMS`
+  // pattern misses it entirely.
+  {
+    test: /FACEBK|FACEBOOK|META\s*PLAT|METAPLAT|META ADS|INSTAGRAM/,
+    channel: 'Facebook / Meta Ads',
+    confident: true,
+  },
+  { test: /GOOGLE\s*ADS|ADWORDS/, channel: 'Google Ads', confident: true },
+  {
+    test: /MAILCHIMP|KLAVIYO|CONSTANT CONTACT|SENDGRID/,
+    channel: 'Email marketing',
+    confident: true,
+  },
+  {
+    test: /TEXTEDLY|SIMPLETEXTING|ATTENTIVE/,
+    channel: 'SMS marketing',
+    confident: true,
+  },
+  { test: /BILLBOARD|LAMAR|OUTFRONT/, channel: 'Billboards', confident: true },
+  {
+    test: /BROADCAS|\bRADIO\b|CABLE ADVERT/,
+    channel: 'Radio / TV advertising',
+    confident: true,
+  },
+  // `\bSIGN` so DESIGN does not match. VISTAPRINT is named explicitly because it
+  // is one word — a `\bPRINTING\b` pattern alone misses it.
+  {
+    test: /\bSIGNS?\b|\bSIGNAGE\b|\bBANNER|\bPRINTING\b|VISTAPRINT|VISTA PRINT/,
+    channel: 'Signage / printing',
+    confident: true,
+  },
+  { test: /\bYELP\b|THUMBTACK/, channel: 'Directory listings', confident: true },
+  { test: /PHOTO/, channel: 'Photography', confident: false },
+  { test: /CANVA|ADOBE/, channel: 'Design software', confident: false },
+  {
+    test: /GODADDY|NAMECHEAP|SQUARESPACE|WIX|WORDPRESS|SHOPIFY/,
+    channel: 'Website / domain',
+    confident: false,
+  },
+]
+
 export function marketingChannelName(description: string): string {
   const d = description.trim().toUpperCase()
-  if (/^FACEBK|FACEBOOK|META PLATFORMS|META ADS/.test(d)) return 'Facebook / Meta Ads'
-  if (/GOOGLE\s*ADS|ADWORDS/.test(d)) return 'Google Ads'
-  if (/MAILCHIMP|KLAVIYO|CONSTANT CONTACT|SENDGRID/.test(d)) return 'Email marketing'
-  if (/TWILIO|TEXTEDLY|SIMPLETEXTING|ATTENTIVE/.test(d)) return 'SMS marketing'
-  if (/CANVA|ADOBE/.test(d)) return 'Design software'
-  if (/GODADDY|NAMECHEAP|SQUARESPACE|WIX|WORDPRESS|SHOPIFY/.test(d)) return 'Website / domain'
-  if (/BILLBOARD|LAMAR|OUTFRONT/.test(d)) return 'Billboards'
-  if (/PRINT|SIGN|BANNER/.test(d)) return 'Printing / signage'
-  if (/PHOTO/.test(d)) return 'Photography'
+  for (const p of MARKETING_PATTERNS) {
+    if (p.test.test(d)) return p.channel
+  }
   // Fall back to the leading words, which is enough to identify an agency or a
   // local vendor without exposing a transaction reference as a channel.
   return description.trim().split(/\s{2,}|\s(?=\d)/)[0]?.slice(0, 40) || 'Other marketing'
@@ -197,6 +246,74 @@ export function summarizeCurrentMarketingSpend(
     channels: [...channelMap]
       .map(([name, v]) => ({ name, ...v }))
       .sort((a, b) => b.amount - a.amount),
+  }
+}
+
+export type SuspectedMarketingChannel = {
+  channel: string
+  amount: number
+  count: number
+  sampleDescription: string
+}
+
+export type UncategorizedMarketing = {
+  channels: SuspectedMarketingChannel[]
+  total: number
+  /** Spread over the months actually covered, for comparison with the average. */
+  impliedMonthly: number
+  monthsSpanned: number
+}
+
+/**
+ * Advertising charges that were never categorized as Marketing.
+ *
+ * This is the usual reason reported marketing looks far too low: the money left
+ * the bank, but under a blank category, so every marketing figure excludes it.
+ * These are reported as suggestions for the owner to confirm — never silently
+ * counted as marketing, because guessing a category would corrupt the ledger
+ * the rest of the app trusts.
+ */
+export function findUncategorizedMarketing(
+  rows: MarketingTxnRow[],
+  marketingVendorIds: Set<string>,
+  aliases: CategoryAliasMap = {},
+): UncategorizedMarketing {
+  const map = new Map<string, SuspectedMarketingChannel>()
+  const months = new Set<string>()
+  let total = 0
+
+  for (const r of rows) {
+    if (r.reviewStatus === 'excluded') continue
+    if (!SPEND_TYPES.includes(r.transactionType as never)) continue
+
+    // Skip anything already counted, so this only ever reports NEW money.
+    const category = canonicalCategory(r.expenseCategory, aliases)
+    if (category === MARKETING_CATEGORY) continue
+    if (r.vendorId != null && marketingVendorIds.has(r.vendorId)) continue
+
+    const d = r.description.trim().toUpperCase()
+    const hit = MARKETING_PATTERNS.find((p) => p.confident && p.test.test(d))
+    if (!hit) continue
+
+    const key = monthKeyOf(r.transactionDate)
+    if (key) months.add(key)
+
+    const amount = Math.abs(r.amount)
+    total += amount
+    const e =
+      map.get(hit.channel) ??
+      { channel: hit.channel, amount: 0, count: 0, sampleDescription: r.description }
+    e.amount += amount
+    e.count += 1
+    map.set(hit.channel, e)
+  }
+
+  const monthsSpanned = months.size
+  return {
+    channels: [...map.values()].sort((a, b) => b.amount - a.amount),
+    total,
+    impliedMonthly: monthsSpanned > 0 ? total / monthsSpanned : 0,
+    monthsSpanned,
   }
 }
 
@@ -1137,6 +1254,12 @@ export type MarketingAffordability = {
   }
   /** Empty until ad-platform data exists; see `optimizeByRoi`. */
   roi: ChannelRoi[]
+  /**
+   * Advertising charges found in the ledger that are NOT categorized Marketing,
+   * so every figure above excludes them. Usually the reason reported spend looks
+   * far lower than what the owner knows they spend.
+   */
+  uncategorizedMarketing: UncategorizedMarketing
   hasData: boolean
 }
 
@@ -1272,6 +1395,7 @@ export async function getMarketingAffordability(
   ])
 
   const spend = summarizeCurrentMarketingSpend(txns, marketingVendorIds, today)
+  const uncategorizedMarketing = findUncategorizedMarketing(txns, marketingVendorIds)
   const monthly = deriveMonthlyCashFlow(txns, { months: 24 })
 
   // ---- Revenue ----
@@ -1461,6 +1585,7 @@ export async function getMarketingAffordability(
 
   return {
     spend,
+    uncategorizedMarketing,
     cash: cashResult,
     budget,
     score,
