@@ -9,6 +9,9 @@ import {
   resolveNextDueDate,
 } from '@/lib/health'
 import {
+  getMarketingAffordability,
+} from '@/lib/marketing-affordability-service'
+import {
   getSquareDailySales,
   computeWeeklySales,
   summarizeDailyRows,
@@ -58,6 +61,12 @@ export const SETTING_DEFAULTS = {
   preferred_weekly_sales: 18000,
   minimum_weekly_sales: 17000,
   avg_monthly_wholesale: 6000,
+  // Marketing Affordability engine knobs. Seeded as real rows by migration
+  // `marketing_affordability_settings`; these mirrors exist only so a fresh
+  // database still returns a number instead of `undefined`.
+  marketing_baseline_pct: 1.5,
+  marketing_ceiling_pct: 3,
+  days_cash_target: 30,
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS
@@ -700,6 +709,51 @@ export const getCashDebtSummary = cache(async () => {
     overdueReceivablesCount: overdueReceivables.length,
     netWorth: totalCash + totalReceivable - totalDebt - totalObligations,
   }
+})
+
+/**
+ * Marketing affordability, built on the shared cash summary.
+ *
+ * The cash facts are passed down rather than re-derived inside the marketing
+ * service so the two can never disagree about what the business can afford.
+ * Wrapped in `cache` because the dashboard, the advisor and the marketing page
+ * all ask for it during a single render.
+ */
+export const getMarketingAffordabilitySnapshot = cache(async () => {
+  const summary = await getCashDebtSummary()
+  const cashAccounts = summary.accounts.filter((a) =>
+    CASH_ON_HAND_TYPES.includes(a.accountType),
+  )
+  // Freshest balance date across the spendable accounts; a stale balance makes
+  // every downstream number less trustworthy, which the engine reports.
+  const balancesUpdatedAt =
+    cashAccounts
+      .map((a) => String(a.lastUpdated ?? ''))
+      .filter((d) => /^\d{4}-\d{2}-\d{2}/.test(d))
+      .sort()
+      .pop() ?? null
+
+  return getMarketingAffordability({
+    cashOnHand: summary.cashOnHand,
+    minCashReserve: summary.minCashReserve,
+    obligations30: summary.obligations30,
+    monthlyDebtService: summary.monthlyDebtService,
+    creditDrawn: summary.creditDrawn,
+    creditLimitTotal: summary.creditLimitTotal,
+    receivables: summary.receivables.map((r) => ({
+      customerName: r.customerName,
+      invoiceNumber: r.invoiceNumber,
+      amount: r.amount,
+      amountPaid: r.amountPaid,
+      status: r.status,
+      notes: r.notes,
+    })),
+    balancesUpdatedAt,
+    targetPayrollPct: summary.settings.target_payroll_pct,
+    baselinePct: summary.settings.marketing_baseline_pct,
+    ceilingPct: summary.settings.marketing_ceiling_pct,
+    daysCashTarget: summary.settings.days_cash_target,
+  })
 })
 
 /**
