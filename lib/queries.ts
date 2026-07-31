@@ -795,6 +795,23 @@ export async function getHealthSnapshot() {
       latestDate: squareWeekly.latestDate,
       conflictDayCount: squareSummary.conflictDays.length,
     },
+    // Same guard as cash flow: with no timecards there is nothing to advise on,
+    // so the group is omitted rather than passed as zeros.
+    labor: labor.hasData
+      ? {
+          laborPct: labor.laborPct,
+          monthLabel: labor.monthLabel,
+          estimatedGrossLabor: labor.estimatedGrossLabor,
+          payableHours: labor.payableHours,
+          overtimeHours: labor.overtimeHours,
+          estimatedOvertimeCost: labor.estimatedOvertimeCost,
+          unpricedHours: labor.unpricedHours,
+          unpricedShifts: labor.unpricedShifts,
+          unpricedBy: labor.unpricedBy,
+          likelyMissedClockOuts: labor.likelyMissedClockOuts,
+          salesPerLaborHour: labor.salesPerLaborHour,
+        }
+      : undefined,
     // Only pass the group when transactions actually exist, so a farm with no
     // imported bank data gets no cash-flow insights rather than ones built on
     // zeros.
@@ -834,6 +851,23 @@ export async function getHealthSnapshot() {
   // card and the health pillar can never show different numbers.
   const kpisWithSquare: Kpis = {
     ...kpis,
+    payrollPct: {
+      ...kpi(kpis, 'payrollPct'),
+      value: payrollValue,
+      meta: {
+        ...kpi(kpis, 'payrollPct').meta,
+        ...(labor.laborPct != null && labor.laborPct > 0
+          ? {
+              source: 'Square timecards',
+              month: labor.monthLabel ?? '',
+              // Unpriced hours mean the true ratio can only be higher. `meta`
+              // holds string|number only, so pass the hours and let the UI
+              // decide how to caveat it.
+              unpricedHours: Math.round(labor.unpricedHours),
+            }
+          : {}),
+      },
+    },
     weeklySales: {
       ...kpi(kpis, 'weeklySales'),
       value: weeklySalesValue,
@@ -861,6 +895,9 @@ export async function getHealthSnapshot() {
     // Exposed so the dashboard and reporting render the same cash-flow figures
     // the advisor reasons about.
     cashFlow: cashFlowInsight,
+    // Same contract for labor: one measured source behind the dashboard,
+    // advisor, and reporting.
+    labor,
   }
 }
 

@@ -2,7 +2,13 @@ import { PageHeader } from '@/components/page-header'
 import { AdminPanel } from '@/components/admin/admin-panel'
 import { SquareCsvImport } from '@/components/admin/square-csv-import'
 import { CashFlowReport } from '@/components/admin/cash-flow-report'
+import { LaborReport } from '@/components/admin/labor-report'
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
+import {
+  getLaborDataset,
+  summarizeLabor,
+  deriveMonthlyLabor,
+} from '@/lib/labor-service'
 import { createClient } from '@/lib/supabase/server'
 import { ADMIN_TABLES } from '@/lib/admin-config'
 import {
@@ -29,12 +35,20 @@ export default async function AdminPage() {
   )
 
   const data = Object.fromEntries(results) as Record<string, Record<string, unknown>[]>
-  const [batches, cashFlowInsight] = await Promise.all([
+  const [batches, cashFlowInsight, laborDataset] = await Promise.all([
     getCsvImportBatches(),
     // Reporting shows every imported month, not the dashboard's trailing 12, so
     // the Total reconciles against the full set of statements on file.
     getCashFlowInsight({ months: Number.MAX_SAFE_INTEGER }),
+    // Unfiltered for the same reason: this table reconciles against Square's
+    // own payroll export, so it must cover every synced timecard.
+    getLaborDataset(),
   ])
+  const laborSummary = summarizeLabor(laborDataset.shifts, laborDataset.coverage)
+  const laborMonthly = deriveMonthlyLabor(
+    laborDataset.shifts,
+    laborDataset.coverage,
+  )
 
   return (
     <div>
@@ -44,6 +58,8 @@ export default async function AdminPage() {
       />
       <div className="mb-6 flex flex-col gap-4">
         <CashFlowReport insight={cashFlowInsight} />
+
+        <LaborReport summary={laborSummary} monthly={laborMonthly} />
 
         <SquareCsvImport
           onPreflight={preflightDailyImport}

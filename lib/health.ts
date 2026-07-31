@@ -298,6 +298,29 @@ export type CashFlowInsightInput = {
   mistypedCategoryCount?: number
 }
 
+/**
+ * Timecard-derived labor facts the advisor can act on. Separate from the
+ * payroll pillar because these are data-quality and scheduling issues, not
+ * ratio-versus-target judgements.
+ */
+export type LaborInsightInput = {
+  /** Labor as a share of net sales for the latest COMPLETE month. */
+  laborPct: number | null
+  monthLabel: string | null
+  estimatedGrossLabor: number
+  payableHours: number
+  overtimeHours: number
+  estimatedOvertimeCost: number
+  /** Hours with no wage on file — they make every labor figure a floor. */
+  unpricedHours: number
+  unpricedShifts: number
+  /** Who the unpriced hours belong to, so the owner knows where to look. */
+  unpricedBy: { label: string; hours: number }[]
+  /** Shifts long enough to imply a forgotten clock-out. */
+  likelyMissedClockOuts: number
+  salesPerLaborHour: number | null
+}
+
 type InsightInput = {
   settings: BusinessSettings
   pillars: HealthPillars
@@ -306,6 +329,8 @@ type InsightInput = {
   overdueObligations?: number
   square?: SquareInsightInput
   cashFlow?: CashFlowInsightInput
+  /** Omit entirely when no timecards exist, so no labor insights are made up. */
+  labor?: LaborInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
 }
@@ -321,6 +346,7 @@ export function generateInsights({
   overdueObligations = 0,
   square,
   cashFlow,
+  labor,
   now,
 }: InsightInput): Insight[] {
   const out: Insight[] = []
@@ -381,9 +407,68 @@ export function generateInsights({
       severity: 'opportunity',
       category: 'Payroll',
       title: 'Payroll is under your target',
-      detail: `${payroll.message} Labor efficiency is working in your favor this period.`,
+      detail:
+        labor && labor.unpricedHours >= 1
+          ? `${payroll.message} Treat this as provisional: ${Math.round(labor.unpricedHours).toLocaleString()} worked hours have no wage on file, so the true ratio is higher than shown.`
+          : `${payroll.message} Labor efficiency is working in your favor this period.`,
       impact: `Target ${formatPercent(settings.target_payroll_pct, 0)} of sales`,
     })
+  }
+
+  /*
+   * --- Labor (from Square timecards) ---
+   * Data-quality issues come first: an unpriced hour or a forgotten clock-out
+   * distorts every labor number above, so the owner needs to know the ratio is
+   * a floor before acting on it.
+   */
+  if (labor) {
+    if (labor.unpricedHours >= 1) {
+      const who = labor.unpricedBy
+        .slice(0, 3)
+        .map((u) => `${u.label} (${Math.round(u.hours).toLocaleString()} h)`)
+        .join(', ')
+      out.push({
+        id: 'auto-labor-unpriced',
+        severity: 'warning',
+        category: 'Payroll',
+        title: 'Some worked hours have no wage on file',
+        detail: `${Math.round(labor.unpricedHours).toLocaleString()} payable hours across ${labor.unpricedShifts} shifts are costed at $0 because Square has no hourly rate for them${who ? `: ${who}` : ''}. Every labor total and payroll percentage is therefore a floor, not the real figure. Adding rates in Square — or recording owner pay separately if these are draws rather than wages — will make the ratio trustworthy.`,
+        impact: `${Math.round(labor.unpricedHours).toLocaleString()} h uncosted`,
+      })
+    }
+
+    if (labor.likelyMissedClockOuts > 0) {
+      out.push({
+        id: 'auto-labor-missed-clockouts',
+        severity: 'warning',
+        category: 'Payroll',
+        title: 'Several shifts look like missed clock-outs',
+        detail: `${labor.likelyMissedClockOuts} shifts ran long enough to suggest someone forgot to clock out. Each one inflates recorded hours and overstates labor cost. Correcting them in Square will tighten both the payroll ratio and the sales-per-labor-hour figure.`,
+        impact: `${labor.likelyMissedClockOuts} shifts to review`,
+      })
+    }
+
+    if (labor.overtimeHours >= 1) {
+      out.push({
+        id: 'auto-labor-overtime',
+        severity: labor.estimatedOvertimeCost >= 1000 ? 'warning' : 'opportunity',
+        category: 'Payroll',
+        title: 'Overtime is adding a premium to payroll',
+        detail: `About ${Math.round(labor.overtimeHours).toLocaleString()} hours were worked past 40 in a week, carrying an estimated ${formatCurrency(labor.estimatedOvertimeCost)} in half-time premium. Spreading those hours across more staff, or shifting them earlier in the week, converts most of that premium back into regular pay.`,
+        impact: `${formatCurrency(labor.estimatedOvertimeCost)} premium`,
+      })
+    }
+
+    if (labor.salesPerLaborHour != null && labor.monthLabel) {
+      out.push({
+        id: 'auto-labor-sales-per-hour',
+        severity: 'opportunity',
+        category: 'Payroll',
+        title: 'Sales per labor hour is measurable',
+        detail: `In ${labor.monthLabel} the shop produced ${formatCurrency(labor.salesPerLaborHour)} of net sales for every payable labor hour. Tracking this alongside the payroll percentage separates "we spent more on labor" from "labor became less productive" — the two call for very different responses.`,
+        impact: `${formatCurrency(labor.salesPerLaborHour)} per labor hour`,
+      })
+    }
   }
 
   // --- Weekly sales ---

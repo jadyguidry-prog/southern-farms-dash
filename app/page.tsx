@@ -47,7 +47,8 @@ export default async function DashboardPage() {
     getRecommendations(),
   ])
 
-  const { kpis, settings, pillars, composite, insights, cashFlow } = snapshot
+  const { kpis, settings, pillars, composite, insights, cashFlow, labor } =
+    snapshot
   // Generated insights lead, followed by anything entered manually.
   const recommendations = [...insights, ...saved]
 
@@ -228,7 +229,8 @@ export default async function DashboardPage() {
           <CardHeader className="pb-0">
             <CardTitle className="text-base">Payroll % of Sales</CardTitle>
             <CardDescription>
-              Target {formatPercent(payrollTarget, 0)} · warning above{' '}
+              {labor.monthLabel ? `${labor.monthLabel} · ` : ''}target{' '}
+              {formatPercent(payrollTarget, 0)} · warning above{' '}
               {formatPercent(payrollWarning, 0)}
             </CardDescription>
           </CardHeader>
@@ -241,10 +243,21 @@ export default async function DashboardPage() {
               centerText={formatPercent(payrollPct.value)}
             />
             <p className="text-center text-sm text-muted-foreground">
-              {payrollOverTarget > 0
-                ? `Over target by ${formatPercent(payrollOverTarget)}`
-                : `Under target by ${formatPercent(Math.abs(payrollOverTarget))}`}
+              {payrollPct.value <= 0
+                ? 'No timecard data yet'
+                : payrollOverTarget > 0
+                  ? `Over target by ${formatPercent(payrollOverTarget)}`
+                  : `Under target by ${formatPercent(Math.abs(payrollOverTarget))}`}
             </p>
+            {labor.hasData && labor.unpricedHours > 0 ? (
+              <p className="mt-1 text-center text-xs text-muted-foreground">
+                At least — {Math.round(labor.unpricedHours).toLocaleString()} h
+                have no wage on file.{' '}
+                <Link href="/payroll" className="underline">
+                  Review
+                </Link>
+              </p>
+            ) : null}
           </CardContent>
         </Card>
         <Card>

@@ -26,6 +26,8 @@ import {
   type LaborShiftInput,
   type SalesCoverage,
 } from '../lib/labor-service'
+import { generateInsights, payrollHealth, type LaborInsightInput } from '../lib/health'
+import { SETTING_DEFAULTS } from '../lib/queries'
 
 let pass = 0
 let fail = 0
@@ -375,7 +377,20 @@ async function reconcile() {
     .select('*', { count: 'exact', head: true })
   eq(raw.length, count, 'db: paged read returned every timecard row')
 
-  const { shifts } = normalizeShifts(raw)
+  // Resolve display names the same way the app does, so unpriced attribution
+  // reads as "Jady Guidry — Owner" rather than a raw Square id.
+  const { data: memberRows } = await db
+    .from('square_team_members')
+    .select('square_team_member_id, display_name, given_name, family_name')
+  const names = new Map<string, string>()
+  for (const m of memberRows ?? []) {
+    const name =
+      String(m.display_name ?? '').trim() ||
+      [m.given_name, m.family_name].filter(Boolean).join(' ').trim()
+    if (name) names.set(String(m.square_team_member_id), name)
+  }
+
+  const { shifts } = normalizeShifts(raw, names)
   const sum = summarizeLabor(shifts, { firstDate: null, lastDate: null, netByMonth: new Map(), daysByMonth: new Map() })
 
   // The owner's stated figures.
@@ -453,6 +468,164 @@ async function reconcile() {
     fail++
     failures.push('db: expected a complete headline month with a real labor %')
   }
+
+  /*
+   * Dashboard consistency. The payroll pillar must read the SAME headline
+   * month the Payroll page shows, and must never be driven by the range-wide
+   * average or a partial month. These guard the wiring in getHealthSnapshot.
+   */
+  const settingsRow = await db
+    .from('business_settings')
+    .select('setting_key, value')
+    .in('setting_key', ['target_payroll_pct', 'warning_payroll_pct'])
+  const settingByKey = new Map(
+    (settingsRow.data ?? []).map((r) => [String(r.setting_key), Number(r.value)]),
+  )
+  const target = settingByKey.get('target_payroll_pct')
+  const warning = settingByKey.get('warning_payroll_pct')
+
+  // The thresholds must come from the owner's settings, never a literal.
+  if (target != null && target > 0) pass++
+  else {
+    fail++
+    failures.push('db: target_payroll_pct missing — the pillar would compare against a hardcoded target')
+  }
+  if (warning != null && warning > 0) pass++
+  else {
+    fail++
+    failures.push('db: warning_payroll_pct missing')
+  }
+
+  // The dashboard value is the headline month's ratio, not the range average.
+  const rangeWidePct =
+    coverage.netByMonth.size > 0
+      ? (sum.estimatedGrossLabor /
+          [...coverage.netByMonth.values()].reduce((a, b) => a + b, 0)) *
+        100
+      : 0
+  const dashboardPct = headline?.laborPct ?? 0
+  if (dashboardPct > 0 && Math.abs(dashboardPct - rangeWidePct) > 0.01) pass++
+  else if (dashboardPct <= 0) {
+    fail++
+    failures.push('db: dashboard payroll pillar would render 0% and read as "unknown"')
+  } else {
+    fail++
+    failures.push('db: dashboard % equals the range-wide average — it should be the latest complete month')
+  }
+
+  // A partial month must never become the dashboard headline.
+  if (headline && !headline.partial) pass++
+  else {
+    fail++
+    failures.push('db: dashboard headline month is partial — sales would be understated')
+  }
+
+  const pillarStatus =
+    dashboardPct <= 0
+      ? 'unknown'
+      : warning != null && dashboardPct >= warning
+        ? 'red'
+        : target != null && dashboardPct >= target
+          ? 'yellow'
+          : 'green'
+  // Unpriced hours make the ratio a floor, so a green light is provisional.
+  if (sum.unpricedHours > 0 && pillarStatus === 'green') {
+    console.log(
+      `\nNote: pillar reads green at ${dashboardPct.toFixed(2)}% but ${sum.unpricedHours.toFixed(0)}h are unpriced — the true ratio is higher.`,
+    )
+  }
+
+  /*
+   * Advisor insights. The owner acts on these sentences, so verify the labor
+   * facts actually reach the advisor and that the data-quality caveats appear
+   * whenever the underlying numbers are incomplete.
+   */
+  const laborInput: LaborInsightInput = {
+    laborPct: headline?.laborPct ?? null,
+    monthLabel: headline?.month ?? null,
+    estimatedGrossLabor: sum.estimatedGrossLabor,
+    payableHours: sum.payableHours,
+    overtimeHours: sum.overtimeHours,
+    estimatedOvertimeCost: sum.estimatedOvertimeCost,
+    unpricedHours: sum.unpricedHours,
+    unpricedShifts: sum.unpricedShifts,
+    unpricedBy: sum.unpricedBy,
+    likelyMissedClockOuts: sum.likelyMissedClockOuts,
+    salesPerLaborHour: headline?.salesPerLaborHour ?? null,
+  }
+  const liveSettings = {
+    ...SETTING_DEFAULTS,
+    target_payroll_pct: target ?? SETTING_DEFAULTS.target_payroll_pct,
+    warning_payroll_pct: warning ?? SETTING_DEFAULTS.warning_payroll_pct,
+    rows: [],
+  }
+  const pillarsForAdvisor = {
+    payroll: payrollHealth(dashboardPct, liveSettings, dashboardPct > 0),
+    cash: { status: 'unknown', label: '', message: '', score: null } as const,
+    sales: { status: 'unknown', label: '', message: '', score: null } as const,
+  }
+  const insights = generateInsights({
+    settings: liveSettings,
+    pillars: pillarsForAdvisor,
+    labor: laborInput,
+  })
+  const ids = insights.map((i) => i.id)
+
+  // The unpriced-hours warning is the single most important labor insight:
+  // without it a green payroll light is quietly wrong.
+  if (sum.unpricedHours >= 1) {
+    if (ids.includes('auto-labor-unpriced')) pass++
+    else {
+      fail++
+      failures.push('advisor: unpriced hours exist but no unpriced-hours insight was produced')
+    }
+    // And the green payroll note must not claim an unqualified win.
+    const ok = insights.find((i) => i.id === 'auto-payroll-ok')
+    if (!ok || /provisional/i.test(ok.detail)) pass++
+    else {
+      fail++
+      failures.push('advisor: payroll-ok insight reads as a clean win despite uncosted hours')
+    }
+    // The insight should name who to fix, not just a count.
+    const unpriced = insights.find((i) => i.id === 'auto-labor-unpriced')
+    if (unpriced && /Guidry|Naquin|Owner/i.test(unpriced.detail)) pass++
+    else {
+      fail++
+      failures.push('advisor: unpriced insight does not say whose hours are uncosted')
+    }
+  }
+
+  if (sum.likelyMissedClockOuts > 0) {
+    if (ids.includes('auto-labor-missed-clockouts')) pass++
+    else {
+      fail++
+      failures.push('advisor: missed clock-outs exist but no insight was produced')
+    }
+  }
+
+  if (sum.overtimeHours >= 1) {
+    if (ids.includes('auto-labor-overtime')) pass++
+    else {
+      fail++
+      failures.push('advisor: overtime exists but no overtime insight was produced')
+    }
+  }
+
+  // No labor group at all must yield no labor insights — never invented ones.
+  const emptyAdvisor = generateInsights({
+    settings: liveSettings,
+    pillars: pillarsForAdvisor,
+  })
+  if (!emptyAdvisor.some((i) => i.id.startsWith('auto-labor-'))) pass++
+  else {
+    fail++
+    failures.push('advisor: labor insights appeared without any labor data')
+  }
+
+  console.log(`\nAdvisor labor insights: ${ids.filter((i) => i.startsWith('auto-labor-') || i.startsWith('auto-payroll-')).join(', ')}`)
+
+  console.log(`\nDashboard payroll pillar: ${dashboardPct.toFixed(2)}% (${headline?.month}) vs target ${target}% / warning ${warning}% → ${pillarStatus}`)
+  console.log(`Range-wide average would have been ${rangeWidePct.toFixed(2)}% — correctly not used.`)
 
   console.log(`\nLive data: ${shifts.length} shifts, ${sum.payableHours.toFixed(2)} payable hours, $${sum.estimatedGrossLabor.toFixed(2)} estimated gross labor.`)
   console.log(`Sales feed ${coverage.firstDate} to ${coverage.lastDate}.`)

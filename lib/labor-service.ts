@@ -981,7 +981,12 @@ export type LaborHealthSnapshot = {
   /** Hours priced at $0 because Square has no wage — makes laborPct a floor. */
   unpricedHours: number
   unpricedShifts: number
+  /** Who the unpriced hours belong to, so the advisor can name them. */
+  unpricedBy: UnpricedGroup[]
   likelyMissedClockOuts: number
+  estimatedOvertimeCost: number
+  /** Net sales per payable labor hour in the headline month. */
+  salesPerLaborHour: number | null
   /** False when no timecards exist, so callers can show "unknown" not 0%. */
   hasData: boolean
   /** True when a target comparison is meaningful (a complete month exists). */
@@ -1011,7 +1016,10 @@ export async function getLaborHealthSnapshot(): Promise<LaborHealthSnapshot> {
     overtimeHours: summary.overtimeHours,
     unpricedHours: summary.unpricedHours,
     unpricedShifts: summary.unpricedShifts,
+    unpricedBy: summary.unpricedBy,
     likelyMissedClockOuts: summary.likelyMissedClockOuts,
+    estimatedOvertimeCost: summary.estimatedOvertimeCost,
+    salesPerLaborHour: headline?.salesPerLaborHour ?? null,
     hasData: !dataset.empty,
     comparable: headline !== null,
   }
