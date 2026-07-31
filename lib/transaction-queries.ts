@@ -13,6 +13,7 @@ import {
   type GroupInputRow,
   type PayeeGroup,
 } from '@/lib/transaction-groups'
+import { fetchAllPages } from '@/lib/paginate'
 
 export type TransactionRow = {
   id: string
@@ -206,14 +207,31 @@ export async function getVendorNameMap(): Promise<Record<string, string>> {
   return Object.fromEntries(map)
 }
 
+/**
+ * Counts for the review dashboard.
+ *
+ * Every one of these is a count over the *whole* table, so the read must be
+ * paginated. Unpaginated, PostgREST returned its first 1,000 rows and this
+ * function reported 1,000 of 1,318 transactions with 832 of 995 unmatched —
+ * telling the owner they were close to done while 318 rows stayed invisible.
+ * Ordered by id so pages cannot overlap or skip.
+ */
 export async function getTransactionCounts() {
   const supabase = await createClient()
-  const { data } = await supabase
-    .from('financial_transactions')
-    .select('review_status, vendor_id')
-    .is('deleted_at', null)
+  const rows = await fetchAllPages<{
+    review_status: string | null
+    vendor_id: string | null
+  }>(
+    (from, to) =>
+      supabase
+        .from('financial_transactions')
+        .select('review_status, vendor_id')
+        .is('deleted_at', null)
+        .order('id', { ascending: true })
+        .range(from, to),
+    'getTransactionCounts',
+  )
 
-  const rows = data ?? []
   return {
     total: rows.length,
     unreviewed: rows.filter((r) => r.review_status === 'unreviewed').length,
@@ -261,18 +279,35 @@ export type VendorSpend = {
  */
 export async function getVendorSpend(): Promise<Map<string, VendorSpend>> {
   const supabase = await createClient()
-  const { data } = await supabase
-    .from('financial_transactions')
-    .select('vendor_id, amount, transaction_type, transaction_date')
-    .is('deleted_at', null)
-    .not('vendor_id', 'is', null)
-    .neq('review_status', 'excluded')
-    .order('transaction_date', { ascending: false })
+  // Paginated because this sums money. Only linked transactions match, so it
+  // returns ~323 rows today and is under the cap — but 995 transactions are still
+  // unlinked, and linking them is exactly what the vendor-matching screen is for.
+  // Crossing 1,000 would quietly shrink every vendor total with no error.
+  const data = await fetchAllPages<{
+    vendor_id: string | null
+    amount: number | null
+    transaction_type: string | null
+    transaction_date: string | null
+  }>(
+    (from, to) =>
+      supabase
+        .from('financial_transactions')
+        .select('vendor_id, amount, transaction_type, transaction_date')
+        .is('deleted_at', null)
+        .not('vendor_id', 'is', null)
+        .neq('review_status', 'excluded')
+        // Date alone is not unique — many transactions share a day — so id breaks
+        // ties and keeps paging stable.
+        .order('transaction_date', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, to),
+    'getVendorSpend',
+  )
 
   const yearStart = `${new Date().getFullYear()}-01-01`
   const map = new Map<string, VendorSpend>()
 
-  for (const row of data ?? []) {
+  for (const row of data) {
     const vendorId = String(row.vendor_id)
     const type = row.transaction_type as TransactionType
     const isSpend = SPEND_TYPES.includes(type)
@@ -336,16 +371,24 @@ export type RecurringSuggestion = {
  */
 export async function getRecurringSuggestions(): Promise<RecurringSuggestion[]> {
   const supabase = await createClient()
-  const [{ data }, names, { data: obligations }] = await Promise.all([
-    supabase
-      .from('financial_transactions')
-      .select(
-        'vendor_id, normalized_description, description, amount, transaction_date, transaction_type',
-      )
-      .is('deleted_at', null)
-      .not('vendor_id', 'is', null)
-      .neq('review_status', 'excluded')
-      .order('transaction_date', { ascending: true }),
+  // Paginated: a missed page would drop occurrences of a recurring charge and
+  // could make a genuine monthly obligation look irregular enough to ignore.
+  const [data, names, { data: obligations }] = await Promise.all([
+    fetchAllPages<Record<string, any>>(
+      (from, to) =>
+        supabase
+          .from('financial_transactions')
+          .select(
+            'vendor_id, normalized_description, description, amount, transaction_date, transaction_type',
+          )
+          .is('deleted_at', null)
+          .not('vendor_id', 'is', null)
+          .neq('review_status', 'excluded')
+          .order('transaction_date', { ascending: true })
+          .order('id', { ascending: true })
+          .range(from, to),
+      'getRecurringSuggestions',
+    ),
     vendorNameMap(),
     supabase.from('cash_obligations').select('vendor_name, name'),
   ])
@@ -362,7 +405,7 @@ export async function getRecurringSuggestions(): Promise<RecurringSuggestion[]> 
     }
   >()
 
-  for (const row of data ?? []) {
+  for (const row of data) {
     const type = row.transaction_type as TransactionType
     if (!SPEND_TYPES.includes(type)) continue
     const vendorId = String(row.vendor_id)
@@ -440,12 +483,23 @@ export async function getImportBatches() {
 /** Distinct account names already imported, for the account picker. */
 export async function getKnownAccountNames(): Promise<string[]> {
   const supabase = await createClient()
-  const { data } = await supabase
-    .from('financial_transactions')
-    .select('account_name')
-    .not('account_name', 'is', null)
+  // Paginated for correctness rather than urgency: the three known accounts all
+  // appear within the first 1,000 rows today, so truncation happens to be
+  // harmless here. It would stop being harmless the moment a new account is added
+  // whose only transactions sort past the cap, and that failure would look like
+  // the account simply not existing.
+  const data = await fetchAllPages<{ account_name: string | null }>(
+    (from, to) =>
+      supabase
+        .from('financial_transactions')
+        .select('account_name')
+        .not('account_name', 'is', null)
+        .order('id', { ascending: true })
+        .range(from, to),
+    'getKnownAccountNames',
+  )
   const set = new Set<string>()
-  for (const row of data ?? []) {
+  for (const row of data) {
     const name = String(row.account_name ?? '').trim()
     if (name) set.add(name)
   }
