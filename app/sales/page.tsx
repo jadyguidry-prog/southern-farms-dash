@@ -12,6 +12,8 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { SquareSalesSection } from '@/components/sales/square-sales-section'
+import { SalesSourceReview } from '@/components/sales/sales-source-review'
+import { getSalesSourceAudit } from '@/lib/sales-source-audit-service'
 import { formatCurrency } from '@/lib/data'
 import { getSalesByProduct } from '@/lib/queries'
 import { getMonthlySalesDetail, previewCalculatedSales } from '@/lib/sales-service'
@@ -24,14 +26,21 @@ import { getSquareConfigState } from '@/lib/square-client'
 
 export default async function SalesPage() {
   const squareConfig = getSquareConfigState()
-  const [monthly, salesByProduct, preview, squareDaily, squareCategories] =
-    await Promise.all([
-      getMonthlySalesDetail(),
-      getSalesByProduct(),
-      previewCalculatedSales(),
-      getSquareDailySales(),
-      getSquareCategoryBreakdown(),
-    ])
+  const [
+    monthly,
+    salesByProduct,
+    preview,
+    squareDaily,
+    squareCategories,
+    sourceAudit,
+  ] = await Promise.all([
+    getMonthlySalesDetail(),
+    getSalesByProduct(),
+    previewCalculatedSales(),
+    getSquareDailySales(),
+    getSquareCategoryBreakdown(),
+    getSalesSourceAudit(),
+  ])
 
   const squareSummary = summarizeDailyRows(
     squareDaily.rows,
@@ -67,6 +76,15 @@ export default async function SalesPage() {
         title="Sales"
         description="Revenue performance across wholesale and retail channels and top-selling product lines."
       />
+
+      {/* Placed above the KPI cards on purpose: it explains why the revenue
+          figures below it may be wrong, and that warning is useless after the
+          owner has already read and trusted them. */}
+      {sourceAudit.downgrades.length > 0 && (
+        <div className="mb-4">
+          <SalesSourceReview audit={sourceAudit} />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard

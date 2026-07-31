@@ -28,6 +28,9 @@ export type MonthlySalesRow = {
   calculatedRetail: number | null
   manualWholesale: number | null
   manualRetail: number | null
+  /** Square's own figures. Null until a month's correction is approved. */
+  squareWholesale: number | null
+  squareRetail: number | null
   source: SalesSource
   locked: boolean
   transactionCount: number
@@ -189,11 +192,21 @@ export async function syncFinalColumns(): Promise<void> {
   const { data } = await supabase.from('sales_monthly').select('*')
 
   for (const row of data ?? []) {
+    // A locked month is closed. `recalculateSales` already skips locked months,
+    // but this function is also called on its own, and without the same guard it
+    // would restate a closed month behind the owner's back.
+    if (row.locked) continue
+
     const final = resolveFinal({
       calculatedWholesale: row.calculated_wholesale,
       calculatedRetail: row.calculated_retail,
       manualWholesale: row.manual_wholesale,
       manualRetail: row.manual_retail,
+      // Square outranks the bank-deposit estimate. These columns are null until a
+      // month's correction is approved, so this changes nothing on its own — it is
+      // what stops an approved correction being overwritten on the next sync.
+      squareWholesale: row.square_wholesale,
+      squareRetail: row.square_retail,
     })
 
     if (final.source === 'empty') continue
@@ -231,6 +244,8 @@ export async function getMonthlySalesDetail(): Promise<MonthlySalesRow[]> {
       calculatedRetail: row.calculated_retail,
       manualWholesale: row.manual_wholesale,
       manualRetail: row.manual_retail,
+      squareWholesale: row.square_wholesale,
+      squareRetail: row.square_retail,
     })
 
     return {
@@ -245,6 +260,8 @@ export async function getMonthlySalesDetail(): Promise<MonthlySalesRow[]> {
       calculatedRetail: numOrNull(row.calculated_retail),
       manualWholesale: numOrNull(row.manual_wholesale),
       manualRetail: numOrNull(row.manual_retail),
+      squareWholesale: numOrNull(row.square_wholesale),
+      squareRetail: numOrNull(row.square_retail),
       source: final.source,
       locked: Boolean(row.locked),
       transactionCount: Number(row.transaction_count ?? 0),

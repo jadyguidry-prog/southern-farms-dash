@@ -222,46 +222,80 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
-export type SalesSource = 'calculated' | 'manual' | 'mixed' | 'empty'
+export type SalesSource = 'calculated' | 'square' | 'manual' | 'mixed' | 'empty'
+
+/**
+ * Which source won a single figure, best first.
+ *
+ * `square` sits above `calculated` because Square records what was actually
+ * rung up, while `calculated` is inferred from bank deposits — and a deposit is
+ * what landed *after* Square's fees and holdbacks, so it systematically
+ * understates sales. `manual` still wins because the owner may know something
+ * neither system does.
+ */
+const TIER_ORDER = ['manual', 'square', 'calculated'] as const
+type Tier = (typeof TIER_ORDER)[number]
+
+/** Pick the best available figure for one channel, and say where it came from. */
+function pickBest(
+  candidates: Record<Tier, number | null | undefined>,
+): { value: number; tier: Tier | null } {
+  for (const tier of TIER_ORDER) {
+    if (isNum(candidates[tier])) return { value: Number(candidates[tier]), tier }
+  }
+  return { value: 0, tier: null }
+}
 
 /**
  * Resolve the figure the business should actually report.
  *
- * A manual entry always beats the calculated one — the owner may know a deposit
- * was really two invoices, and the bank cannot. Recording *which* source won
- * keeps the dashboard honest about whether a number is measured or asserted.
+ * Previously this only knew about manual and calculated figures, so a month with
+ * real Square data still reported the bank-deposit estimate. That is the defect
+ * that understated retail revenue across nine months: nothing errored, the wrong
+ * number simply looked authoritative. Square is now ranked between the two.
+ *
+ * Recording *which* source won keeps the dashboard honest about whether a number
+ * is measured or asserted.
  */
 export function resolveFinal(input: {
   calculatedWholesale: number | null
   calculatedRetail: number | null
   manualWholesale: number | null
   manualRetail: number | null
+  /**
+   * Square's own figures for the month. Optional so existing callers keep their
+   * current behaviour until they supply them.
+   */
+  squareWholesale?: number | null
+  squareRetail?: number | null
 }): { wholesale: number; retail: number; source: SalesSource } {
-  const wholesaleManual = isNum(input.manualWholesale)
-  const retailManual = isNum(input.manualRetail)
-  const wholesaleCalc = isNum(input.calculatedWholesale)
-  const retailCalc = isNum(input.calculatedRetail)
+  const wholesale = pickBest({
+    manual: input.manualWholesale,
+    square: input.squareWholesale,
+    calculated: input.calculatedWholesale,
+  })
+  const retail = pickBest({
+    manual: input.manualRetail,
+    square: input.squareRetail,
+    calculated: input.calculatedRetail,
+  })
 
-  const wholesale = wholesaleManual
-    ? Number(input.manualWholesale)
-    : wholesaleCalc
-      ? Number(input.calculatedWholesale)
-      : 0
-  const retail = retailManual
-    ? Number(input.manualRetail)
-    : retailCalc
-      ? Number(input.calculatedRetail)
-      : 0
-
-  const manualCount = Number(wholesaleManual) + Number(retailManual)
-  const calcCount = Number(wholesaleCalc) + Number(retailCalc)
+  const tiers = [wholesale.tier, retail.tier].filter((t): t is Tier => t !== null)
 
   let source: SalesSource = 'empty'
-  if (manualCount > 0 && calcCount > 0 && manualCount < 2) source = 'mixed'
-  else if (manualCount > 0) source = manualCount === 2 ? 'manual' : 'mixed'
-  else if (calcCount > 0) source = 'calculated'
+  if (tiers.length > 0) {
+    const distinct = new Set(tiers)
+    // Two channels drawn from different tiers is genuinely mixed, and so is a
+    // month where only one channel has any figure at all — saying "manual" for
+    // a month whose retail is simply missing would overstate how much is known.
+    source = distinct.size > 1 || tiers.length < 2 ? 'mixed' : tiers[0]
+  }
 
-  return { wholesale: round2(wholesale), retail: round2(retail), source }
+  return {
+    wholesale: round2(wholesale.value),
+    retail: round2(retail.value),
+    source,
+  }
 }
 
 function isNum(v: unknown): boolean {

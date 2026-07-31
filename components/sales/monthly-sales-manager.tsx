@@ -47,14 +47,21 @@ type Props = {
 
 const SOURCE_LABEL: Record<SalesSource, string> = {
   calculated: 'From bank',
+  // Named for the till rather than the vendor: what matters to the owner is that
+  // this figure is what was actually rung up, not what later reached the bank.
+  square: 'From till',
   manual: 'Manual',
   mixed: 'Mixed',
   empty: 'No data',
 }
 
-/** Manual figures are the owner's stated truth, so they read as authoritative. */
+/**
+ * Manual figures are the owner's stated truth, so they read as authoritative.
+ * Till figures are measured rather than inferred, so they are given the same
+ * weight — a "From bank" month is the one worth a second look.
+ */
 function sourceVariant(source: SalesSource) {
-  if (source === 'manual') return 'default' as const
+  if (source === 'manual' || source === 'square') return 'default' as const
   if (source === 'mixed') return 'secondary' as const
   return 'outline' as const
 }
