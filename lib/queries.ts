@@ -831,6 +831,8 @@ export async function getHealthSnapshot() {
           grossProfitReady: checks.readiness.ready,
           topClusters: checks.topClusters,
           monthsMissingCogs: checks.monthsMissingCogs,
+          withCheckNumberCount: checks.unresolvedWithCheckNumber,
+          attachedCount: checks.unresolvedWithScan,
         }
       : undefined,
     // Only pass the group when transactions actually exist, so a farm with no

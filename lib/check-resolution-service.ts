@@ -432,6 +432,13 @@ export type CheckResolutionSnapshot = {
   topClusters: { amount: number; count: number; total: number; cadence: string | null }[]
   /** Complete months with sales but zero categorized cost of goods. */
   monthsMissingCogs: string[]
+  /**
+   * Unresolved checks that carry a check number, so they can be looked up
+   * directly in the bank portal rather than hunted by date and amount.
+   */
+  unresolvedWithCheckNumber: number
+  /** Unresolved checks that already have a scan attached and can be named now. */
+  unresolvedWithScan: number
 };
 
 /**
@@ -541,11 +548,26 @@ export async function getCheckResolutionSnapshot(): Promise<CheckResolutionSnaps
       cadence: s.cadence?.regular ? s.cadence.label : null,
     }))
 
+  // Which unresolved checks already have a scan on file. Counted from the same
+  // pending set so the number can never exceed the outstanding count.
+  const pendingIds = pendingRows.map((r) => r.id)
+  let unresolvedWithScan = 0
+  if (pendingIds.length > 0) {
+    const { data: docRows } = await supabase
+      .from('transaction_documents')
+      .select('transaction_id')
+      .is('deleted_at', null)
+      .in('transaction_id', pendingIds)
+    unresolvedWithScan = new Set((docRows ?? []).map((d) => d.transaction_id)).size
+  }
+
   return {
     hasChecks: checkRows.length > 0,
     progress,
     readiness,
     monthlyCogs,
+    unresolvedWithCheckNumber: pendingRows.filter((r) => r.checkNumber != null).length,
+    unresolvedWithScan,
     monthsWithUnresolved: monthlyCogs.filter((m) => m.unresolvedCheckCount > 0).length,
     topClusters,
     // Complete months with sales but nothing categorized as cost of goods — a

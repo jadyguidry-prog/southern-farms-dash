@@ -352,6 +352,15 @@ export type CheckInsightInput = {
   topClusters: { amount: number; count: number; total: number; cadence: string | null }[]
   /** Complete months that have sales but no COGS at all. */
   monthsMissingCogs: string[]
+  /**
+   * How many unresolved checks carry a check number. Optional so existing
+   * callers keep working. This matters because a numbered check can be looked up
+   * directly in the bank portal, while one without a number has to be found by
+   * date and amount — a materially harder job worth calling out separately.
+   */
+  withCheckNumberCount?: number
+  /** Unresolved checks that already have a scan attached and are ready to name. */
+  attachedCount?: number
 }
 
 type InsightInput = {
@@ -576,6 +585,26 @@ export function generateInsights({
       detail: `${checks.pendingCount} check payments totalling ${formatCurrency(checks.pendingAmount)} have no payee recorded — the bank export carries a check number and amount but no name, so these dollars sit in no category at all. Categorized cost of goods is ${formatCurrency(checks.baseCogsAmount)}${ratio != null ? `, so the unattributed amount is ${ratio.toFixed(1)}x the known figure` : ''}. Any gross margin calculated now would treat those checks as if they cost nothing, overstating profit. Resolving them on the Check Resolution screen is what turns gross profit into a number worth acting on.`,
       impact: `${formatCurrency(checks.pendingAmount)} unattributed`,
     })
+
+    // Say concretely HOW to identify these, split by whether a check number
+    // exists. A numbered check is a direct lookup in the bank portal; one without
+    // a number has to be hunted by date and amount, so the two are not the same
+    // job and lumping them together hides where the real effort is.
+    if (checks.withCheckNumberCount != null) {
+      const numbered = checks.withCheckNumberCount
+      const unnumbered = Math.max(0, checks.pendingCount - numbered)
+      const attached = checks.attachedCount ?? 0
+      out.push({
+        id: 'auto-checks-lookup-route',
+        // Actionable guidance rather than a problem, so it reads as the route
+        // forward instead of a second alarm about the same backlog.
+        severity: 'opportunity',
+        category: 'Expenses',
+        title: 'How to identify the unnamed checks',
+        detail: `The payee is only on the physical check, which the bank's CSV export never carried — that is why these are blank rather than anything being lost. ${numbered} of the ${checks.pendingCount} unresolved checks do carry a check number, so each can be looked up directly in the bank portal and the payee read off the scan.${unnumbered > 0 ? ` The remaining ${unnumbered} have no number and have to be found by date and amount instead.` : ''} Scans can be attached to each check on the Check Resolution screen, so the evidence stays on file once you have looked it up.${attached > 0 ? ` ${attached} already ${attached === 1 ? 'has a scan' : 'have scans'} attached and can be named now without returning to the bank.` : ''}`,
+        impact: `${numbered} of ${checks.pendingCount} directly lookupable`,
+      })
+    }
 
     // Point at the fastest route through the backlog rather than leaving the
     // owner to work out where to start among 200 rows.
@@ -839,7 +868,7 @@ export function generateInsights({
         severity: 'warning',
         category: 'Setup',
         title: `${formatPercent(unidentifiedOutflow.share * 100, 0)} of spending has no identifiable payee`,
-        detail: `${formatCurrency(unidentifiedOutflow.amount)} across ${unidentifiedOutflow.count} transactions is described only as a check or generic withdrawal, so no rule can attribute it automatically. Your bank export carries no payee or check number for these. Reconciling them against check stubs is the only way to see where that money actually went.`,
+        detail: `${formatCurrency(unidentifiedOutflow.amount)} across ${unidentifiedOutflow.count} transactions is described only as a check or generic withdrawal, so no rule can attribute it automatically. The export carries no payee, because the payee exists only on the physical check. Most of these do carry a check number, so they can be looked up in the bank portal and the scan attached on the Check Resolution screen — that is the only way to see where that money actually went.`,
         impact: `${formatCurrency(unidentifiedOutflow.amount)} unattributed`,
       })
     }

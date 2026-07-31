@@ -153,7 +153,14 @@ export function TransactionDocumentsDialog({
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+        {/*
+         * `grid-cols-[minmax(0,1fr)]` is the important bit. DialogContent is a
+         * grid, and a grid column is sized to its item's min-content width, which
+         * for `<input type="file">` is unusually wide ("Choose File" plus the
+         * filename). Without this the form stretched to 561px inside a 358px
+         * dialog and the right-hand side ran off a phone screen.
+         */}
+        <DialogContent className="max-h-[90vh] grid-cols-[minmax(0,1fr)] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="text-pretty">{title}</DialogTitle>
           <DialogDescription className="text-pretty">
@@ -163,8 +170,17 @@ export function TransactionDocumentsDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form action={onUpload} className="flex flex-col gap-4 rounded-lg border border-border p-4">
-          <div className="flex flex-col gap-2">
+        {/*
+         * `min-w-0` throughout: DialogContent is a grid, and grid children
+         * default to `min-width: auto`, so the intrinsically wide file input
+         * pushed the whole dialog past the viewport on a phone and clipped the
+         * text. Allowing these to shrink keeps it inside the screen.
+         */}
+        <form
+          action={onUpload}
+          className="flex min-w-0 flex-col gap-4 rounded-lg border border-border p-4"
+        >
+          <div className="flex min-w-0 flex-col gap-2">
             <Label htmlFor={`file-${transactionId}`}>Image or PDF</Label>
             <Input
               ref={fileRef}
@@ -173,18 +189,28 @@ export function TransactionDocumentsDialog({
               type="file"
               accept={ACCEPT_ATTR}
               required
+              className="w-full min-w-0"
             />
             <p className="text-xs text-muted-foreground">
               {`PNG, JPEG, WEBP, HEIC or PDF, up to ${maxUploadMb}MB. A phone photo of the check works.`}
             </p>
           </div>
 
-          <div className="flex flex-col gap-4 sm:flex-row">
-            <div className="flex flex-1 flex-col gap-2">
+          <div className="flex min-w-0 flex-col gap-4 sm:flex-row">
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
               <Label htmlFor={`kind-${transactionId}`}>What is it?</Label>
               <Select value={kind} onValueChange={(v) => setKind(v as DocumentKind)}>
                 <SelectTrigger id={`kind-${transactionId}`}>
-                  <SelectValue />
+                  {/*
+                   * Base UI renders the raw value string, which would show the
+                   * database code "check_front" instead of "Check front". The
+                   * render form maps the value back to its human label.
+                   */}
+                  <SelectValue>
+                    {(value) =>
+                      DOCUMENT_KIND_LABELS[value as DocumentKind] ?? String(value)
+                    }
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {KIND_ORDER.map((k) => (
@@ -196,7 +222,7 @@ export function TransactionDocumentsDialog({
               </Select>
             </div>
 
-            <div className="flex flex-1 flex-col gap-2">
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
               <Label htmlFor={`notes-${transactionId}`}>Payee or note (optional)</Label>
               <Input
                 id={`notes-${transactionId}`}
