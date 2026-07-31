@@ -47,7 +47,7 @@ export default async function DashboardPage() {
     getRecommendations(),
   ])
 
-  const { kpis, settings, pillars, composite, insights, cashFlow, labor } =
+  const { kpis, settings, pillars, composite, insights, cashFlow, labor, checks } =
     snapshot
   // Generated insights lead, followed by anything entered manually.
   const recommendations = [...insights, ...saved]
@@ -312,18 +312,50 @@ export default async function DashboardPage() {
             <CardDescription>Target {formatPercent(gpTarget, 0)}</CardDescription>
           </CardHeader>
           <CardContent className="pt-2">
-            <RadialStat
-              value={grossProfitPct.value}
-              max={60}
-              color="var(--chart-2)"
-              label="margin"
-              centerText={formatPercent(grossProfitPct.value)}
-            />
-            <p className="text-center text-sm text-muted-foreground">
-              {grossProfitPct.value >= gpTarget
-                ? `Above target by ${formatPercent(grossProfitPct.value - gpTarget)}`
-                : `Below target by ${formatPercent(gpTarget - grossProfitPct.value)}`}
-            </p>
+            {/*
+              Gross margin is only drawn once unattributed checks are small
+              enough to trust it. Before that the card explains what is missing
+              instead of rendering a figure: the stored KPI is 0, so the gauge
+              would otherwise announce "Below target by 38%" — a verdict derived
+              from absent data rather than from the shop's actual performance.
+            */}
+            {checks.readiness.ready ? (
+              <>
+                <RadialStat
+                  value={grossProfitPct.value}
+                  max={60}
+                  color="var(--chart-2)"
+                  label="margin"
+                  centerText={formatPercent(grossProfitPct.value)}
+                />
+                <p className="text-center text-sm text-muted-foreground">
+                  {grossProfitPct.value >= gpTarget
+                    ? `Above target by ${formatPercent(grossProfitPct.value - gpTarget)}`
+                    : `Below target by ${formatPercent(gpTarget - grossProfitPct.value)}`}
+                </p>
+              </>
+            ) : (
+              <div className="flex min-h-[180px] flex-col justify-center gap-2 text-center">
+                <p className="text-2xl font-semibold text-muted-foreground">
+                  Not yet measurable
+                </p>
+                <p className="text-pretty text-sm text-muted-foreground">
+                  {checks.progress.pendingCount.toLocaleString()} check payments
+                  worth {formatCurrency(checks.progress.pendingAmount)} have no
+                  payee, so cost of goods is incomplete
+                  {checks.readiness.unresolvedVsCogsRatio != null
+                    ? ` — ${checks.readiness.unresolvedVsCogsRatio.toFixed(1)}x the ${formatCurrency(checks.readiness.identifiedCogs)} identified`
+                    : ''}
+                  . A margin now would overstate profit.
+                </p>
+                <Link
+                  href="/check-resolution"
+                  className="text-sm font-medium underline"
+                >
+                  Resolve checks
+                </Link>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

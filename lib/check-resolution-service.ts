@@ -24,6 +24,7 @@ import {
   type CheckSuggestion,
   type CheckResolutionProgress,
 } from '@/lib/check-review'
+import { deriveSalesCoverage, monthSalesCoverage } from '@/lib/labor-service'
 
 const PAGE_SIZE = 1000
 
@@ -270,6 +271,14 @@ export type MonthlyCogs = {
   /** Check dollars in this month with no approved resolution yet. */
   unresolvedCheckAmount: number
   unresolvedCheckCount: number
+  /** Square net sales for the month, 0 when none recorded. */
+  netSales: number
+  /**
+   * Whether sales cover the whole month, via the SAME `monthSalesCoverage` guard
+   * the payroll module uses. A partial month understates sales and would inflate
+   * margin, so no margin is ever quoted on one.
+   */
+  salesComplete: boolean
 }
 
 /**
@@ -289,6 +298,11 @@ export function deriveMonthlyCogs(
     id: string
   }[],
   resolutions: CheckResolution[],
+  /**
+   * Monthly sales keyed `YYYY-MM`, with the payroll module's completeness verdict.
+   * Optional so COGS-only callers (and tests) need not supply it.
+   */
+  sales: Map<string, { netSales: number; complete: boolean }> = new Map(),
 ): MonthlyCogs[] {
   const approved = new Map(
     resolutions
@@ -306,10 +320,16 @@ export function deriveMonthlyCogs(
       totalCogs: 0,
       unresolvedCheckAmount: 0,
       unresolvedCheckCount: 0,
+      netSales: sales.get(month)?.netSales ?? 0,
+      salesComplete: sales.get(month)?.complete ?? false,
     }
     months.set(month, fresh)
     return fresh
   }
+
+  // Seed from sales too, so a month with sales but NO cost of goods still appears
+  // — that gap is exactly what needs reporting, and it would otherwise vanish.
+  for (const month of sales.keys()) bucket(month)
 
   for (const t of transactions) {
     const month = (t.transactionDate ?? '').slice(0, 7)
@@ -406,8 +426,12 @@ export type CheckResolutionSnapshot = {
   progress: CheckResolutionProgress
   readiness: GrossProfitReadiness
   monthlyCogs: MonthlyCogs[]
-  /** Months that have COGS spend but no sales coverage, and vice versa. */
+  /** How many months still contain unattributed checks. */
   monthsWithUnresolved: number
+  /** Largest same-amount groups still outstanding, biggest dollars first. */
+  topClusters: { amount: number; count: number; total: number; cadence: string | null }[]
+  /** Complete months with sales but zero categorized cost of goods. */
+  monthsMissingCogs: string[]
 };
 
 /**
@@ -448,23 +472,74 @@ export async function getCheckResolutionSnapshot(): Promise<CheckResolutionSnaps
     }
   })
 
+  const byId = new Map(txns.map((r) => [r.id, r]))
   const checkRows: CheckRow[] = prepared
     .filter((r) => r.isCheck)
-    .map((r) => ({
-      id: r.id,
-      transactionDate: r.transactionDate,
-      amount: r.amount,
-      checkNumber: null,
-      description: '',
-      accountName: '',
-      expenseCategory: r.expenseCategory,
-      vendorId: null,
-      reviewStatus: '',
-    }))
+    .map((r) => {
+      const raw = byId.get(r.id)
+      const description = raw?.description ?? raw?.normalized_description ?? ''
+      return {
+        id: r.id,
+        transactionDate: r.transactionDate,
+        amount: r.amount,
+        // Keep the check number: it drives sequence detection, and dropping it
+        // would silently disable half the grouping signals.
+        checkNumber: raw?.check_number ?? parseCheckNumber(description),
+        description,
+        accountName: raw?.account_name ?? '',
+        expenseCategory: r.expenseCategory,
+        vendorId: raw?.vendor_id ?? null,
+        reviewStatus: raw?.review_status ?? '',
+      }
+    })
 
-  const monthlyCogs = deriveMonthlyCogs(prepared, resolutions)
+  // Reuse the payroll module's coverage logic rather than re-deriving "is this
+  // month complete" — one definition means gross profit and payroll can never
+  // disagree about which months are safe to quote.
+  const salesRows = await fetchAllPages<{ sale_date: string; net_sales: number | string | null }>(
+    (from, to) =>
+      supabase
+        .from('sales_daily')
+        .select('sale_date, net_sales')
+        .order('sale_date', { ascending: true })
+        .range(from, to),
+  )
+  const coverage = deriveSalesCoverage(
+    salesRows.map((r) => ({
+      saleDate: (r.sale_date ?? '').slice(0, 10),
+      netSales: Number(r.net_sales) || 0,
+    })),
+  )
+  const salesByMonth = new Map<string, { netSales: number; complete: boolean }>()
+  for (const [month, netSales] of coverage.netByMonth) {
+    salesByMonth.set(month, {
+      netSales,
+      complete: monthSalesCoverage(month, coverage) === 'complete',
+    })
+  }
+
+  const monthlyCogs = deriveMonthlyCogs(prepared, resolutions, salesByMonth)
   const progress = checkResolutionProgress(checkRows, resolutions, isCogsCategory)
-  const readiness = grossProfitReadiness(monthlyCogs, progress.totalAmount)
+  // Readiness is judged on what is still UNRESOLVED, not the lifetime total —
+  // using the total would keep the gate closed forever even after every check
+  // had been attributed.
+  const readiness = grossProfitReadiness(monthlyCogs, progress.pendingAmount)
+
+  // Only unresolved checks are worth suggesting groups for; resolved ones are
+  // already answered and would pad the list the owner is working through.
+  const approvedIds = new Set(
+    resolutions.filter((r) => r.reviewStatus === 'approved').map((r) => r.financialTransactionId),
+  )
+  const pendingRows = checkRows.filter((r) => !approvedIds.has(r.id))
+  const topClusters = suggestCheckGroups(pendingRows)
+    .filter((s) => s.kind === 'amount-cluster')
+    .slice(0, 3)
+    .map((s) => ({
+      amount: s.count > 0 ? s.total / s.count : 0,
+      count: s.count,
+      total: s.total,
+      cadence: s.cadence?.regular ? s.cadence.label : null,
+    }))
 
   return {
     hasChecks: checkRows.length > 0,
@@ -472,5 +547,11 @@ export async function getCheckResolutionSnapshot(): Promise<CheckResolutionSnaps
     readiness,
     monthlyCogs,
     monthsWithUnresolved: monthlyCogs.filter((m) => m.unresolvedCheckCount > 0).length,
+    topClusters,
+    // Complete months with sales but nothing categorized as cost of goods — a
+    // different failure from unattributed checks, and a worse one for margin.
+    monthsMissingCogs: monthlyCogs
+      .filter((m) => m.salesComplete && m.netSales > 0 && m.baseCogs <= 0)
+      .map((m) => m.month),
   }
 }

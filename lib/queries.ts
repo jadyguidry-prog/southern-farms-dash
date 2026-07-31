@@ -818,6 +818,21 @@ export async function getHealthSnapshot() {
           allTimeMonths: labor.allTime.monthsCounted,
         }
       : undefined,
+    // Same guard again: no CHECK lines means nothing to attribute, so the group
+    // is omitted rather than passed as zeros.
+    checks: checks.hasChecks
+      ? {
+          pendingCount: checks.progress.pendingCount,
+          pendingAmount: checks.progress.pendingAmount,
+          resolvedCount: checks.progress.resolvedCount,
+          resolvedPctOfAmount: checks.progress.resolvedPctOfAmount,
+          baseCogsAmount: checks.readiness.identifiedCogs,
+          unresolvedVsCogsRatio: checks.readiness.unresolvedVsCogsRatio,
+          grossProfitReady: checks.readiness.ready,
+          topClusters: checks.topClusters,
+          monthsMissingCogs: checks.monthsMissingCogs,
+        }
+      : undefined,
     // Only pass the group when transactions actually exist, so a farm with no
     // imported bank data gets no cash-flow insights rather than ones built on
     // zeros.

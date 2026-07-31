@@ -3,6 +3,8 @@ import { AdminPanel } from '@/components/admin/admin-panel'
 import { SquareCsvImport } from '@/components/admin/square-csv-import'
 import { CashFlowReport } from '@/components/admin/cash-flow-report'
 import { LaborReport } from '@/components/admin/labor-report'
+import { CogsReport } from '@/components/admin/cogs-report'
+import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
 import {
   getLaborDataset,
@@ -35,7 +37,7 @@ export default async function AdminPage() {
   )
 
   const data = Object.fromEntries(results) as Record<string, Record<string, unknown>[]>
-  const [batches, cashFlowInsight, laborDataset] = await Promise.all([
+  const [batches, cashFlowInsight, laborDataset, checkSnapshot] = await Promise.all([
     getCsvImportBatches(),
     // Reporting shows every imported month, not the dashboard's trailing 12, so
     // the Total reconciles against the full set of statements on file.
@@ -43,6 +45,9 @@ export default async function AdminPage() {
     // Unfiltered for the same reason: this table reconciles against Square's
     // own payroll export, so it must cover every synced timecard.
     getLaborDataset(),
+    // Same snapshot the dashboard and advisor read, so reporting cannot present a
+    // margin the other two surfaces are withholding.
+    getCheckResolutionSnapshot(),
   ])
   const laborSummary = summarizeLabor(laborDataset.shifts, laborDataset.coverage)
   const laborMonthly = deriveMonthlyLabor(
@@ -60,6 +65,8 @@ export default async function AdminPage() {
         <CashFlowReport insight={cashFlowInsight} />
 
         <LaborReport summary={laborSummary} monthly={laborMonthly} />
+
+        <CogsReport snapshot={checkSnapshot} />
 
         <SquareCsvImport
           onPreflight={preflightDailyImport}

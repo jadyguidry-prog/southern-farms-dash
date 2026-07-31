@@ -329,6 +329,31 @@ export type LaborInsightInput = {
   salesPerLaborHour: number | null
 }
 
+/**
+ * Unattributed CHECK payments and what they do to cost of goods.
+ *
+ * The bank export gives a check number and an amount but no payee, so these
+ * dollars sit outside every category. Until they are attributed, COGS is a floor
+ * and gross margin cannot be stated honestly — which is the whole point of
+ * surfacing this to the advisor.
+ */
+export type CheckInsightInput = {
+  pendingCount: number
+  pendingAmount: number
+  resolvedCount: number
+  resolvedPctOfAmount: number
+  /** Categorized COGS today, for the size comparison that makes the risk concrete. */
+  baseCogsAmount: number
+  /** unresolved ÷ categorized COGS. Above 1 means the unknown exceeds the known. */
+  unresolvedVsCogsRatio: number | null
+  /** True once the unresolved share is small enough to quote a margin. */
+  grossProfitReady: boolean
+  /** Largest same-amount groups, the fastest way to clear dollars. */
+  topClusters: { amount: number; count: number; total: number; cadence: string | null }[]
+  /** Complete months that have sales but no COGS at all. */
+  monthsMissingCogs: string[]
+}
+
 type InsightInput = {
   settings: BusinessSettings
   pillars: HealthPillars
@@ -339,6 +364,8 @@ type InsightInput = {
   cashFlow?: CashFlowInsightInput
   /** Omit entirely when no timecards exist, so no labor insights are made up. */
   labor?: LaborInsightInput
+  /** Omit when there are no CHECK lines, so no check insights are invented. */
+  checks?: CheckInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
 }
@@ -355,6 +382,7 @@ export function generateInsights({
   square,
   cashFlow,
   labor,
+  checks,
   now,
 }: InsightInput): Insight[] {
   const out: Insight[] = []
@@ -526,6 +554,71 @@ export function generateInsights({
         impact: `${formatCurrency(labor.salesPerLaborHour)} per labor hour`,
       })
     }
+  }
+
+  /*
+   * Unattributed checks. These are reported as a COST-OF-GOODS trust problem
+   * rather than a bookkeeping chore, because that is the decision they block:
+   * every gross margin figure is unreliable while they are outstanding.
+   */
+  if (checks && checks.pendingCount > 0) {
+    const ratio = checks.unresolvedVsCogsRatio
+    out.push({
+      id: 'auto-checks-unresolved',
+      // Critical only when the unknown dollars exceed the known COGS — at that
+      // point the margin is not merely imprecise, it is unknowable.
+      severity: ratio != null && ratio >= 1 ? 'critical' : 'warning',
+      category: 'Expenses',
+      title:
+        ratio != null && ratio >= 1
+          ? 'Unattributed checks exceed all categorized cost of goods'
+          : 'Unattributed checks are understating cost of goods',
+      detail: `${checks.pendingCount} check payments totalling ${formatCurrency(checks.pendingAmount)} have no payee recorded — the bank export carries a check number and amount but no name, so these dollars sit in no category at all. Categorized cost of goods is ${formatCurrency(checks.baseCogsAmount)}${ratio != null ? `, so the unattributed amount is ${ratio.toFixed(1)}x the known figure` : ''}. Any gross margin calculated now would treat those checks as if they cost nothing, overstating profit. Resolving them on the Check Resolution screen is what turns gross profit into a number worth acting on.`,
+      impact: `${formatCurrency(checks.pendingAmount)} unattributed`,
+    })
+
+    // Point at the fastest route through the backlog rather than leaving the
+    // owner to work out where to start among 200 rows.
+    const top = checks.topClusters[0]
+    if (top && top.count >= 3) {
+      const others = checks.topClusters.slice(1, 3)
+      out.push({
+        id: 'auto-checks-clusters',
+        severity: 'opportunity',
+        category: 'Expenses',
+        title: 'Repeating check amounts can be resolved in one pass',
+        detail: `${top.count} checks were each written for exactly ${formatCurrency(top.amount)}${top.cadence ? ` on a ${top.cadence} rhythm` : ''}, worth ${formatCurrency(top.total)} together. Identical repeating amounts almost always mean a single payee on a standing arrangement, so naming that payee once settles the whole group.${others.length > 0 ? ` The next largest groups are ${others.map((c) => `${c.count}x ${formatCurrency(c.amount)}`).join(' and ')}.` : ''} Clearing the biggest groups first moves the most dollars for the least work.`,
+        impact: `${formatCurrency(top.total)} in one group`,
+      })
+    }
+  }
+
+  /*
+   * Months with sales but no cost of goods at all. Distinct from the check
+   * problem: here nothing was categorized, so the margin would read as near-100%
+   * profit rather than merely being overstated.
+   */
+  if (checks && checks.monthsMissingCogs.length > 0) {
+    const list = checks.monthsMissingCogs
+    out.push({
+      id: 'auto-checks-months-missing-cogs',
+      severity: 'warning',
+      category: 'Expenses',
+      title: 'Some complete months record sales but no cost of goods',
+      detail: `${list.length} complete ${list.length === 1 ? 'month has' : 'months have'} Square sales but no cost-of-goods spend recorded at all (${list.join(', ')}). The shop plainly bought stock in ${list.length === 1 ? 'that month' : 'those months'}, so this is a categorization gap rather than a month without purchases. Any margin for ${list.length === 1 ? 'it' : 'them'} would read as almost pure profit, which would flatter the average across every window.`,
+      impact: `${list.length} ${list.length === 1 ? 'month' : 'months'} without COGS`,
+    })
+  }
+
+  if (checks && checks.pendingCount === 0 && checks.resolvedCount > 0) {
+    out.push({
+      id: 'auto-checks-resolved',
+      severity: 'opportunity',
+      category: 'Expenses',
+      title: 'Every check payment now has a payee',
+      detail: `All ${checks.resolvedCount} check payments have been attributed, so cost of goods now includes the money that moved by check. Gross margin can be read as a real figure rather than a floor. Keeping new checks resolved as they arrive is what holds that accuracy in place.`,
+      impact: '100% of check dollars attributed',
+    })
   }
 
   // --- Weekly sales ---
