@@ -270,11 +270,24 @@ export async function reclassifyToIncome(
 export async function categorizeTransactions(input: {
   transactionIds: string[]
   category: string
+  /**
+   * Where the request came from, so the audit trail stays truthful. The same
+   * write serves the CHECK queue and the mis-typed-fee correction; logging both
+   * as "check(s)" would make the history misdescribe what the owner did.
+   */
+  source?: 'checks' | 'mistyped_fee'
 }): Promise<ActionResult & { bulkActionId?: string }> {
   const ids = (input.transactionIds ?? []).filter(Boolean)
   const category = (input.category ?? '').trim()
   if (ids.length === 0) return { ok: false, error: 'No transactions selected.' }
   if (!category) return { ok: false, error: 'Enter a category.' }
+
+  const source = input.source ?? 'checks'
+  const action = source === 'mistyped_fee' ? 'recategorize_mistyped' : 'categorize_checks'
+  const reason =
+    source === 'mistyped_fee'
+      ? `Recategorized ${ids.length} row(s) to "${category}" after the evidence showed a recurring fee, not income.`
+      : `Assigned "${category}" to ${ids.length} check(s).`
 
   const supabase = await createClient()
   const actor = await actorEmail(supabase)
@@ -293,17 +306,17 @@ export async function categorizeTransactions(input: {
       field: 'expense_category',
       previous_value: String(r.expense_category ?? ''),
       new_value: category,
-      action: 'categorize_checks',
+      action,
       bulk_action_id: bulkActionId,
       actor_email: actor,
-      reason: `Assigned "${category}" to ${ids.length} check(s).`,
+      reason,
     },
     {
       transaction_id: r.id,
       field: 'review_status',
       previous_value: String(r.review_status ?? ''),
       new_value: 'matched',
-      action: 'categorize_checks',
+      action,
       bulk_action_id: bulkActionId,
       actor_email: actor,
       reason: 'Marked reviewed alongside the category assignment.',

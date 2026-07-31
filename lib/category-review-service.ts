@@ -20,6 +20,7 @@ import {
 } from '@/lib/check-review'
 import {
   assessReclassification,
+  deriveMerchantName,
   type EvidenceReport,
   type EvidenceRow,
 } from '@/lib/reclassify-evidence'
@@ -125,6 +126,13 @@ export type MistypedFlag = {
    * this supports it, so a shared label can never move money on its own.
    */
   evidence: EvidenceReport
+  /**
+   * Corrective expense category derived from the rows' own merchant name, offered
+   * when the evidence says "fee, not income". Derived rather than hardcoded so it
+   * works for any recurring-fee merchant, not only the one found today. `null`
+   * when the descriptions share no clear merchant.
+   */
+  suggestedExpenseCategory: string | null
 }
 
 export type AuditEntry = {
@@ -203,6 +211,8 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
     months: Set<string>
     /** Raw rows kept so the evidence test can judge direction and recurrence. */
     evidenceRows: EvidenceRow[]
+    /** Descriptions kept so the corrective category can be named from the data. */
+    descriptions: string[]
   }
   const mistypedMap = new Map<string, MistypedAcc>()
 
@@ -242,7 +252,9 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
           transactionIds: [],
           months: new Set<string>(),
           evidenceRows: [],
+          descriptions: [],
         }
+      m.descriptions.push(row.description)
       m.count += 1
       m.amount += Math.abs(Number(row.amount) || 0)
       m.transactionIds.push(row.id)
@@ -342,16 +354,27 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
   // exactly that group's amount.
   const mistyped: MistypedFlag[] = [...mistypedMap.values()]
     .sort((a, b) => b.amount - a.amount)
-    .map((m) => ({
-      category: m.category,
-      count: m.count,
-      amount: m.amount,
-      transactionIds: m.transactionIds,
-      months: [...m.months].sort(),
-      resultingCashIn: currentCashIn + m.amount,
-      resultingCashOut: currentCashOut - m.amount,
-      evidence: assessReclassification(m.evidenceRows),
-    }))
+    .map((m) => {
+      const evidence = assessReclassification(m.evidenceRows)
+      // Only name a corrective category when the evidence actually says "fee".
+      // For an `unclear` group there is nothing to correct toward yet, and
+      // offering a confident label would defeat the point of the block.
+      const merchant =
+        evidence.verdict === 'likely_recurring_fee'
+          ? deriveMerchantName(m.descriptions)
+          : null
+      return {
+        category: m.category,
+        count: m.count,
+        amount: m.amount,
+        transactionIds: m.transactionIds,
+        months: [...m.months].sort(),
+        resultingCashIn: currentCashIn + m.amount,
+        resultingCashOut: currentCashOut - m.amount,
+        evidence,
+        suggestedExpenseCategory: merchant ? `${merchant} — Fees` : null,
+      }
+    })
 
   return {
     proposals,

@@ -5,7 +5,11 @@
  * actually monthly Square fees. The old label-only rule would have flipped them
  * to income. Every assertion below is derived from the owner's real data shape.
  */
-import { assessReclassification, type EvidenceRow } from '../lib/reclassify-evidence'
+import {
+  assessReclassification,
+  deriveMerchantName,
+  type EvidenceRow,
+} from '../lib/reclassify-evidence'
 
 let pass = 0
 let fail = 0
@@ -140,6 +144,46 @@ ok(
 // The report must never state a month count higher than the data supports.
 ok(feeReport.monthCount <= new Set(fees.map((f) => f.date.slice(0, 7))).size, 'no invented months')
 eq(feeReport.rowCount, fees.length, 'row count matches input exactly')
+
+/* ---------------- merchant name derivation ---------------- */
+// Real descriptions from the owner's data: a shared merchant followed by a
+// per-row reference id, which is why all 47 descriptions are unique.
+const squareDescriptions = [
+  'Square Inc SQ250501 T3YF62329G8PNS9',
+  'Square Inc SQ250502 T3A02382FB6MRZP',
+  'Square Inc SQ250505 T33ZFA5DQC40X6T',
+  'Square Inc SQ250512 T3P9MTPCZTB1J4F',
+]
+eq(deriveMerchantName(squareDescriptions), 'Square', 'derives merchant, drops ids and "Inc"')
+
+// A mixed group has no single merchant. Naming one would file unrelated
+// spending under a confident-looking label, so it must refuse.
+eq(
+  deriveMerchantName([
+    'Square Inc SQ250501 T3YF6',
+    'Sysco Foods 88213',
+    'City Water Dept 4402',
+  ]),
+  null,
+  'refuses to name a merchant for a mixed group',
+)
+
+eq(
+  deriveMerchantName(['Gulf Coast Supply 1201', 'Gulf Coast Supply 1202']),
+  'Gulf Coast Supply',
+  'keeps multi-word merchant names',
+)
+
+// Degenerate input must not throw or invent a name.
+eq(deriveMerchantName([]), null, 'no merchant from no rows')
+eq(deriveMerchantName(['SQ250501 T3YF62329G8PNS9']), null, 'no merchant from ids alone')
+eq(deriveMerchantName(['', '']), null, 'no merchant from blank descriptions')
+// A single stray row must not override an otherwise unanimous group.
+eq(
+  deriveMerchantName([...squareDescriptions, 'Sysco Foods 88213']),
+  null,
+  'one mismatched row blocks naming',
+)
 
 console.log(`\nreclassify evidence: ${pass} passed, ${fail} failed`)
 if (fail > 0) process.exit(1)

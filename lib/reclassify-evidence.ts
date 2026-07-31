@@ -197,3 +197,63 @@ export function assessReclassification(rows: EvidenceRow[]): EvidenceReport {
     earlyMonthShare: round2(earlyMonthShare),
   }
 }
+
+/**
+ * Tokens that are reference numbers rather than a merchant name. Bank exports
+ * append a per-transaction id ("SQ250501", "T3YF62329G8PNS9"), which makes every
+ * description unique — so the shared merchant only appears after dropping them.
+ */
+function isReferenceToken(token: string): boolean {
+  if (/\d/.test(token)) return true // any token carrying digits is an id/date
+  if (token.length <= 1) return true
+  return false
+}
+
+/** Corporate suffixes that add nothing to a category name. */
+const CORPORATE_SUFFIXES = new Set(['inc', 'llc', 'ltd', 'co', 'corp', 'company'])
+
+/**
+ * Derive the merchant shared by a group of descriptions.
+ *
+ * Used to name the corrective expense category, so the owner is offered
+ * "Square — Fees" rather than a hardcoded guess. Requires the SAME leading words
+ * in effectively every row: a mixed group has no single merchant, and inventing
+ * one would put unrelated spending under a confident-looking label.
+ *
+ * Returns `null` unless the agreement is near-unanimous.
+ */
+export function deriveMerchantName(descriptions: string[]): string | null {
+  const tokenised = descriptions
+    .map((d) =>
+      (d ?? '')
+        .split(/[\s/]+/)
+        .map((t) => t.replace(/[^A-Za-z0-9&]/g, ''))
+        .filter((t) => t.length > 0 && !isReferenceToken(t)),
+    )
+    .filter((t) => t.length > 0)
+
+  if (tokenised.length === 0) return null
+  // Require agreement across ~90% of rows so a stray row cannot set the name.
+  if (tokenised.length < descriptions.length * 0.9) return null
+
+  const first = tokenised[0]
+  const words: string[] = []
+  for (let i = 0; i < first.length && i < 3; i += 1) {
+    const word = first[i].toLowerCase()
+    if (!tokenised.every((t) => (t[i] ?? '').toLowerCase() === word)) break
+    words.push(first[i])
+  }
+
+  // Drop trailing corporate suffixes, but never return an empty name.
+  while (
+    words.length > 1 &&
+    CORPORATE_SUFFIXES.has(words[words.length - 1].toLowerCase())
+  ) {
+    words.pop()
+  }
+  if (words.length === 0) return null
+
+  return words
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ')
+}

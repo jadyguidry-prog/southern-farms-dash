@@ -31,6 +31,7 @@ import type {
   DecidedMerge,
   MistypedFlag,
 } from '@/lib/category-review-service'
+import type { ReclassifyVerdict } from '@/lib/reclassify-evidence'
 import {
   approveMerge,
   rejectMerge,
@@ -516,6 +517,55 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
                   </>
                 )}
               </p>
+
+              {/* The way forward. Blocking alone leaves the wrong label in place;
+                  the fee still sits under an income-style category. This offers
+                  the correction the evidence actually supports. */}
+              {confirmReclassify.evidence.blocksReclassification &&
+                confirmReclassify.suggestedExpenseCategory && (
+                  <section
+                    aria-label="Suggested correction"
+                    className="rounded-md border border-border bg-muted/40 p-3"
+                  >
+                    <p className="text-sm font-medium text-foreground">
+                      What to do instead
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground text-pretty">
+                      These rows are spending, so the type is already right — only
+                      the category is wrong. Filing them under{' '}
+                      <strong className="font-medium text-foreground">
+                        {confirmReclassify.suggestedExpenseCategory}
+                      </strong>{' '}
+                      keeps them as the cost they are and stops them being offered
+                      as income again. Cash-in and cash-out totals do not move.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-3"
+                      disabled={pending}
+                      onClick={() => {
+                        const flag = confirmReclassify
+                        const category = flag.suggestedExpenseCategory
+                        if (!category) return
+                        setConfirmReclassify(null)
+                        run(
+                          `recategorize:${flag.category}`,
+                          () =>
+                            categorizeTransactions({
+                              transactionIds: flag.transactionIds,
+                              category,
+                              source: 'mistyped_fee',
+                            }),
+                          `Recategorized to ${category}`,
+                        )
+                      }}
+                    >
+                      Recategorize {confirmReclassify.count} to{' '}
+                      {confirmReclassify.suggestedExpenseCategory}
+                    </Button>
+                  </section>
+                )}
             </div>
           )}
 
@@ -898,6 +948,34 @@ function MergeStatusBoard({
           </div>
         ))}
     </section>
+  )
+}
+
+/**
+ * States what the rows were judged to be. Wording is deliberately plain — the
+ * owner should be able to tell at a glance whether a group is safe to move,
+ * without reading the underlying reasons.
+ */
+function VerdictBadge({ verdict }: { verdict: ReclassifyVerdict }) {
+  const map: Record<ReclassifyVerdict, { label: string; className: string }> = {
+    likely_recurring_fee: {
+      label: 'looks like a recurring fee',
+      className: 'bg-destructive/10 text-destructive border-destructive/30',
+    },
+    unclear: {
+      label: 'needs a human look',
+      className: 'bg-muted text-muted-foreground border-border',
+    },
+    likely_income: {
+      label: 'consistent with income',
+      className: 'bg-primary/10 text-primary border-primary/30',
+    },
+  }
+  const conf = map[verdict]
+  return (
+    <Badge variant="outline" className={conf.className}>
+      {conf.label}
+    </Badge>
   )
 }
 
