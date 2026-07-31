@@ -264,6 +264,16 @@ export function computeAvailableOperatingCash(input: {
   /** Obligations already resolved to a due date inside the window. */
   obligationsDue: number
   obligationsBasis: string
+  /**
+   * Recurring bills with no due date recorded.
+   *
+   * `getCashDebtSummary` deliberately keeps these out of its dated windows
+   * because it cannot know WHEN they land. For affordability they must still be
+   * subtracted: a monthly Rent or Electric bill will be paid whether or not
+   * anyone typed a date, and ignoring them overstates spendable cash.
+   */
+  unscheduledObligations?: number
+  unscheduledObligationNames?: string[]
   monthlyDebtService: number
   payrollDue: number
   payrollBasis: string
@@ -292,6 +302,14 @@ export function computeAvailableOperatingCash(input: {
       label: 'Recurring obligations due',
       amount: input.obligationsDue,
       basis: input.obligationsBasis,
+    },
+    {
+      label: 'Recurring bills with no date set',
+      amount: input.unscheduledObligations ?? 0,
+      basis:
+        (input.unscheduledObligationNames ?? []).length > 0
+          ? `${(input.unscheduledObligationNames ?? []).join(', ')} — recurring, but no due date on file. Counted because they still get paid.`
+          : 'Recurring obligations with no due date recorded',
     },
     {
       label: 'Payroll',
@@ -947,12 +965,19 @@ export function buildRecommendation(input: {
   payrollPct: number
   targetPayrollPct: number
   obligationsDue: number
+  unscheduledObligations?: number
   boundBy: RecommendedBudget['boundBy']
 }): MarketingRecommendation {
   const reasons: string[] = []
   const blockers: string[] = []
 
-  if (input.reserveCoverage < 1) {
+  if (input.reserveCoverage < 0) {
+    // A negative coverage is a shortfall, not a percentage of the target.
+    // "cash at -11% of the reserve target" is not a sentence anyone can act on.
+    blockers.push(
+      'This month\u2019s known bills come to more than the cash on hand, before any marketing.',
+    )
+  } else if (input.reserveCoverage < 1) {
     blockers.push(
       `Known obligations would leave cash at ${(input.reserveCoverage * 100).toFixed(0)}% of the reserve target.`,
     )
@@ -990,15 +1015,31 @@ export function buildRecommendation(input: {
       : `Payroll is above target at ${input.payrollPct.toFixed(1)}% of revenue.`,
   )
 
-  if (input.obligationsDue > 0) {
-    reasons.push(`${formatMoney(input.obligationsDue)} of recurring obligations are due.`)
+  // Report every recurring bill counted, dated or not. Quoting only the dated
+  // ones read as "$0 of obligations" while $6,211 of rent and utilities were
+  // being subtracted behind the scenes.
+  const totalObligations = input.obligationsDue + (input.unscheduledObligations ?? 0)
+  if (totalObligations > 0) {
+    const undated = input.unscheduledObligations ?? 0
+    reasons.push(
+      undated > 0
+        ? `${formatMoney(totalObligations)} of recurring bills are counted, including ${formatMoney(undated)} with no due date recorded.`
+        : `${formatMoney(totalObligations)} of recurring obligations are due.`,
+    )
   }
 
   const delta = input.recommended - input.currentMonthlyMarketing
   let action: MarketingRecommendation['action']
   let summary: string
 
-  if (input.band === 'Do Not Increase' || input.additionalSafe <= 0) {
+  if (input.reserveCoverage < 0) {
+    // Bills already exceed cash on hand. Any non-zero "recommended" figure here
+    // comes from marketing that is ALREADY committed, so presenting it as a
+    // budget the owner may spend would be actively misleading.
+    action = 'reduce'
+    summary =
+      `Cut marketing spend as far as existing commitments allow. ${blockers[0] ?? ''}`.trim()
+  } else if (input.band === 'Do Not Increase' || input.additionalSafe <= 0) {
     action = delta < -1 ? 'reduce' : 'maintain'
     summary =
       delta < -1
@@ -1026,15 +1067,26 @@ export function buildRecommendation(input: {
  * The cash facts this engine needs, passed in rather than read here.
  *
  * `getCashDebtSummary` in `lib/queries.ts` already derives all of this from
- * live records, including rolling undated recurring obligations forward to their
- * next due date. Re-deriving it here would risk the two drifting apart, and
+ * live records. Re-deriving it here would risk the two drifting apart, and
  * services in this codebase never import `queries.ts` (that direction is
  * reserved for the other way round, to keep the module graph acyclic).
  */
 export type CashPositionInput = {
   cashOnHand: number
   minCashReserve: number
+  /** Recurring obligations with a resolved due date inside 30 days. */
   obligations30: number
+  /**
+   * Recurring bills with NO due date on file.
+   *
+   * `getCashDebtSummary` reports these separately and keeps them out of
+   * `obligations30`, because it cannot say when they land. They must still be
+   * subtracted here — every obligation row in this business currently has a
+   * null due date, so trusting `obligations30` alone reported $0 of bills while
+   * $6,211/month of rent, utilities and marketing went unaccounted for.
+   */
+  unscheduledObligations: number
+  unscheduledObligationNames: string[]
   monthlyDebtService: number
   creditDrawn: number
   creditLimitTotal: number
@@ -1267,6 +1319,8 @@ export async function getMarketingAffordability(
     receivables: cash.receivables,
     obligationsDue: cash.obligations30,
     obligationsBasis: 'Active unpaid recurring obligations due within 30 days',
+    unscheduledObligations: cash.unscheduledObligations,
+    unscheduledObligationNames: cash.unscheduledObligationNames,
     monthlyDebtService: cash.monthlyDebtService,
     payrollDue: payrollMonthly,
     payrollBasis,
@@ -1362,6 +1416,7 @@ export async function getMarketingAffordability(
     payrollPct,
     targetPayrollPct: cash.targetPayrollPct,
     obligationsDue: cash.obligations30,
+    unscheduledObligations: cash.unscheduledObligations,
     boundBy: budget.boundBy,
   })
 

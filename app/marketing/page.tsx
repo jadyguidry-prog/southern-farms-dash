@@ -6,7 +6,7 @@ import { ScenarioExplorer } from '@/components/marketing/scenario-explorer'
 import { AffordabilityBreakdown } from '@/components/marketing/affordability-breakdown'
 import { MarketingSpendPanel } from '@/components/marketing/marketing-spend-panel'
 import { ConfidencePanel } from '@/components/marketing/confidence-panel'
-import { getMarketingAffordability } from '@/lib/marketing-affordability-service'
+import { getMarketingAffordabilitySnapshot } from '@/lib/queries'
 
 export const metadata = {
   title: 'Marketing Affordability | Southern Farms',
@@ -15,7 +15,7 @@ export const metadata = {
 }
 
 export default async function MarketingPage() {
-  const data = await getMarketingAffordability()
+  const data = await getMarketingAffordabilitySnapshot()
 
   if (!data.hasData) {
     return (

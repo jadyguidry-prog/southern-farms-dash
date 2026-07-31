@@ -14,12 +14,16 @@ import type {
  * spend" — the workings matter, but only after the number.
  */
 
-const ACTION_ICON = {
+// Keyed to MarketingRecommendation['action'] so adding a new action is a
+// compile error here rather than a missing icon at runtime.
+const ACTION_ICON: Record<
+  MarketingRecommendation['action'],
+  typeof ArrowUpRight
+> = {
   increase: ArrowUpRight,
-  hold: MinusCircle,
+  maintain: MinusCircle,
   reduce: ArrowDownRight,
-  stop: AlertTriangle,
-} as const
+}
 
 /** Score band drives the accent. Red is reserved for a genuine cash problem. */
 const BAND_STYLE: Record<string, { badge: string; bar: string }> = {

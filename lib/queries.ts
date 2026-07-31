@@ -737,6 +737,13 @@ export const getMarketingAffordabilitySnapshot = cache(async () => {
     cashOnHand: summary.cashOnHand,
     minCashReserve: summary.minCashReserve,
     obligations30: summary.obligations30,
+    // Recurring bills with no due date on file. `getCashDebtSummary` keeps these
+    // out of obligations30 on purpose (it cannot know WHEN they land), but for
+    // affordability they must still be subtracted — a monthly Rent or Electric
+    // bill is going to be paid whether or not somebody typed a date. Dropping
+    // them overstated spendable cash by their full value.
+    unscheduledObligations: summary.unscheduledObligations,
+    unscheduledObligationNames: summary.obligationsMissingDueDate.map((o) => o.name),
     monthlyDebtService: summary.monthlyDebtService,
     creditDrawn: summary.creditDrawn,
     creditLimitTotal: summary.creditLimitTotal,

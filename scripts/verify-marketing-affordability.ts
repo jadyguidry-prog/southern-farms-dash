@@ -105,6 +105,41 @@ console.log('\nAvailable operating cash')
   check('available operating cash respects the reserve', r.availableOperatingCash, 11_000)
 }
 {
+  // Regression: every cash_obligations row in this business has a null due_date,
+  // so getCashDebtSummary reports obligations30 = $0 and holds them in
+  // unscheduledObligations instead. Ignoring those overstated spendable cash by
+  // $6,211/month (Rent, Electric, Trash, Gas and an $800 Marketing line).
+  const r = computeAvailableOperatingCash({
+    cashOnHand: 15_758,
+    minCashReserve: 15_000,
+    receivables: [],
+    obligationsDue: 0,
+    obligationsBasis: 'none dated',
+    unscheduledObligations: 6_211,
+    unscheduledObligationNames: ['Rent', 'Electric', 'Trash', 'Gas', 'Marketing'],
+    monthlyDebtService: 817,
+    payrollDue: 10_393,
+    payrollBasis: 'test',
+  })
+  ok(
+    'undated recurring bills are still deducted',
+    r.deductions.some((d) => d.amount === 6_211),
+    JSON.stringify(r.deductions.map((d) => `${d.label}=${d.amount}`)),
+  )
+  ok(
+    'the undated bills are named so the owner can fix the dates',
+    r.deductions.some((d) => d.basis.includes('Rent') && d.basis.includes('Electric')),
+  )
+  check('deductions total includes the undated bills', r.totalDeductions, 17_421)
+  // 15,758 - 17,421 = -1,663. Previously this reported +$4,548 of cash.
+  check('projected cash is negative once real bills count', r.projectedCash, -1_663)
+  ok(
+    'no marketing headroom is invented',
+    r.availableOperatingCash < 0,
+    `available ${r.availableOperatingCash}`,
+  )
+}
+{
   const r = computeAvailableOperatingCash({
     cashOnHand: 10_000,
     minCashReserve: 20_000,
