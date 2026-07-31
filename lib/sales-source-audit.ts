@@ -20,10 +20,57 @@
  */
 
 import {
+  asSalesDataSource,
   SOURCE_RANK,
   SOURCE_LABELS,
   type SalesDataSource,
 } from '@/lib/sales-source'
+
+function num(v: unknown): number {
+  const n = Number(v ?? 0)
+  return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * Sum Square's retail sales per month, keeping only the highest-ranked source
+ * for any date that appears more than once.
+ *
+ * `sales_daily` permits more than one row per date — one from the live API sync
+ * and one from a CSV export covering the same period — so a plain sum can
+ * double-count a day. There are no duplicates in the data today, which is
+ * precisely why this is written defensively now rather than after a CSV
+ * re-import silently inflates every figure.
+ *
+ * Lives in this pure module (not the DB layer) so the collapsing behaviour is
+ * testable without a database.
+ */
+export function aggregateDailyRetailByMonth(
+  raw: { sale_date?: unknown; source?: unknown; retail_sales?: unknown }[],
+): Map<string, number> {
+  const winnerByDate = new Map<string, { rank: number; retail: number }>()
+
+  for (const r of raw) {
+    const saleDate = String(r.sale_date ?? '')
+    const source = asSalesDataSource(typeof r.source === 'string' ? r.source : null)
+    // An unranked source cannot be compared safely, so it is skipped rather than
+    // allowed to outrank a known-good figure.
+    if (!saleDate || !source) continue
+
+    const rank = SOURCE_RANK[source]
+    const existing = winnerByDate.get(saleDate)
+    if (!existing || rank > existing.rank) {
+      winnerByDate.set(saleDate, { rank, retail: num(r.retail_sales) })
+    }
+  }
+
+  const byMonth = new Map<string, number>()
+  for (const [saleDate, winner] of winnerByDate) {
+    const mk = saleDate.slice(0, 7)
+    if (mk.length !== 7) continue
+    byMonth.set(mk, Number(((byMonth.get(mk) ?? 0) + winner.retail).toFixed(2)))
+  }
+  return byMonth
+}
 
 const MONTH_NAMES = [
   'january', 'february', 'march', 'april', 'may', 'june',
@@ -77,6 +124,19 @@ export type MonthAuditRow = {
   squareDailyRetail: number | null
   /** Positive means the reported figure is too low. */
   difference: number
+  /**
+   * Size of the gap relative to the reported figure, as a percentage. A $136 gap
+   * means something very different on a $48,000 month than on a $500 one, and the
+   * absolute number alone cannot convey that.
+   */
+  differencePercent: number
+  /**
+   * True when the gap is real but too small to matter (under
+   * `NEGLIGIBLE_GAP_PERCENT` of the month). Still reported and still correctable
+   * — it is simply labelled so a rounding-sized difference is not mistaken for
+   * the same problem as a $23,000 one.
+   */
+  isNegligible: boolean
   /** True when a better-ranked source exists and disagrees with what is shown. */
   isDowngrade: boolean
   /** Plain-language explanation for the owner. */
@@ -89,9 +149,24 @@ export type SalesSourceAudit = {
   downgrades: MonthAuditRow[]
   /** Net change to reported revenue if every downgrade were corrected. */
   netDifference: number
+  /**
+   * Net change excluding negligible gaps, so the headline figure is not inflated
+   * by rounding-sized differences.
+   */
+  materialNetDifference: number
+  /** Downgrades whose gap is too small to matter. */
+  negligible: MonthAuditRow[]
   /** Months skipped because the owner locked them. */
   lockedSkipped: string[]
 }
+
+/**
+ * Gaps at or below this share of the month's reported figure are labelled
+ * negligible. Chosen so a sub-1% difference — the scale of a rounding or
+ * timing artefact — reads differently from a material restatement, without
+ * being hidden.
+ */
+export const NEGLIGIBLE_GAP_PERCENT = 1
 
 /** Two money figures within a cent are the same number. */
 function differs(a: number, b: number): boolean {
@@ -140,6 +215,19 @@ export function auditSalesSources(inputs: MonthAuditInput[]): SalesSourceAudit {
 
     const isDowngrade = !locked && beatenBySquare && reallyDiffers
 
+    // Guard against dividing by a zero or absent reported figure: a gap against
+    // nothing is not 0% agreement, it is unmeasurable, and calling it negligible
+    // would bury a month that reports no revenue at all.
+    const differencePercent =
+      reportedRetail != null && Math.abs(reportedRetail) > 0.01
+        ? Number(((Math.abs(difference) / Math.abs(reportedRetail)) * 100).toFixed(2))
+        : 0
+    const isNegligible =
+      isDowngrade &&
+      reportedRetail != null &&
+      Math.abs(reportedRetail) > 0.01 &&
+      differencePercent <= NEGLIGIBLE_GAP_PERCENT
+
     if (locked && beatenBySquare && reallyDiffers) lockedSkipped.push(month)
 
     let explanation: string
@@ -159,7 +247,11 @@ export function auditSalesSources(inputs: MonthAuditInput[]): SalesSourceAudit {
         squareDailyRetail as number,
       )}. A bank deposit is what arrived after Square's fees and holdbacks, so it ${
         difference > 0 ? 'understates' : 'misstates'
-      } what was actually sold.`
+      } what was actually sold.${
+        isNegligible
+          ? ` The gap is only ${differencePercent}% of the month, so correcting this one barely moves your numbers.`
+          : ''
+      }`
     } else if (reportedSource === 'manual') {
       explanation = 'Your own entered figure, which takes priority over Square.'
     } else {
@@ -175,6 +267,8 @@ export function auditSalesSources(inputs: MonthAuditInput[]): SalesSourceAudit {
       reportedSourceLabel: reportedSource ? SOURCE_LABELS[reportedSource] : 'None',
       squareDailyRetail,
       difference,
+      differencePercent,
+      isNegligible,
       isDowngrade,
       explanation,
     })
@@ -189,6 +283,13 @@ export function auditSalesSources(inputs: MonthAuditInput[]): SalesSourceAudit {
     netDifference: Number(
       downgrades.reduce((sum, r) => sum + r.difference, 0).toFixed(2),
     ),
+    materialNetDifference: Number(
+      downgrades
+        .filter((r) => !r.isNegligible)
+        .reduce((sum, r) => sum + r.difference, 0)
+        .toFixed(2),
+    ),
+    negligible: downgrades.filter((r) => r.isNegligible),
     lockedSkipped,
   }
 }

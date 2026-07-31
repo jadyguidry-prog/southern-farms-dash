@@ -10,6 +10,7 @@
  */
 
 import {
+  aggregateDailyRetailByMonth,
   auditSalesSources,
   monthKey,
   type MonthAuditInput,
@@ -31,6 +32,101 @@ function ok(cond: boolean, label: string) {
 function eq<T>(actual: T, expected: T, label: string) {
   ok(actual === expected, `${label} (got ${JSON.stringify(actual)})`)
 }
+
+/* ---------------- daily aggregation ---------------- */
+// `sales_daily` allows two rows for the same date (live API + a CSV of the same
+// period). Summing blindly double-counts that day. There are no duplicates in
+// the data today, so only a test keeps this correct for the day there are.
+const dedup = aggregateDailyRetailByMonth([
+  { sale_date: '2026-06-01', source: 'square_api', retail_sales: 100 },
+  { sale_date: '2026-06-01', source: 'square_csv', retail_sales: 100 },
+  { sale_date: '2026-06-02', source: 'square_api', retail_sales: 50 },
+])
+eq(dedup.get('2026-06'), 150, 'a duplicated day is counted once, not twice')
+
+// The higher-ranked source must win, regardless of row order.
+const ranked = aggregateDailyRetailByMonth([
+  { sale_date: '2026-06-01', source: 'square_csv', retail_sales: 80 },
+  { sale_date: '2026-06-01', source: 'square_api', retail_sales: 100 },
+])
+eq(ranked.get('2026-06'), 100, 'the higher-ranked source wins a duplicate date')
+
+// Rows with an unknown source cannot be ranked, so they must not displace a
+// known-good figure.
+const unknownSrc = aggregateDailyRetailByMonth([
+  { sale_date: '2026-06-01', source: 'square_api', retail_sales: 100 },
+  { sale_date: '2026-06-01', source: 'mystery_import', retail_sales: 999999 },
+])
+eq(unknownSrc.get('2026-06'), 100, 'an unrecognised source is ignored')
+
+// Months are split on the real date, so a year boundary cannot merge months.
+const spanning = aggregateDailyRetailByMonth([
+  { sale_date: '2025-12-31', source: 'square_api', retail_sales: 500 },
+  { sale_date: '2026-01-01', source: 'square_api', retail_sales: 700 },
+])
+eq(spanning.get('2025-12'), 500, 'December stays in December')
+eq(spanning.get('2026-01'), 700, 'January stays in January')
+
+eq(aggregateDailyRetailByMonth([]).size, 0, 'no daily rows means no months')
+eq(
+  aggregateDailyRetailByMonth([{ sale_date: '', source: 'square_api', retail_sales: 9 }]).size,
+  0,
+  'a row with no date is skipped',
+)
+
+/* ---------------- negligible gaps ---------------- */
+// The real 2025-10 case: $136.06 on a $48,081.55 month is 0.28%. It must still
+// be flagged and still be correctable, but labelled so it does not read like
+// the $23,000 discrepancy in 2026-06.
+const tinyGap = auditSalesSources([
+  {
+    month: '2025-10',
+    reportedRetail: 48081.55,
+    reportedSource: 'calculated',
+    squareDailyRetail: 48217.61,
+  },
+])
+eq(tinyGap.downgrades.length, 1, 'a tiny gap is still flagged, not hidden')
+eq(tinyGap.rows[0].isNegligible, true, 'a 0.28% gap is marked negligible')
+eq(tinyGap.rows[0].differencePercent, 0.28, 'gap percent is computed')
+eq(tinyGap.materialNetDifference, 0, 'negligible gaps stay out of the material total')
+eq(tinyGap.netDifference, 136.06, 'but they remain in the overall total')
+ok(
+  tinyGap.rows[0].explanation.includes('barely moves'),
+  'the explanation says the correction hardly matters',
+)
+
+// A large gap must never be softened.
+const bigGap = auditSalesSources([
+  {
+    month: '2026-06',
+    reportedRetail: 47263.0,
+    reportedSource: 'calculated',
+    squareDailyRetail: 70521.0,
+  },
+])
+eq(bigGap.rows[0].isNegligible, false, 'a 49% gap is not negligible')
+eq(bigGap.materialNetDifference, 23258, 'a material gap counts toward the headline')
+ok(
+  !bigGap.rows[0].explanation.includes('barely moves'),
+  'a material gap is not described as harmless',
+)
+
+// Exactly at the threshold counts as negligible; just past it does not.
+const atEdge = auditSalesSources([
+  { month: '2025-01', reportedRetail: 10000, reportedSource: 'calculated', squareDailyRetail: 10100 },
+  { month: '2025-02', reportedRetail: 10000, reportedSource: 'calculated', squareDailyRetail: 10101 },
+])
+eq(atEdge.rows[0].isNegligible, true, 'exactly 1% is negligible')
+eq(atEdge.rows[1].isNegligible, false, 'just over 1% is material')
+
+// A month reporting zero cannot be judged as a percentage. Calling that gap
+// "0% of the month" would mark a month with no revenue at all as negligible.
+const fromZero = auditSalesSources([
+  { month: '2025-03', reportedRetail: 0, reportedSource: 'calculated', squareDailyRetail: 5000 },
+])
+eq(fromZero.rows[0].isNegligible, false, 'a gap against a zero month is never negligible')
+eq(fromZero.materialNetDifference, 5000, 'and it counts as material')
 
 /* ---------------- month keys ---------------- */
 // This is the case that actually bit: `sales_monthly` mixes "May" with "Jun"
