@@ -100,9 +100,18 @@ export type SpendReconciliation = {
    * has to be said rather than reported as "marketing stopped".
    */
   unattributable: { total: number; count: number; monthlyAverage: number }
+  /**
+   * Payee-less rows the owner has ALREADY identified on the Check Resolution
+   * screen. These are excluded from `unattributable` above — counting them as
+   * unknown would tell the owner their own completed work does not exist.
+   */
+  resolved: { total: number; count: number }
   /** True when spend is recent enough that the trailing average is meaningful. */
   hasRecentActivity: boolean
 }
+
+/** What the owner recorded for a payee-less row, keyed by transaction id. */
+export type ResolvedPayee = { payee: string; category: string }
 
 /**
  * Explain the gap between marketing the owner knows they pay and marketing the
@@ -118,12 +127,15 @@ export function reconcileKnownSpend(
   today: Date,
   lapsedAfterMonths = 2,
   aliases: CategoryAliasMap = {},
+  resolutions: Map<string, ResolvedPayee> = new Map(),
 ): SpendReconciliation {
   const thisMonthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`
   const perChannel = new Map<string, { last: string; months: Set<string>; total: number }>()
   let unTotal = 0
   let unCount = 0
   const unMonths = new Set<string>()
+  let resTotal = 0
+  let resCount = 0
 
   for (const r of rows) {
     if (r.reviewStatus === 'excluded') continue
@@ -133,10 +145,33 @@ export function reconcileKnownSpend(
 
     // Reuse the generic-payee rule already proven in lib/transaction-groups.ts
     // rather than inventing a second definition of "no payee".
-    if (isGenericDescription(r.description)) {
-      unTotal += Math.abs(r.amount)
-      unCount += 1
-      unMonths.add(monthKey)
+    let description = r.description
+    if (isGenericDescription(description)) {
+      const fix = resolutions.get(r.id)
+      if (!fix) {
+        unTotal += Math.abs(r.amount)
+        unCount += 1
+        unMonths.add(monthKey)
+        continue
+      }
+      // The owner already said who this was. Treat the resolved payee and
+      // category as the row's identity from here on, so a check resolved to a
+      // marketing payee is counted as marketing rather than reported as unknown.
+      resTotal += Math.abs(r.amount)
+      resCount += 1
+      description = fix.payee || description
+      const resolvedCategory = canonicalCategory(fix.category, aliases)
+      const resolvedIsMarketing =
+        resolvedCategory === MARKETING_CATEGORY ||
+        MARKETING_PATTERNS.some((p) => p.confident && p.test.test(description.toUpperCase()))
+      if (!resolvedIsMarketing) continue
+      const resolvedName = marketingChannelName(description)
+      const re = perChannel.get(resolvedName) ?? { last: '', months: new Set<string>(), total: 0 }
+      const resolvedDate = r.transactionDate.slice(0, 10)
+      if (resolvedDate > re.last) re.last = resolvedDate
+      re.months.add(monthKey)
+      re.total += Math.abs(r.amount)
+      perChannel.set(resolvedName, re)
       continue
     }
 
@@ -144,10 +179,10 @@ export function reconcileKnownSpend(
     const isMarketing =
       category === MARKETING_CATEGORY ||
       (r.vendorId != null && marketingVendorIds.has(r.vendorId)) ||
-      MARKETING_PATTERNS.some((p) => p.confident && p.test.test(r.description.toUpperCase()))
+      MARKETING_PATTERNS.some((p) => p.confident && p.test.test(description.toUpperCase()))
     if (!isMarketing) continue
 
-    const name = marketingChannelName(r.description)
+    const name = marketingChannelName(description)
     const e = perChannel.get(name) ?? { last: '', months: new Set<string>(), total: 0 }
     const date = r.transactionDate.slice(0, 10)
     if (date > e.last) e.last = date
@@ -186,6 +221,7 @@ export function reconcileKnownSpend(
       count: unCount,
       monthlyAverage: unMonths.size > 0 ? unTotal / unMonths.size : 0,
     },
+    resolved: { total: resTotal, count: resCount },
     hasRecentActivity: [...perChannel.values()].some(
       (e) => monthsBetween(monthKeyOf(e.last), thisMonthKey) < lapsedAfterMonths,
     ),
@@ -1500,6 +1536,41 @@ async function fetchMarketingVendorIds(): Promise<Set<string>> {
   return new Set((data ?? []).map((v) => String(v.id)))
 }
 
+/**
+ * Payee-less rows the owner has already identified on the Check Resolution
+ * screen.
+ *
+ * Read-only, and deliberately does NOT touch `financial_transactions` — that
+ * table stays verbatim so a resolution can never be mistaken for source data
+ * (see the contract at the top of `lib/check-resolution-service.ts`).
+ */
+async function fetchCheckResolutions(): Promise<Map<string, ResolvedPayee>> {
+  const supabase = await createClient()
+  const out = new Map<string, ResolvedPayee>()
+  for (let page = 0; ; page += 1) {
+    const from = page * 1000
+    const { data, error } = await supabase
+      .from('check_resolutions')
+      .select('financial_transaction_id, resolved_payee, resolved_category, review_status')
+      .range(from, from + 999)
+    if (error) break
+    const rows = data ?? []
+    for (const r of rows) {
+      // Only approved resolutions count. A pending guess must not silently
+      // become a number the owner is asked to act on.
+      if (r.review_status && r.review_status !== 'approved') continue
+      const id = r.financial_transaction_id == null ? '' : String(r.financial_transaction_id)
+      if (!id) continue
+      out.set(id, {
+        payee: String(r.resolved_payee ?? ''),
+        category: String(r.resolved_category ?? ''),
+      })
+    }
+    if (rows.length < 1000) break
+  }
+  return out
+}
+
 /** The recurring marketing line the owner has already committed to, if any. */
 async function fetchCommittedMarketing(): Promise<number> {
   const supabase = await createClient()
@@ -1545,16 +1616,26 @@ export async function getMarketingAffordability(
 ): Promise<MarketingAffordability> {
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
 
-  const [txns, revenue, marketingVendorIds, committedMonthly] = await Promise.all([
-    fetchTransactions(),
-    fetchMonthlyRevenue(),
-    fetchMarketingVendorIds(),
-    fetchCommittedMarketing(),
-  ])
+  const [txns, revenue, marketingVendorIds, committedMonthly, checkResolutions] = await Promise.all(
+    [
+      fetchTransactions(),
+      fetchMonthlyRevenue(),
+      fetchMarketingVendorIds(),
+      fetchCommittedMarketing(),
+      fetchCheckResolutions(),
+    ],
+  )
 
   const spend = summarizeCurrentMarketingSpend(txns, marketingVendorIds, today)
   const uncategorizedMarketing = findUncategorizedMarketing(txns, marketingVendorIds)
-  const reconciliation = reconcileKnownSpend(txns, marketingVendorIds, today)
+  const reconciliation = reconcileKnownSpend(
+    txns,
+    marketingVendorIds,
+    today,
+    2,
+    {},
+    checkResolutions,
+  )
   const monthly = deriveMonthlyCashFlow(txns, { months: 24 })
 
   // ---- Revenue ----

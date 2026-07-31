@@ -501,6 +501,89 @@ console.log('\nSpend reconciliation (why the average disagrees with reality)')
   check('current spend produces no lapsed warnings', r.lapsed.length, 0)
   check('and no unattributable spend is invented', r.unattributable.total, 0)
 }
+{
+  // Regression: the owner has already identified 47 checks on the Check
+  // Resolution screen, but this counted all 211 payee-less rows as unknown —
+  // telling them their own completed work did not exist.
+  const rows = [
+    { id: 'a', transactionDate: '2026-06-10', description: 'CHECK # 1428', amount: -2500, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    { id: 'b', transactionDate: '2026-06-12', description: 'CHECK # 1429', amount: -400, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    { id: 'c', transactionDate: '2026-06-14', description: 'CHECK # 1430', amount: -1000, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+  ]
+  const resolutions = new Map([
+    ['a', { payee: '3T XL LLC', category: 'Rent' }],
+    // A check the owner identified as a marketing payee must COUNT as marketing.
+    ['b', { payee: 'LAMAR BILLBOARD CO', category: 'Marketing' }],
+    // 'c' is deliberately left unresolved.
+  ])
+  const r = reconcileKnownSpend(
+    rows as never,
+    new Set<string>(),
+    new Date('2026-07-31T00:00:00'),
+    2,
+    {},
+    resolutions,
+  )
+  check('resolved checks are not counted as unknown', r.unattributable.total, 1000)
+  check('only genuinely unknown rows are counted', r.unattributable.count, 1)
+  check('resolved checks are reported separately', r.resolved.total, 2900)
+  check('and counted', r.resolved.count, 2)
+  // The resolved marketing check is dated last month, so it counts as CURRENT
+  // marketing activity — it must not be reported as a lapsed channel.
+  check('a resolved marketing check counts as recent activity', r.hasRecentActivity, true)
+  check('and is therefore not called lapsed', r.lapsed.length, 0)
+}
+{
+  // The same resolved-check path, but old enough to be genuinely lapsed. This is
+  // the case that matters: a billboard paid by check, months ago, which the
+  // owner identified — it must surface as a quiet channel rather than vanish.
+  const r = reconcileKnownSpend(
+    [
+      { id: 'a', transactionDate: '2025-12-05', description: 'CHECK # 1429', amount: -400, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+      { id: 'b', transactionDate: '2025-12-06', description: 'CHECK # 1430', amount: -900, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    ] as never,
+    new Set<string>(),
+    new Date('2026-07-31T00:00:00'),
+    2,
+    {},
+    new Map([
+      ['a', { payee: 'LAMAR BILLBOARD CO', category: 'Marketing' }],
+      ['b', { payee: '3T XL LLC', category: 'Rent' }],
+    ]),
+  )
+  ok(
+    'an old check resolved to a marketing payee becomes a lapsed channel',
+    r.lapsed.some(
+      (l) =>
+        l.channel === 'Billboards / outdoor' &&
+        l.typicalMonthly === 400 &&
+        l.monthsSinceLastCharge === 7,
+    ),
+    JSON.stringify(r.lapsed),
+  )
+  ok(
+    'a check resolved to a non-marketing payee is never a marketing channel',
+    !JSON.stringify(r.lapsed).includes('3T XL') && r.lapsed.length === 1,
+    JSON.stringify(r.lapsed),
+  )
+  check('neither resolved check is counted as unknown', r.unattributable.total, 0)
+}
+{
+  // With no overlay supplied, every payee-less row stays unknown. Nothing is
+  // ever assumed to be identified.
+  const r = reconcileKnownSpend(
+    [
+      { id: 'a', transactionDate: '2026-06-10', description: 'CHECK # 1500', amount: -800, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    ] as never,
+    new Set<string>(),
+    new Date('2026-07-31T00:00:00'),
+    2,
+    {},
+    new Map(),
+  )
+  check('an unresolved check stays unknown', r.unattributable.total, 800)
+  check('and nothing is reported as resolved', r.resolved.count, 0)
+}
 
 console.log('\nConfidence')
 {

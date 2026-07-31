@@ -162,7 +162,15 @@ export function MarketingSpendPanel({
                   bank export at all — described only as CHECK, TRANSFER and similar. No
                   rule can tell what any of it paid for, so marketing paid this way
                   cannot be measured from this data. That is a gap in the data, not
-                  evidence that marketing stopped.
+                  evidence that marketing stopped.{' '}
+                  {reconciliation.resolved.count > 0 && (
+                    <>
+                      The {reconciliation.resolved.count} you have already identified on
+                      Check Resolution are excluded from that figure.{' '}
+                    </>
+                  )}
+                  Identifying them there is the only way to see them: a bank feed cannot
+                  help, because banks do not record who a check was written to.
                 </p>
               )}
             </div>
