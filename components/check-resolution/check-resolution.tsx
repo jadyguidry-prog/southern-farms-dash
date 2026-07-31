@@ -26,6 +26,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { TransactionDocumentsDialog } from '@/components/documents/transaction-documents-dialog'
 import { formatCurrency } from '@/lib/data'
 import type {
   CheckResolutionDataset,
@@ -47,7 +48,16 @@ const CONFIDENCE_STYLE: Record<
   low: { label: 'Weak hint', className: 'border border-border text-muted-foreground' },
 }
 
-export function CheckResolution({ data }: { data: CheckResolutionDataset }) {
+export function CheckResolution({
+  data,
+  documentCounts = {},
+  maxUploadMb = 25,
+}: {
+  data: CheckResolutionDataset
+  /** Attachment count per transaction id, so rows can show a badge. */
+  documentCounts?: Record<string, number>
+  maxUploadMb?: number
+}) {
   const [pending, startTransition] = useTransition()
   const [busy, setBusy] = useState<string | null>(null)
 
@@ -348,6 +358,21 @@ export function CheckResolution({ data }: { data: CheckResolutionDataset }) {
                       <span className="text-sm font-semibold tabular-nums">
                         {formatCurrency(c.amount)}
                       </span>
+                      <TransactionDocumentsDialog
+                        transactionId={c.id}
+                        title={
+                          c.checkNumber
+                            ? `Check ${c.checkNumber} · ${formatCurrency(c.amount)}`
+                            : `Check · ${formatCurrency(c.amount)}`
+                        }
+                        subtitle={
+                          c.checkNumber
+                            ? `Look up check ${c.checkNumber} in your bank portal, then attach the scan so the payee stays on file.`
+                            : 'This check has no number, so identify it by date and amount in your bank portal, then attach the scan.'
+                        }
+                        count={documentCounts[c.id] ?? 0}
+                        maxUploadMb={maxUploadMb}
+                      />
                       <Button
                         size="sm"
                         variant="outline"

@@ -1,6 +1,10 @@
 import { PageHeader } from '@/components/page-header'
 import { CheckResolution } from '@/components/check-resolution/check-resolution'
 import { getCheckResolutionDataset } from '@/lib/check-resolution-service'
+import {
+  getDocumentCounts,
+  getMaxUploadBytes,
+} from '@/lib/transaction-documents-service'
 
 export const dynamic = 'force-dynamic'
 
@@ -11,7 +15,11 @@ export const metadata = {
 }
 
 export default async function CheckResolutionPage() {
-  const data = await getCheckResolutionDataset()
+  const [data, documentCounts, maxUploadBytes] = await Promise.all([
+    getCheckResolutionDataset(),
+    getDocumentCounts(),
+    getMaxUploadBytes(),
+  ])
 
   return (
     <div>
@@ -19,7 +27,11 @@ export default async function CheckResolutionPage() {
         title="Check Resolution"
         description="Your bank export records these payments only as “CHECK #” with no payee, so this spend cannot be assigned to a category on its own. Name who was paid and your answer is stored alongside the bank record — the original is never changed, and every decision can be undone."
       />
-      <CheckResolution data={data} />
+      <CheckResolution
+        data={data}
+        documentCounts={Object.fromEntries(documentCounts)}
+        maxUploadMb={Math.round(maxUploadBytes / 1024 / 1024)}
+      />
     </div>
   )
 }
