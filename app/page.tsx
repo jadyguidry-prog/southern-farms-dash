@@ -50,7 +50,15 @@ export default async function DashboardPage() {
   const { kpis, settings, pillars, composite, insights, cashFlow, labor, checks } =
     snapshot
   // Generated insights lead, followed by anything entered manually.
-  const recommendations = [...insights, ...saved]
+  //
+  // Sorted by severity because the highlights card shows only the first three. On
+  // raw insertion order a critical finding could be cut off entirely while three
+  // "on target" notes filled the card — the opposite of a highlight. `sort` is
+  // stable, so equal-severity items keep their previous relative order.
+  const severityRank = { critical: 0, warning: 1, opportunity: 2 } as const
+  const recommendations = [...insights, ...saved].sort(
+    (a, b) => severityRank[a.severity] - severityRank[b.severity],
+  )
 
   // Prefer cash flow derived from real bank transactions; the legacy
   // cash_flow_monthly table is empty and has no year column to order by.
