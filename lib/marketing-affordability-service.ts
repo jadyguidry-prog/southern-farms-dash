@@ -18,6 +18,7 @@ import { createClient } from '@/lib/supabase/server'
 import { canonicalCategory, type CategoryAliasMap } from '@/lib/categories'
 import { SPEND_TYPES, SPEND_OFFSET_TYPES, type TransactionType } from '@/lib/transactions'
 import { fetchAllPages } from '@/lib/paginate'
+import { isGenericDescription } from '@/lib/transaction-groups'
 import {
   deriveMonthlyCashFlow,
   monthLabel,
@@ -76,6 +77,121 @@ export type CurrentMarketingSpend = {
   channels: { name: string; amount: number; count: number }[]
 }
 
+export type LapsedChannel = {
+  channel: string
+  lastDate: string
+  monthsSinceLastCharge: number
+  /** Mean per active month while the channel WAS running. */
+  typicalMonthly: number
+}
+
+export type SpendReconciliation = {
+  /**
+   * Channels with no charge in the trailing window. If the owner says these are
+   * still running, the money is leaving by a route the bank feed cannot attribute
+   * (usually a check), not stopping.
+   */
+  lapsed: LapsedChannel[]
+  /**
+   * Outflows whose description carries no payee at all — `CHECK`, `DEPOSIT` and
+   * friends. Structurally unattributable: the bank export has no payee, memo or
+   * check-number field, so no rule can ever categorize these. Any recurring
+   * marketing paid this way is invisible to every figure on the page, and that
+   * has to be said rather than reported as "marketing stopped".
+   */
+  unattributable: { total: number; count: number; monthlyAverage: number }
+  /** True when spend is recent enough that the trailing average is meaningful. */
+  hasRecentActivity: boolean
+}
+
+/**
+ * Explain the gap between marketing the owner knows they pay and marketing the
+ * ledger can see.
+ *
+ * The trailing average is arithmetically correct but can still be misleading: a
+ * channel that ran for months and then vanished from the feed looks like it
+ * stopped, when in practice it moved to a payment method that carries no payee.
+ */
+export function reconcileKnownSpend(
+  rows: MarketingTxnRow[],
+  marketingVendorIds: Set<string>,
+  today: Date,
+  lapsedAfterMonths = 2,
+  aliases: CategoryAliasMap = {},
+): SpendReconciliation {
+  const thisMonthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`
+  const perChannel = new Map<string, { last: string; months: Set<string>; total: number }>()
+  let unTotal = 0
+  let unCount = 0
+  const unMonths = new Set<string>()
+
+  for (const r of rows) {
+    if (r.reviewStatus === 'excluded') continue
+    if (!SPEND_TYPES.includes(r.transactionType as never)) continue
+    const monthKey = monthKeyOf(r.transactionDate)
+    if (!monthKey) continue
+
+    // Reuse the generic-payee rule already proven in lib/transaction-groups.ts
+    // rather than inventing a second definition of "no payee".
+    if (isGenericDescription(r.description)) {
+      unTotal += Math.abs(r.amount)
+      unCount += 1
+      unMonths.add(monthKey)
+      continue
+    }
+
+    const category = canonicalCategory(r.expenseCategory, aliases)
+    const isMarketing =
+      category === MARKETING_CATEGORY ||
+      (r.vendorId != null && marketingVendorIds.has(r.vendorId)) ||
+      MARKETING_PATTERNS.some((p) => p.confident && p.test.test(r.description.toUpperCase()))
+    if (!isMarketing) continue
+
+    const name = marketingChannelName(r.description)
+    const e = perChannel.get(name) ?? { last: '', months: new Set<string>(), total: 0 }
+    const date = r.transactionDate.slice(0, 10)
+    if (date > e.last) e.last = date
+    e.months.add(monthKey)
+    e.total += Math.abs(r.amount)
+    perChannel.set(name, e)
+  }
+
+  const monthsBetween = (from: string, to: string) => {
+    let n = 0
+    let cursor = from
+    while (cursor < to && n < 600) {
+      cursor = addMonths(cursor, 1)
+      n += 1
+    }
+    return n
+  }
+
+  const lapsed: LapsedChannel[] = []
+  for (const [channel, e] of perChannel) {
+    const gap = monthsBetween(monthKeyOf(e.last), thisMonthKey)
+    if (gap < lapsedAfterMonths) continue
+    lapsed.push({
+      channel,
+      lastDate: e.last,
+      monthsSinceLastCharge: gap,
+      typicalMonthly: e.total / Math.max(1, e.months.size),
+    })
+  }
+  lapsed.sort((a, b) => b.typicalMonthly - a.typicalMonthly)
+
+  return {
+    lapsed,
+    unattributable: {
+      total: unTotal,
+      count: unCount,
+      monthlyAverage: unMonths.size > 0 ? unTotal / unMonths.size : 0,
+    },
+    hasRecentActivity: [...perChannel.values()].some(
+      (e) => monthsBetween(monthKeyOf(e.last), thisMonthKey) < lapsedAfterMonths,
+    ),
+  }
+}
+
 /** `YYYY-MM` for a date string, or '' when unparseable. */
 function monthKeyOf(date: string): string {
   return /^\d{4}-\d{2}/.test(date) ? date.slice(0, 7) : ''
@@ -129,7 +245,15 @@ const MARKETING_PATTERNS: { test: RegExp; channel: string; confident: boolean }[
     channel: 'SMS marketing',
     confident: true,
   },
-  { test: /BILLBOARD|LAMAR|OUTFRONT/, channel: 'Billboards', confident: true },
+  // `OUTD`/`OUTDOOR` is the trade term for billboards, so a vendor like
+  // `BAYOU SIGNS OUTD` is outdoor advertising — NOT the signage/printing bucket
+  // below. It matched there first and the owner did not recognise their own
+  // billboard spend, so this must stay ahead of the signage pattern.
+  {
+    test: /BILLBOARD|LAMAR|OUTFRONT|\bOUTD\b|\bOUTDOOR\b/,
+    channel: 'Billboards / outdoor',
+    confident: true,
+  },
   {
     test: /BROADCAS|\bRADIO\b|CABLE ADVERT/,
     channel: 'Radio / TV advertising',
@@ -259,9 +383,19 @@ export type SuspectedMarketingChannel = {
 export type UncategorizedMarketing = {
   channels: SuspectedMarketingChannel[]
   total: number
-  /** Spread over the months actually covered, for comparison with the average. */
+  /**
+   * Spread over the CALENDAR months from the first to the last charge, matching
+   * the convention in `summarizeCurrentMarketingSpend`. Dividing by the number of
+   * months that happen to contain a charge overstates the rate whenever the
+   * ledger has gaps — which it does.
+   */
   impliedMonthly: number
+  /** Calendar months from first to last charge inclusive, gaps included. */
   monthsSpanned: number
+  /** Months in that span with no charge at all — a sign of missing data. */
+  monthsWithoutCharges: number
+  firstMonth: string | null
+  lastMonth: string | null
 }
 
 /**
@@ -308,12 +442,30 @@ export function findUncategorizedMarketing(
     map.set(hit.channel, e)
   }
 
-  const monthsSpanned = months.size
+  // Calendar span, not `months.size`. The same trap the averages above already
+  // avoid: $5,962 spread over 5 active months reads as $1,192/mo, but those
+  // charges span 7 calendar months, so the honest rate is $852/mo.
+  const seen = [...months].sort()
+  const firstMonth = seen[0] ?? null
+  const lastMonth = seen[seen.length - 1] ?? null
+  let monthsSpanned = 0
+  if (firstMonth && lastMonth) {
+    let cursor = firstMonth
+    monthsSpanned = 1
+    while (cursor < lastMonth && monthsSpanned < 600) {
+      cursor = addMonths(cursor, 1)
+      monthsSpanned += 1
+    }
+  }
+
   return {
     channels: [...map.values()].sort((a, b) => b.amount - a.amount),
     total,
     impliedMonthly: monthsSpanned > 0 ? total / monthsSpanned : 0,
     monthsSpanned,
+    monthsWithoutCharges: Math.max(0, monthsSpanned - months.size),
+    firstMonth,
+    lastMonth,
   }
 }
 
@@ -1260,6 +1412,12 @@ export type MarketingAffordability = {
    * far lower than what the owner knows they spend.
    */
   uncategorizedMarketing: UncategorizedMarketing
+  /**
+   * Why the trailing average can disagree with what the owner knows they pay:
+   * channels that stopped appearing in the feed, and spend the bank export
+   * cannot attribute to any payee at all.
+   */
+  reconciliation: SpendReconciliation
   hasData: boolean
 }
 
@@ -1396,6 +1554,7 @@ export async function getMarketingAffordability(
 
   const spend = summarizeCurrentMarketingSpend(txns, marketingVendorIds, today)
   const uncategorizedMarketing = findUncategorizedMarketing(txns, marketingVendorIds)
+  const reconciliation = reconcileKnownSpend(txns, marketingVendorIds, today)
   const monthly = deriveMonthlyCashFlow(txns, { months: 24 })
 
   // ---- Revenue ----
@@ -1586,6 +1745,7 @@ export async function getMarketingAffordability(
   return {
     spend,
     uncategorizedMarketing,
+    reconciliation,
     cash: cashResult,
     budget,
     score,

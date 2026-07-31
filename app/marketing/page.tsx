@@ -72,6 +72,7 @@ export default async function MarketingPage() {
             seasonality={data.seasonality}
             commitmentMismatch={data.commitmentMismatch}
             uncategorizedMarketing={data.uncategorizedMarketing}
+            reconciliation={data.reconciliation}
           />
           <ConfidencePanel confidence={data.confidence} />
         </div>

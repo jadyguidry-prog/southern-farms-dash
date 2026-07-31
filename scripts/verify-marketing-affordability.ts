@@ -19,6 +19,7 @@ import {
   computeSeasonality,
   findUncategorizedMarketing,
   placeholderReceivableReason,
+  reconcileKnownSpend,
   scoreAffordability,
   summarizeCurrentMarketingSpend,
   addMonths,
@@ -378,20 +379,47 @@ console.log('\nUncategorized marketing detection')
   ok('a marketing vendor is not re-suggested', !JSON.stringify(u).includes('500'))
   ok('utilities are not mistaken for marketing', !JSON.stringify(u).includes('1800'))
   ok('excluded rows stay excluded', !JSON.stringify(u).includes('9999'))
-  check('signage/print, broadcast and Meta are separated', u.channels.length, 3)
-  check('only months actually seen are counted', u.monthsSpanned, 2)
+  check('billboards, broadcast, print and Meta are separated', u.channels.length, 4)
+  // Regression: dividing by ACTIVE months (2) reported $1,105/mo for charges that
+  // actually span Sep -> Dec (4 calendar months), overstating the rate ~2x. The
+  // averages elsewhere already use a calendar window; this must match, or the
+  // figure shown to the owner is inflated by whatever gaps the ledger has.
+  check('the span is calendar months, gaps included', u.monthsSpanned, 4)
+  check('and the empty months are counted', u.monthsWithoutCharges, 2)
   ok(
-    'the implied monthly rate is the total over those months',
-    Math.round(u.impliedMonthly) === 1105,
-    `implied ${u.impliedMonthly}`,
+    'the implied monthly rate uses the calendar span',
+    Math.round(u.impliedMonthly) === 553,
+    `implied ${u.impliedMonthly}, expected ~552.53`,
   )
-  // Signage + VistaPrint = $1,068.10, just ahead of broadcast's $1,050.
+  check(
+    'the first and last month are reported',
+    `${u.firstMonth}->${u.lastMonth}`,
+    '2025-09->2025-12',
+  )
+  // Regression: `BAYOU SIGNS OUTD` is a BILLBOARD vendor (OUTD = outdoor), but it
+  // matched the signage pattern first, so the owner did not recognise their own
+  // $450/mo billboard spend in the callout.
+  ok(
+    'an OUTD vendor is billboards, not signage',
+    u.channels.some((c) => c.channel === 'Billboards / outdoor' && c.amount === 450),
+    JSON.stringify(u.channels.map((c) => `${c.channel}=${c.amount}`)),
+  )
   ok(
     'the biggest channel is listed first so the owner fixes it first',
-    u.channels[0].channel === 'Signage / printing' && u.channels[0].amount > 1_068,
+    u.channels[0].channel === 'Radio / TV advertising',
     JSON.stringify(u.channels.map((c) => `${c.channel}=${c.amount}`)),
   )
 }
+check(
+  'a billboard vendor is named as outdoor advertising',
+  marketingChannelName('BAYOU SIGNS OUTD SALE'),
+  'Billboards / outdoor',
+)
+check(
+  'plain signage is still signage',
+  marketingChannelName('ACME BANNER CO'),
+  'Signage / printing',
+)
 {
   // Clean books must produce no noise at all.
   const u = findUncategorizedMarketing(
@@ -402,6 +430,76 @@ console.log('\nUncategorized marketing detection')
   )
   check('fully categorized books report nothing', u.channels.length, 0)
   check('and no implied monthly figure is invented', u.impliedMonthly, 0)
+  // No charges means no span at all — not a bogus 1-month span that would make a
+  // later division look meaningful.
+  check('no calendar span is invented', u.monthsSpanned, 0)
+  check('and no month bounds are invented', `${u.firstMonth}/${u.lastMonth}`, 'null/null')
+}
+{
+  // A single charge spans exactly one month, so the implied rate is that charge.
+  const u = findUncategorizedMarketing(
+    [
+      { id: '1', transactionDate: '2026-06-01', description: 'LAMAR BILLBOARD', amount: -500, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    ] as never,
+    new Set<string>(),
+  )
+  check('a single month spans one month, not zero', u.monthsSpanned, 1)
+  check('and the implied rate is that single charge', u.impliedMonthly, 500)
+  check('with no empty months', u.monthsWithoutCharges, 0)
+}
+
+console.log('\nSpend reconciliation (why the average disagrees with reality)')
+{
+  // Regression: the owner states ~$950/mo of marketing, but billboards and radio
+  // have no charge since Dec 2025, so every trailing average reads near zero. The
+  // page must say those channels went quiet rather than implying they stopped.
+  const today = new Date('2026-07-31T00:00:00')
+  const rows = [
+    { id: '1', transactionDate: '2025-11-07', description: 'BAYOU SIGNS OUTD SALE', amount: -450, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    { id: '2', transactionDate: '2025-12-05', description: 'BAYOU SIGNS OUTD SALE', amount: -450, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    { id: '3', transactionDate: '2026-06-27', description: 'FACEBK *ZQK5YVV6N2', amount: -47.65, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: 'Marketing', vendorId: null },
+    // No payee at all: structurally unattributable.
+    { id: '4', transactionDate: '2026-06-10', description: 'CHECK', amount: -2000, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    { id: '5', transactionDate: '2026-05-10', description: 'CHECK', amount: -1000, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+    // Income must never be counted as unattributable outflow.
+    { id: '6', transactionDate: '2026-06-11', description: 'DEPOSIT', amount: 5000, transactionType: 'income', reviewStatus: 'reviewed', expenseCategory: '', vendorId: null },
+  ]
+  const r = reconcileKnownSpend(rows as never, new Set<string>(), today)
+  ok(
+    'a channel quiet for months is reported as lapsed',
+    r.lapsed.some((l) => l.channel === 'Billboards / outdoor' && l.monthsSinceLastCharge === 7),
+    JSON.stringify(r.lapsed),
+  )
+  ok(
+    'the lapsed channel reports what it used to cost',
+    r.lapsed.find((l) => l.channel === 'Billboards / outdoor')?.typicalMonthly === 450,
+    JSON.stringify(r.lapsed),
+  )
+  ok(
+    'a channel that billed this month is NOT called lapsed',
+    !r.lapsed.some((l) => l.channel === 'Facebook / Meta Ads'),
+    JSON.stringify(r.lapsed.map((l) => l.channel)),
+  )
+  check('recent activity is detected', r.hasRecentActivity, true)
+  check('payee-less outflows are totalled', r.unattributable.total, 3000)
+  check('and counted', r.unattributable.count, 2)
+  ok(
+    'income is never counted as unattributable spend',
+    !JSON.stringify(r.unattributable).includes('5000'),
+    JSON.stringify(r.unattributable),
+  )
+}
+{
+  // Clean, current books: nothing to explain, so no noise.
+  const r = reconcileKnownSpend(
+    [
+      { id: '1', transactionDate: '2026-07-05', description: 'FACEBK *AAA', amount: -250, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: 'Marketing', vendorId: null },
+    ] as never,
+    new Set<string>(),
+    new Date('2026-07-31T00:00:00'),
+  )
+  check('current spend produces no lapsed warnings', r.lapsed.length, 0)
+  check('and no unattributable spend is invented', r.unattributable.total, 0)
 }
 
 console.log('\nConfidence')

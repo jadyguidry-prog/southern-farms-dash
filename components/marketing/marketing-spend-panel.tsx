@@ -4,6 +4,7 @@ import { formatCurrency } from '@/lib/data'
 import type {
   CurrentMarketingSpend,
   Seasonality,
+  SpendReconciliation,
   UncategorizedMarketing,
 } from '@/lib/marketing-affordability-service'
 
@@ -18,11 +19,13 @@ export function MarketingSpendPanel({
   seasonality,
   commitmentMismatch,
   uncategorizedMarketing,
+  reconciliation,
 }: {
   spend: CurrentMarketingSpend
   seasonality: Seasonality
   commitmentMismatch: { committed: number; actual: number } | null
   uncategorizedMarketing: UncategorizedMarketing
+  reconciliation: SpendReconciliation
 }) {
   // One derivation, used by both the header warning and the callout below, so
   // the two can never disagree about whether the figures are trustworthy.
@@ -108,6 +111,58 @@ export function MarketingSpendPanel({
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {/* Channels that billed regularly and then vanished from the feed. The
+              averages above treat them as stopped, which is wrong if the owner is
+              still paying them by a route the export carries no payee for. */}
+          {reconciliation.lapsed.length > 0 && (
+            <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/40 p-4">
+              <div className="flex flex-col gap-1.5">
+                <p className="text-pretty text-sm font-semibold text-foreground">
+                  These channels stopped appearing in the bank feed
+                </p>
+                <p className="text-pretty text-sm leading-relaxed text-muted-foreground">
+                  Each billed regularly and then stopped. If you are still paying them,
+                  the charges are arriving by a route this feed cannot identify — most
+                  likely a check — so they are missing from every figure above.
+                </p>
+              </div>
+              <ul className="flex flex-col gap-1.5">
+                {reconciliation.lapsed.map((l) => (
+                  <li
+                    key={l.channel}
+                    className="flex items-baseline justify-between gap-x-3 border-t border-border pt-1.5 text-sm"
+                  >
+                    <span className="min-w-0 flex-1 font-medium text-foreground">
+                      {l.channel}
+                      <span className="ml-2 whitespace-nowrap font-normal text-muted-foreground">
+                        last seen {l.lastDate}
+                      </span>
+                    </span>
+                    <span className="shrink-0 font-mono font-semibold tabular-nums text-foreground">
+                      {formatCurrency(l.typicalMonthly)}
+                      <span className="ml-1 font-sans text-xs font-normal text-muted-foreground">
+                        /mo
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {reconciliation.unattributable.count > 0 && (
+                <p className="text-pretty border-t border-border pt-2 text-sm leading-relaxed text-muted-foreground">
+                  Separately,{' '}
+                  <span className="font-mono font-semibold text-foreground">
+                    {formatCurrency(reconciliation.unattributable.total)}
+                  </span>{' '}
+                  across {reconciliation.unattributable.count} rows has no payee in the
+                  bank export at all — described only as CHECK, TRANSFER and similar. No
+                  rule can tell what any of it paid for, so marketing paid this way
+                  cannot be measured from this data. That is a gap in the data, not
+                  evidence that marketing stopped.
+                </p>
+              )}
             </div>
           )}
 
