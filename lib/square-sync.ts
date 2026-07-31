@@ -70,6 +70,7 @@ export type SyncResource =
   | 'orders'
   | 'payments'
   | 'refunds'
+  | 'shifts'
   | 'rollups'
 
 export type SyncOutcome = {
@@ -862,6 +863,200 @@ export async function syncRefunds(opts: {
 }
 
 /* ------------------------------------------------------------------ */
+/* Shifts (labor timecards)                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Pull Square Labor timecards so labor cost has a real source.
+ *
+ * These are *timecards*, not payroll. Square's Payroll API is access-restricted,
+ * so gross-to-net, withholdings and employer taxes are not available here.
+ * Everything derived from this table is therefore an hours x wage estimate and
+ * must be labelled as such: it is a floor for labor cost, not what was paid.
+ *
+ * Three Square details drive the shape of this function:
+ *  - The wage lives on each shift rather than on the employee, so a mid-period
+ *    raise is captured per shift instead of retroactively rewriting history.
+ *  - Deleting a shift in Square makes it vanish from search rather than coming
+ *    back flagged. A row that disappears is tombstoned via `is_deleted` instead
+ *    of being hard-deleted, so a correction can never silently erase labor
+ *    history the owner has already reviewed.
+ *  - `ShiftQuery` is deprecated at Square API version 2025-05-21 in favour of
+ *    the newer timecards surface. The client pins 2025-01-23, where this is
+ *    still the supported call; when that version is raised this function has to
+ *    move to `labor.timecards.search` (same fields, `timecards` in place of
+ *    `shifts`).
+ */
+export async function syncShifts(opts: {
+  since?: Date
+}): Promise<SyncOutcome & { truncated: boolean }> {
+  const resource: SyncResource = 'shifts'
+  await writeState(resource, { last_run_at: new Date().toISOString(), status: 'running' })
+  try {
+    const client = getSquareClient()
+    const supabase = await getSyncDb()
+    const state = await readState(resource)
+    const defaultStart = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000)
+    const start = opts.since ?? windowStart(state, defaultStart)
+    const runStart = new Date()
+
+    const rows: Record<string, unknown>[] = []
+    const seenIds: string[] = []
+    let pages = 0
+    let cursor: string | undefined
+    let truncated = false
+
+    for (;;) {
+      const response = await withRetry(() =>
+        client.labor.shifts.search({
+          query: {
+            filter: {
+              // Inclusive lower bound, so the overlap window applies here.
+              start: { startAt: start.toISOString() },
+            },
+            sort: { field: 'START_AT', order: 'ASC' },
+          },
+          limit: 200,
+          cursor,
+        }),
+      )
+
+      for (const t of response.shifts ?? []) {
+        if (!t.id) continue
+        seenIds.push(t.id)
+
+        // Breaks matter for cost: unpaid time is on the clock but not payable.
+        const breaks = t.breaks ?? []
+        let unpaidMinutes = 0
+        let paidMinutes = 0
+        for (const b of breaks) {
+          if (!b.startAt || !b.endAt) continue
+          const mins = (new Date(b.endAt).getTime() - new Date(b.startAt).getTime()) / 60_000
+          if (!Number.isFinite(mins) || mins < 0) continue
+          if (b.isPaid) paidMinutes += mins
+          else unpaidMinutes += mins
+        }
+
+        const hourlyRate = t.wage?.hourlyRate
+          ? moneyToDollars(t.wage.hourlyRate)
+          : null
+
+        rows.push({
+          square_shift_id: t.id,
+          square_team_member_id: t.teamMemberId ?? '',
+          square_location_id: t.locationId ?? '',
+          start_at: t.startAt ?? null,
+          end_at: t.endAt ?? null,
+          timezone: t.timezone ?? null,
+          job_id: t.wage?.jobId ?? null,
+          job_title: t.wage?.title ?? null,
+          hourly_rate: hourlyRate,
+          wage_currency: t.wage?.hourlyRate?.currency ?? null,
+          tip_eligible: t.wage?.tipEligible ?? null,
+          declared_cash_tips: t.declaredCashTipMoney
+            ? moneyToDollars(t.declaredCashTipMoney)
+            : null,
+          status: t.status ?? null,
+          breaks: breaks,
+          break_count: breaks.length,
+          unpaid_break_minutes: Math.round(unpaidMinutes),
+          paid_break_minutes: Math.round(paidMinutes),
+          version: t.version ?? null,
+          square_created_at: t.createdAt ?? null,
+          square_updated_at: t.updatedAt ?? null,
+          is_deleted: false,
+          deleted_detected_at: null,
+          raw: t,
+          synced_at: new Date().toISOString(),
+        })
+      }
+
+      pages++
+      cursor = response.cursor ?? undefined
+      if (!cursor) break
+      if (warnIfTruncated(resource, pages)) {
+        truncated = true
+        break
+      }
+    }
+
+    for (const chunk of chunked(rows, 500)) {
+      const { error } = await supabase
+        .from('square_shifts')
+        .upsert(chunk, { onConflict: 'square_shift_id' })
+      if (error) throw new Error(error.message)
+    }
+
+    /*
+     * Tombstone timecards Square no longer returns for this window.
+     *
+     * Only done on a complete (non-truncated) read: if pagination bailed early,
+     * the rows we did not reach are not missing, merely unseen, and marking them
+     * deleted would understate labor cost — the exact failure mode that made the
+     * page ceiling worth reporting in the first place.
+     */
+    let tombstoned = 0
+    if (!truncated) {
+      const existing = await fetchAllRows<{ square_shift_id: string }>(
+        (from, to) =>
+          supabase
+            .from('square_shifts')
+            .select('square_shift_id')
+            .gte('start_at', start.toISOString())
+            .eq('is_deleted', false)
+            .range(from, to),
+        'square_shifts existing ids',
+      )
+      const seen = new Set(seenIds)
+      const missing = existing
+        .map((r) => r.square_shift_id)
+        .filter((id) => !seen.has(id))
+
+      for (const chunk of chunked(missing, 500)) {
+        const { error } = await supabase
+          .from('square_shifts')
+          .update({
+            is_deleted: true,
+            deleted_detected_at: new Date().toISOString(),
+          })
+          .in('square_shift_id', chunk)
+        if (error) throw new Error(error.message)
+      }
+      tombstoned = missing.length
+      if (tombstoned > 0) {
+        console.log(`[v0] shifts: tombstoned ${tombstoned} timecard(s) removed in Square.`)
+      }
+    }
+
+    await writeState(resource, {
+      status: truncated ? 'error' : 'ok',
+      last_error: truncated
+        ? `Hit the ${MAX_PAGES}-page ceiling; labor data is truncated.`
+        : null,
+      last_success_at: truncated ? undefined : new Date().toISOString(),
+      // A truncated read must not advance the watermark, or the unseen tail
+      // would be skipped forever on the next incremental run.
+      last_synced_through: truncated ? undefined : runStart.toISOString(),
+      records_synced: rows.length,
+    })
+
+    return {
+      ok: !truncated,
+      resource,
+      recordsSynced: rows.length,
+      truncated,
+      error: truncated
+        ? `Hit the ${MAX_PAGES}-page ceiling; labor data is truncated.`
+        : undefined,
+    }
+  } catch (error) {
+    const message = describeSquareError(error)
+    await writeState(resource, { status: 'error', last_error: message })
+    return { ok: false, resource, recordsSynced: 0, error: message, truncated: false }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Rollups                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -1260,6 +1455,11 @@ export async function runFullSync(
   const team = await syncTeam()
   outcomes.push(team)
   // A team failure only costs per-employee attribution, so the run continues.
+
+  const shifts = await syncShifts({ since })
+  outcomes.push({ ...shifts, truncated: undefined } as SyncOutcome)
+  // Labor timecards are a cost input, not revenue. A failure here must not stop
+  // orders and payments from syncing, so the run continues either way.
 
   const refunds = await syncRefunds({ since, timezone })
   outcomes.push({ ...refunds, refundsByDate: undefined } as SyncOutcome)
