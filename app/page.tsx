@@ -47,7 +47,17 @@ export default async function DashboardPage() {
     getRecommendations(),
   ])
 
-  const { kpis, settings, pillars, composite, insights, cashFlow, labor, checks } =
+  const {
+    kpis,
+    settings,
+    pillars,
+    composite,
+    insights,
+    cashFlow,
+    labor,
+    checks,
+    marketing,
+  } =
     snapshot
   // Generated insights lead, followed by anything entered manually.
   //
@@ -361,6 +371,81 @@ export default async function DashboardPage() {
                   className="text-sm font-medium underline"
                 >
                   Resolve checks
+                </Link>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Marketing affordability */}
+      <div className="mt-4">
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <CardTitle className="text-base">Marketing Budget</CardTitle>
+                <CardDescription>
+                  What cash can support after the reserve, bills and payroll
+                </CardDescription>
+              </div>
+              {marketing.hasData ? (
+                <Badge variant="secondary">{marketing.score.band}</Badge>
+              ) : null}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {/* Same honesty rule as Gross Profit above: with no transactions or
+                revenue history there is nothing to base a budget on, so say so
+                rather than rendering a confident $0. */}
+            {!marketing.hasData ? (
+              <div className="flex flex-col gap-2">
+                <p className="text-lg font-semibold text-muted-foreground">
+                  Not yet measurable
+                </p>
+                <p className="text-pretty text-sm text-muted-foreground">
+                  A marketing budget needs imported bank transactions and monthly
+                  revenue history. Without both, any figure here would be a guess.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <span className="text-3xl font-semibold tracking-tight">
+                    {formatCurrency(marketing.budget.recommended)}
+                  </span>
+                  <span className="text-sm text-muted-foreground">
+                    per month recommended
+                  </span>
+                </div>
+                <p className="text-pretty text-sm text-muted-foreground">
+                  {marketing.recommendation.summary}
+                </p>
+                <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                  <span className="text-muted-foreground">
+                    Currently{' '}
+                    <span className="font-medium text-foreground">
+                      {formatCurrency(
+                        Math.max(
+                          marketing.committedMonthly,
+                          marketing.spend.avg3Month,
+                        ),
+                      )}
+                      /mo
+                    </span>
+                  </span>
+                  <span className="text-muted-foreground">
+                    Safe headroom{' '}
+                    <span className="font-medium text-foreground">
+                      {formatCurrency(marketing.additionalSafe)}
+                    </span>
+                  </span>
+                </div>
+                <Link
+                  href="/marketing"
+                  className="text-sm font-medium underline"
+                >
+                  See how this is calculated
                 </Link>
               </div>
             )}

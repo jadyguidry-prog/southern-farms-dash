@@ -769,15 +769,23 @@ export const getMarketingAffordabilitySnapshot = cache(async () => {
  * both always agree, and every threshold comes from business_settings.
  */
 export async function getHealthSnapshot() {
-  const [rawKpis, summary, squareDaily, cashFlowInsight, labor, checks] =
-    await Promise.all([
-      getKpis(),
-      getCashDebtSummary(),
-      getSquareDailySales(),
-      getCashFlowInsight(),
-      getLaborHealthSnapshot(),
-      getCheckResolutionSnapshot(),
-    ])
+  const [
+    rawKpis,
+    summary,
+    squareDaily,
+    cashFlowInsight,
+    labor,
+    checks,
+    marketing,
+  ] = await Promise.all([
+    getKpis(),
+    getCashDebtSummary(),
+    getSquareDailySales(),
+    getCashFlowInsight(),
+    getLaborHealthSnapshot(),
+    getCheckResolutionSnapshot(),
+    getMarketingAffordabilitySnapshot(),
+  ])
   const settings = summary.settings
 
   // Square is the only source that actually measures weekly sales. The stored
@@ -929,6 +937,25 @@ export async function getHealthSnapshot() {
               cashFlowInsight.spendByCategory.suspectedMistyped.length,
           }
         : undefined,
+    // Same guard once more: with no transactions or no revenue history there is
+    // nothing to base a budget on, so the group is omitted rather than passed as
+    // zeros that would read as "you can afford $0".
+    marketing: marketing.hasData
+      ? {
+          recommended: marketing.budget.recommended,
+          current: Math.max(marketing.committedMonthly, marketing.spend.avg3Month),
+          additionalSafe: marketing.additionalSafe,
+          band: marketing.score.band,
+          action: marketing.recommendation.action,
+          summary: marketing.recommendation.summary,
+          blockers: marketing.recommendation.blockers,
+          reserveCoverage: marketing.metrics.reserveCoverage,
+          commitmentMismatch: marketing.commitmentMismatch,
+          confidenceLabel: marketing.confidence.recommendation.label,
+          seasonalLabel: marketing.seasonality.nextMonth?.label ?? null,
+          seasonalIndex: marketing.seasonality.nextMonth?.index ?? null,
+        }
+      : undefined,
   })
 
   // Surface the weekly figure on the KPI the dashboard already renders, so the
@@ -986,6 +1013,10 @@ export async function getHealthSnapshot() {
     // card, the advisor, and reporting all gate on the SAME judgement about
     // whether a margin can be stated yet — they cannot drift apart.
     checks,
+    // Marketing affordability. Same contract: the dashboard card, the advisor
+    // insights, and reporting all read this one evaluation, so none of them can
+    // quote a budget the others would call unaffordable.
+    marketing,
   }
 }
 

@@ -207,6 +207,111 @@ eq(
   )
 }
 
+/* ---------------- marketing affordability insights ---------------- */
+// The advisor must never invite spending that the Marketing Budget page would
+// call unaffordable, and must stay silent when there is no data at all.
+type MarketingArg = NonNullable<Parameters<typeof generateInsights>[0]['marketing']>
+
+const affordable: MarketingArg = {
+  recommended: 1200,
+  current: 800,
+  additionalSafe: 5000,
+  band: 'Comfortable',
+  action: 'increase',
+  summary: 'Raise marketing to $1,200 a month.',
+  blockers: [],
+  reserveCoverage: 2.4,
+  commitmentMismatch: null,
+  confidenceLabel: 'Moderate',
+  seasonalLabel: 'December',
+  seasonalIndex: 1.3,
+}
+
+function marketingIds(marketing?: MarketingArg): string[] {
+  return generateInsights({ settings, pillars, marketing })
+    .filter((i) => i.id.startsWith('auto-marketing-'))
+    .map((i) => i.id)
+    .sort()
+}
+
+eq(marketingIds(undefined), [], 'marketing: no group means no insights')
+
+eq(
+  marketingIds(affordable),
+  ['auto-marketing-headroom'],
+  'marketing: real headroom is offered as an opportunity',
+)
+
+// The most important rule on this surface. When bills already exceed cash, the
+// advisor must raise a critical flag and must NOT name a spendable budget.
+{
+  const broke: MarketingArg = {
+    ...affordable,
+    recommended: 229,
+    current: 800,
+    additionalSafe: 0,
+    band: 'No Capacity',
+    action: 'reduce',
+    reserveCoverage: -0.11,
+    summary: 'Cut marketing spend as far as existing commitments allow.',
+    blockers: ['This month\u2019s known bills come to more than the cash on hand, before any marketing.'],
+  }
+  const insight = generateInsights({ settings, pillars, marketing: broke }).find(
+    (i) => i.id === 'auto-marketing-no-room',
+  )
+  eq(insight?.severity, 'critical', 'marketing: negative cash is critical')
+  eq(
+    insight?.detail.includes('$229'),
+    false,
+    'marketing: no spendable budget is quoted when cash is negative',
+  )
+  eq(
+    insight?.detail.includes('more than the cash on hand'),
+    true,
+    'marketing: the blocker is stated in plain language',
+  )
+  // `summary` already ends with the first blocker, so appending all blockers
+  // printed the same sentence twice on the Advisor page.
+  const bills = insight?.detail.match(/more than the cash on hand/g) ?? []
+  eq(bills.length, 1, 'marketing: the blocker sentence is not duplicated')
+  // A negative coverage must never be rendered as a percentage of target.
+  eq(
+    /-\d+%/.test(insight?.detail ?? ''),
+    false,
+    'marketing: negative coverage is not shown as a percentage',
+  )
+}
+
+// Overspending against a positive but insufficient cash position.
+{
+  const over: MarketingArg = {
+    ...affordable,
+    recommended: 400,
+    current: 1000,
+    additionalSafe: 0,
+    action: 'reduce',
+    band: 'Do Not Increase',
+    reserveCoverage: 0.8,
+    blockers: ['Known obligations would leave cash at 80% of the reserve target.'],
+  }
+  const insight = generateInsights({ settings, pillars, marketing: over }).find(
+    (i) => i.id === 'auto-marketing-reduce',
+  )
+  eq(insight?.severity, 'warning', 'marketing: overspending warns')
+  eq(insight?.impact, 'Reduce by $600/mo', 'marketing: impact is the real delta')
+}
+
+// A committed budget that is not being spent is worth surfacing on its own.
+eq(
+  marketingIds({
+    ...affordable,
+    action: 'maintain',
+    commitmentMismatch: { committed: 800, actual: 270, note: 'Budget not fully spent.' },
+  }),
+  ['auto-marketing-commitment-gap'],
+  'marketing: a commitment gap is surfaced even when no change is advised',
+)
+
 /* ---------------- report ---------------- */
 console.log(`\ncash-flow insights: ${pass} passed, ${fail} failed`)
 if (failures.length > 0) {

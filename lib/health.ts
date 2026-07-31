@@ -363,6 +363,31 @@ export type CheckInsightInput = {
   attachedCount?: number
 }
 
+/**
+ * Marketing affordability facts, already computed by
+ * `lib/marketing-affordability-service.ts`. Passed in rather than recomputed so
+ * the Advisor can never contradict the Marketing Budget page.
+ */
+type MarketingInsightInput = {
+  /** Recommended monthly marketing spend after every safety clamp. */
+  recommended: number
+  /** What is going out today (committed obligation or trailing actual). */
+  current: number
+  /** Headroom above the cash reserve; 0 or less means none. */
+  additionalSafe: number
+  band: string
+  action: 'increase' | 'maintain' | 'reduce'
+  summary: string
+  blockers: string[]
+  /** Negative when known bills exceed cash on hand. */
+  reserveCoverage: number
+  /** Set when the committed marketing line and actual spend disagree. */
+  commitmentMismatch: { committed: number; actual: number; note: string } | null
+  confidenceLabel: string
+  seasonalLabel: string | null
+  seasonalIndex: number | null
+}
+
 type InsightInput = {
   settings: BusinessSettings
   pillars: HealthPillars
@@ -375,6 +400,11 @@ type InsightInput = {
   labor?: LaborInsightInput
   /** Omit when there are no CHECK lines, so no check insights are invented. */
   checks?: CheckInsightInput
+  /**
+   * Omit when there is no transaction or revenue history, so no marketing
+   * budget is recommended from an empty database.
+   */
+  marketing?: MarketingInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
 }
@@ -392,6 +422,7 @@ export function generateInsights({
   cashFlow,
   labor,
   checks,
+  marketing,
   now,
 }: InsightInput): Insight[] {
   const out: Insight[] = []
@@ -903,6 +934,71 @@ export function generateInsights({
         title: `${mistypedCategoryCount} income categor${mistypedCategoryCount === 1 ? 'y is' : 'ies are'} attached to expense rows`,
         detail: `Some transactions are typed as expenses but carry an income category such as a sales deposit. They are still counted as spending, because the imported transaction type is what decides direction and nothing is changed automatically. If they are really deposits, correcting the transaction type on the Vendors page will lower reported spend.`,
         impact: 'Data accuracy',
+      })
+    }
+  }
+
+  // --- Marketing affordability ---
+  // Every figure here is passed in from the marketing service, so the Advisor
+  // and the Marketing Budget page can never disagree about what is affordable.
+  if (marketing) {
+    const seasonNote =
+      marketing.seasonalLabel && marketing.seasonalIndex != null
+        ? ` ${marketing.seasonalLabel} typically runs ${formatPercent(Math.abs(marketing.seasonalIndex - 1) * 100, 0)} ${marketing.seasonalIndex >= 1 ? 'above' : 'below'} an average month.`
+        : ''
+
+    if (marketing.reserveCoverage < 0) {
+      // Bills already exceed cash. Naming a spendable budget here would read as
+      // permission to spend money that does not exist.
+      out.push({
+        id: 'auto-marketing-no-room',
+        severity: 'critical',
+        category: 'Marketing',
+        title: 'No cash is available for marketing this month',
+        // `summary` normally already ends with the first blocker, so blockers
+        // are filtered against it rather than blindly appended — otherwise the
+        // same sentence prints twice on the Advisor page.
+        detail: [
+          marketing.summary,
+          ...marketing.blockers.filter((b) => !marketing.summary.includes(b)),
+          'Cut marketing back to what is already committed until the reserve is rebuilt, rather than adding spend.',
+        ]
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim(),
+        impact: `Marketing capacity ${marketing.band}`,
+      })
+    } else if (marketing.action === 'reduce') {
+      out.push({
+        id: 'auto-marketing-reduce',
+        severity: 'warning',
+        category: 'Marketing',
+        title: 'Marketing is running above what cash supports',
+        detail: `${formatCurrency(marketing.current)} a month is going out, but only ${formatCurrency(marketing.recommended)} is supportable after the reserve, bills and payroll are covered.${seasonNote} ${marketing.blockers.join(' ')}`.trim(),
+        impact: `Reduce by ${formatCurrency(Math.max(0, marketing.current - marketing.recommended))}/mo`,
+      })
+    } else if (marketing.action === 'increase') {
+      out.push({
+        id: 'auto-marketing-headroom',
+        severity: 'opportunity',
+        category: 'Marketing',
+        title: `Room to raise marketing to ${formatCurrency(marketing.recommended)} a month`,
+        detail: `Cash covers the reserve, bills and payroll with ${formatCurrency(marketing.additionalSafe)} to spare, so marketing can rise from ${formatCurrency(marketing.current)} to ${formatCurrency(marketing.recommended)}.${seasonNote} Based on ${marketing.confidenceLabel.toLowerCase()} confidence data.`,
+        impact: `Up to ${formatCurrency(marketing.recommended - marketing.current)}/mo more`,
+      })
+    }
+
+    // A committed budget that is not actually being spent is either a saving
+    // already banked, or marketing hiding in the uncategorized pile. Either way
+    // the owner should know the two numbers disagree.
+    if (marketing.commitmentMismatch) {
+      out.push({
+        id: 'auto-marketing-commitment-gap',
+        severity: 'warning',
+        category: 'Marketing',
+        title: 'Committed marketing does not match actual spend',
+        detail: marketing.commitmentMismatch.note,
+        impact: `${formatCurrency(Math.abs(marketing.commitmentMismatch.committed - marketing.commitmentMismatch.actual))}/mo difference`,
       })
     }
   }
