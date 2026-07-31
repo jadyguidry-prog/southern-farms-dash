@@ -215,6 +215,7 @@ type MarketingArg = NonNullable<Parameters<typeof generateInsights>[0]['marketin
 const affordable: MarketingArg = {
   recommended: 1200,
   current: 800,
+  categorizedMonthly: 800,
   additionalSafe: 5000,
   band: 'Comfortable',
   action: 'increase',
@@ -225,6 +226,7 @@ const affordable: MarketingArg = {
   confidenceLabel: 'Moderate',
   seasonalLabel: 'December',
   seasonalIndex: 1.3,
+  uncategorized: null,
 }
 
 function marketingIds(marketing?: MarketingArg): string[] {
@@ -310,6 +312,66 @@ eq(
   }),
   ['auto-marketing-commitment-gap'],
   'marketing: a commitment gap is surfaced even when no change is advised',
+)
+
+// Regression: the Marketing page reported $16/mo against a real ~$1,200/mo,
+// because advertising sat under a blank category. The advisor must explain that
+// gap rather than quietly advising against an understated baseline.
+{
+  const understated: MarketingArg = {
+    ...affordable,
+    // Deliberately different: `current` is the $800 committed obligation, while
+    // $16 is the categorized spend the owner actually sees. The first version of
+    // this insight quoted `current` and so pointed at the wrong number — the
+    // fixture must keep them apart to catch that.
+    current: 800,
+    categorizedMonthly: 16,
+    uncategorized: {
+      total: 5962,
+      impliedMonthly: 1192,
+      topChannels: ['Signage / printing', 'Radio / TV advertising', 'Facebook / Meta Ads'],
+    },
+  }
+  const insight = generateInsights({ settings, pillars, marketing: understated }).find(
+    (i) => i.id === 'auto-marketing-uncategorized',
+  )
+  eq(insight?.severity, 'warning', 'marketing: uncategorized advertising warns')
+  eq(
+    insight?.title,
+    '$1,192/mo of advertising is not categorized as marketing',
+    'marketing: the title states the monthly rate the owner would recognise',
+  )
+  eq(
+    insight?.detail.includes('Signage / printing'),
+    true,
+    'marketing: the channels to fix are named',
+  )
+  // The whole point is to explain the number the owner disputes.
+  eq(
+    insight?.detail.includes('$16/mo is understated'),
+    true,
+    'marketing: the understated figure is named so the gap is explained',
+  )
+  // Regression: quoting the $800 commitment here pointed at a number the owner
+  // never questioned and made the sentence read as wrong.
+  eq(
+    insight?.detail.includes('$800/mo is understated'),
+    false,
+    'marketing: the committed obligation is not mistaken for reported spend',
+  )
+  // A provisional budget must not be presented as settled advice.
+  eq(
+    insight?.detail.includes('provisional'),
+    true,
+    'marketing: the budget is flagged provisional until categories are fixed',
+  )
+}
+
+// Clean books must not produce this insight at all.
+eq(
+  marketingIds({ ...affordable, action: 'maintain' }),
+  [],
+  'marketing: fully categorized books produce no uncategorized warning',
 )
 
 /* ---------------- report ---------------- */

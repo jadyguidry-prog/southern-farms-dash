@@ -24,6 +24,9 @@ export function MarketingSpendPanel({
   commitmentMismatch: { committed: number; actual: number } | null
   uncategorizedMarketing: UncategorizedMarketing
 }) {
+  // One derivation, used by both the header warning and the callout below, so
+  // the two can never disagree about whether the figures are trustworthy.
+  const understated = uncategorizedMarketing.channels.length > 0
   const peak = Math.max(1, ...spend.monthly.map((m) => m.amount))
   const observed = seasonality.months.filter((m) => m.years > 0)
   const maxIndex = Math.max(1, ...observed.map((m) => m.index))
@@ -35,6 +38,11 @@ export function MarketingSpendPanel({
           <CardTitle>What you spend on marketing today</CardTitle>
           <CardDescription className="text-pretty">
             Pulled from categorized transactions and vendors marked as marketing.
+            {/* Stated up front, because the four figures below are read at a
+                glance and are badly understated when advertising is uncategorized. */}
+            {understated
+              ? ' These figures are lower than your real spend — see the uncategorized advertising below.'
+              : ''}
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-6 p-6">
@@ -58,7 +66,7 @@ export function MarketingSpendPanel({
 
           {/* The usual reason this whole panel reads far too low: real ad spend
               that was never categorized, so every figure above excludes it. */}
-          {uncategorizedMarketing.channels.length > 0 && (
+          {understated && (
             <div className="flex flex-col gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
               <div className="flex flex-col gap-1.5">
                 <p className="text-pretty text-sm font-semibold text-foreground">
@@ -79,19 +87,22 @@ export function MarketingSpendPanel({
                   and these numbers will reflect what you actually spend.
                 </p>
               </div>
+              {/* No flex-wrap on the rows: on a phone the amount wrapped to its
+                  own line and left-aligned, which read as a broken row. The
+                  label shrinks instead and the amount stays pinned right. */}
               <ul className="flex flex-col gap-1.5">
                 {uncategorizedMarketing.channels.map((c) => (
                   <li
                     key={c.channel}
-                    className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5 border-t border-amber-500/20 pt-1.5 text-sm"
+                    className="flex items-baseline justify-between gap-x-3 border-t border-amber-500/20 pt-1.5 text-sm"
                   >
-                    <span className="font-medium text-foreground">
+                    <span className="min-w-0 flex-1 font-medium text-foreground">
                       {c.channel}
-                      <span className="ml-2 font-normal text-muted-foreground">
+                      <span className="ml-2 whitespace-nowrap font-normal text-muted-foreground">
                         {c.count} {c.count === 1 ? 'charge' : 'charges'}
                       </span>
                     </span>
-                    <span className="font-mono font-semibold text-foreground">
+                    <span className="shrink-0 font-mono font-semibold tabular-nums text-foreground">
                       {formatCurrency(c.amount)}
                     </span>
                   </li>
@@ -117,7 +128,7 @@ export function MarketingSpendPanel({
                 is leaving the bank under that category.{' '}
                 {/* Without this the two callouts contradict each other: one says
                     $1,192/mo of ads exists, the other that only $16 is spent. */}
-                {uncategorizedMarketing.channels.length > 0
+                {understated
                   ? 'The uncategorized advertising above almost certainly accounts for this, so fix those categories first and then re-check this figure.'
                   : 'Either the commitment is stale and is making every cash forecast look worse than reality, or marketing is being paid from somewhere these books do not see.'}
               </p>

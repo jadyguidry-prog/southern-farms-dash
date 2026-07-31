@@ -373,6 +373,13 @@ type MarketingInsightInput = {
   recommended: number
   /** What is going out today (committed obligation or trailing actual). */
   current: number
+  /**
+   * Trailing 3-month average of spend actually CATEGORIZED as marketing. This is
+   * the figure the owner sees on the page, so it is the one to name when
+   * explaining that reported spend is too low — `current` can be the larger
+   * committed obligation, which would point at the wrong number.
+   */
+  categorizedMonthly: number
   /** Headroom above the cash reserve; 0 or less means none. */
   additionalSafe: number
   band: string
@@ -386,6 +393,16 @@ type MarketingInsightInput = {
   confidenceLabel: string
   seasonalLabel: string | null
   seasonalIndex: number | null
+  /**
+   * Advertising found in the ledger but never categorized as marketing, so it is
+   * excluded from `current` and every figure on the Marketing page. The root
+   * cause when reported spend looks far lower than the owner knows it is.
+   */
+  uncategorized: {
+    total: number
+    impliedMonthly: number
+    topChannels: string[]
+  } | null
 }
 
 type InsightInput = {
@@ -985,6 +1002,19 @@ export function generateInsights({
         title: `Room to raise marketing to ${formatCurrency(marketing.recommended)} a month`,
         detail: `Cash covers the reserve, bills and payroll with ${formatCurrency(marketing.additionalSafe)} to spare, so marketing can rise from ${formatCurrency(marketing.current)} to ${formatCurrency(marketing.recommended)}.${seasonNote} Based on ${marketing.confidenceLabel.toLowerCase()} confidence data.`,
         impact: `Up to ${formatCurrency(marketing.recommended - marketing.current)}/mo more`,
+      })
+    }
+
+    // Reported spend that is far below reality makes every figure above suspect,
+    // so this is raised regardless of the recommendation.
+    if (marketing.uncategorized) {
+      out.push({
+        id: 'auto-marketing-uncategorized',
+        severity: 'warning',
+        category: 'Marketing',
+        title: `${formatCurrency(marketing.uncategorized.impliedMonthly)}/mo of advertising is not categorized as marketing`,
+        detail: `${formatCurrency(marketing.uncategorized.total)} of charges that look like advertising (${marketing.uncategorized.topChannels.join(', ')}) are filed under a blank category, so reported marketing spend of ${formatCurrency(marketing.categorizedMonthly)}/mo is understated. Set their category to Marketing on the Transactions page — until then, treat the marketing budget above as provisional.`,
+        impact: 'Understates marketing spend',
       })
     }
 

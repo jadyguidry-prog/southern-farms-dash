@@ -944,6 +944,7 @@ export async function getHealthSnapshot() {
       ? {
           recommended: marketing.budget.recommended,
           current: Math.max(marketing.committedMonthly, marketing.spend.avg3Month),
+          categorizedMonthly: marketing.spend.avg3Month,
           additionalSafe: marketing.additionalSafe,
           band: marketing.score.band,
           action: marketing.recommendation.action,
@@ -954,6 +955,18 @@ export async function getHealthSnapshot() {
           confidenceLabel: marketing.confidence.recommendation.label,
           seasonalLabel: marketing.seasonality.nextMonth?.label ?? null,
           seasonalIndex: marketing.seasonality.nextMonth?.index ?? null,
+          // Null rather than zeros when the books are clean, so the advisor stays
+          // silent instead of reporting "$0 uncategorized".
+          uncategorized:
+            marketing.uncategorizedMarketing.channels.length > 0
+              ? {
+                  total: marketing.uncategorizedMarketing.total,
+                  impliedMonthly: marketing.uncategorizedMarketing.impliedMonthly,
+                  topChannels: marketing.uncategorizedMarketing.channels
+                    .slice(0, 3)
+                    .map((c) => c.channel),
+                }
+              : null,
         }
       : undefined,
   })
