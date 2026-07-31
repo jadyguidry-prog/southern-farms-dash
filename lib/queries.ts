@@ -15,6 +15,7 @@ import {
 } from '@/lib/square-sales-service'
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
 import { getLaborHealthSnapshot } from '@/lib/labor-service'
+import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
 
 // ---------- Types ----------
 export type KpiRow = {
@@ -707,13 +708,14 @@ export const getCashDebtSummary = cache(async () => {
  * both always agree, and every threshold comes from business_settings.
  */
 export async function getHealthSnapshot() {
-  const [rawKpis, summary, squareDaily, cashFlowInsight, labor] =
+  const [rawKpis, summary, squareDaily, cashFlowInsight, labor, checks] =
     await Promise.all([
       getKpis(),
       getCashDebtSummary(),
       getSquareDailySales(),
       getCashFlowInsight(),
       getLaborHealthSnapshot(),
+      getCheckResolutionSnapshot(),
     ])
   const settings = summary.settings
 
@@ -902,6 +904,10 @@ export async function getHealthSnapshot() {
     // Same contract for labor: one measured source behind the dashboard,
     // advisor, and reporting.
     labor,
+    // Check resolution readiness. Exposed here so the dashboard's Gross Profit
+    // card, the advisor, and reporting all gate on the SAME judgement about
+    // whether a margin can be stated yet — they cannot drift apart.
+    checks,
   }
 }
 
