@@ -419,7 +419,15 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
                     <div className="mt-1 flex flex-wrap gap-1">
                       {confirmReclassify.evidence.recurringAmounts.slice(0, 6).map((r) => (
                         <Badge key={r.amount} variant="outline" className="tabular-nums">
-                          {formatCurrency(r.amount)} &times; {r.monthCount} mo
+                          {/* Cents shown deliberately: that the amount repeats
+                              EXACTLY is the evidence, and rounding to $98 hides
+                              the very thing that distinguishes a fee from sales. */}
+                          {r.amount.toLocaleString('en-US', {
+                            style: 'currency',
+                            currency: 'USD',
+                            minimumFractionDigits: 2,
+                          })}{' '}
+                          &times; {r.monthCount} mo
                         </Badge>
                       ))}
                     </div>
