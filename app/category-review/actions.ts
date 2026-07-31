@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto'
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
+import { assessReclassification } from '@/lib/reclassify-evidence'
 
 type ActionResult = { ok: boolean; error?: string; updated?: number }
 
@@ -167,9 +168,17 @@ export async function rejectMerge(input: {
 /**
  * Reclassify mis-typed income rows (e.g. "Sales Deposit" recorded as an
  * expense) to income so they stop inflating spend. Logged for reversal.
+ *
+ * The evidence test runs again HERE, server-side, on the rows actually being
+ * changed. The UI already hides the button when the evidence contradicts income,
+ * but a hidden button is not a safeguard — this check is the one that cannot be
+ * bypassed. `acknowledgedVerdict` is how a deliberate override arrives: the
+ * caller must name the exact verdict it is overriding, so overriding is always a
+ * conscious act and is recorded in the audit reason.
  */
 export async function reclassifyToIncome(
   transactionIds: string[],
+  options?: { acknowledgedVerdict?: string; overrideReason?: string },
 ): Promise<ActionResult> {
   const ids = (transactionIds ?? []).filter(Boolean)
   if (ids.length === 0) return { ok: false, error: 'No transactions selected.' }
@@ -180,9 +189,40 @@ export async function reclassifyToIncome(
 
   const { data: rows, error: fetchErr } = await supabase
     .from('financial_transactions')
-    .select('id, transaction_type, review_status')
+    .select('id, transaction_type, review_status, amount, transaction_date')
     .in('id', ids)
   if (fetchErr) return { ok: false, error: fetchErr.message }
+  if (!rows || rows.length === 0) {
+    return { ok: false, error: 'Those transactions could not be found.' }
+  }
+
+  // Judge the rows themselves, not the label they happen to share. Direction
+  // comes from the imported type because amounts are stored as positive
+  // magnitudes — reading the sign would invert every row.
+  const report = assessReclassification(
+    rows.map((r) => ({
+      amount: Math.abs(Number(r.amount) || 0),
+      direction: r.transaction_type === 'income' ? ('in' as const) : ('out' as const),
+      date: String(r.transaction_date ?? ''),
+    })),
+  )
+
+  const overridden = options?.acknowledgedVerdict === report.verdict
+  if (report.blocksReclassification && !overridden) {
+    return {
+      ok: false,
+      error:
+        report.verdict === 'likely_recurring_fee'
+          ? `Blocked: these ${report.rowCount} rows look like a recurring fee, not income. Treating them as income would add revenue that never arrived and erase a real cost. Nothing was changed.`
+          : `Blocked: the evidence does not support calling these ${report.rowCount} rows income. Check a statement first. Nothing was changed.`,
+    }
+  }
+
+  const overrideNote = overridden
+    ? ` Owner override of verdict "${report.verdict}"${
+        options?.overrideReason ? `: ${options.overrideReason}` : ''
+      }.`
+    : ''
 
   // Log BOTH columns this action writes. The imported `transaction_type` is
   // preserved as `previous_value`, which is what makes the change explainable
@@ -196,7 +236,7 @@ export async function reclassifyToIncome(
       action: 'reclassify_type',
       bulk_action_id: bulkActionId,
       actor_email: actor,
-      reason: 'Deposit recorded as an expense; reclassified to income.',
+      reason: `Deposit recorded as an expense; reclassified to income. Evidence verdict: ${report.verdict}.${overrideNote}`,
     },
     {
       transaction_id: r.id,

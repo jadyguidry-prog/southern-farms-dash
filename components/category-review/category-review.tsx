@@ -226,11 +226,12 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
         <TabsContent value="mistyped" className="mt-4 flex flex-col gap-4">
           <p className="text-sm leading-relaxed text-muted-foreground text-pretty">
             These transactions carry an income-style category but were imported
-            as spending, so they currently count against your outflow. They stay
-            flagged exactly as imported until you decide &mdash; nothing is
-            reclassified automatically. Reviewing shows the full before-and-after
-            impact first, and the original imported type is kept in history so
-            you can undo it.
+            as spending. A shared label is not proof of anything, so each group
+            below is judged on its own rows &mdash; direction, repeating amounts
+            and timing. Where the evidence points to a recurring fee rather than
+            income, reclassifying is blocked, because calling a fee &ldquo;income&rdquo;
+            would add revenue that never arrived and erase a real cost at the
+            same time. Nothing is reclassified automatically.
           </p>
 
           {data.mistyped.length === 0 ? (
@@ -246,10 +247,10 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
                   key={m.category}
                   className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 sm:flex-row sm:items-center sm:justify-between"
                 >
-                  <div>
+                  <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-medium text-foreground">{m.category}</p>
-                      <Badge variant="secondary">flagged, not changed</Badge>
+                      <VerdictBadge verdict={m.evidence.verdict} />
                     </div>
                     <p className="mt-1 text-sm text-muted-foreground">
                       {m.count} row{m.count === 1 ? '' : 's'} &middot;{' '}
@@ -259,6 +260,15 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
                           {m.months.length === 1 ? '' : 's'} affected</>
                       )}
                     </p>
+                    {/* The single most important reason, visible without opening
+                        the dialog, so the safe choice needs no extra click. */}
+                    {m.evidence.reasons.length > 0 && (
+                      <p className="mt-1 text-sm text-foreground text-pretty">
+                        {m.evidence.verdict === 'likely_recurring_fee'
+                          ? m.evidence.reasons[1] ?? m.evidence.reasons[0]
+                          : m.evidence.reasons[0]}
+                      </p>
+                    )}
                   </div>
                   <Button
                     size="sm"
@@ -266,7 +276,9 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
                     disabled={pending}
                     onClick={() => setConfirmReclassify(m)}
                   >
-                    Review reclassification
+                    {m.evidence.blocksReclassification
+                      ? 'See the evidence'
+                      : 'Review reclassification'}
                   </Button>
                 </li>
               ))}
@@ -358,15 +370,62 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
       >
         <DialogContent className="max-h-[90svh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Reclassify {confirmReclassify?.category} to income</DialogTitle>
+            <DialogTitle>
+              {confirmReclassify?.evidence.blocksReclassification
+                ? `What the ${confirmReclassify?.category} rows actually show`
+                : `Reclassify ${confirmReclassify?.category} to income`}
+            </DialogTitle>
             <DialogDescription>
-              This changes the transaction type from expense to income. The
-              original imported type is kept in history, so this can be undone.
+              {confirmReclassify?.evidence.blocksReclassification
+                ? 'These rows were tested against their own history before anything was offered. Here is what they show.'
+                : 'This changes the transaction type from expense to income. The original imported type is kept in history, so this can be undone.'}
             </DialogDescription>
           </DialogHeader>
 
           {confirmReclassify && (
             <div className="flex flex-col gap-4 text-sm">
+              {/* Evidence first: the reasoning, before any numbers or buttons. */}
+              <section
+                aria-label="Evidence"
+                className={
+                  confirmReclassify.evidence.blocksReclassification
+                    ? 'rounded-md border border-destructive/40 bg-destructive/5 p-3'
+                    : 'rounded-md border border-border bg-muted/40 p-3'
+                }
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <VerdictBadge verdict={confirmReclassify.evidence.verdict} />
+                  <span className="text-xs text-muted-foreground">
+                    {confirmReclassify.evidence.rowCount} row
+                    {confirmReclassify.evidence.rowCount === 1 ? '' : 's'} across{' '}
+                    {confirmReclassify.evidence.monthCount} month
+                    {confirmReclassify.evidence.monthCount === 1 ? '' : 's'} &middot; avg{' '}
+                    {formatCurrency(confirmReclassify.evidence.averageAmount)}
+                  </span>
+                </div>
+                <ul className="mt-2 flex list-disc flex-col gap-1 pl-5">
+                  {confirmReclassify.evidence.reasons.map((r) => (
+                    <li key={r} className="text-foreground text-pretty">
+                      {r}
+                    </li>
+                  ))}
+                </ul>
+                {confirmReclassify.evidence.recurringAmounts.length > 0 && (
+                  <div className="mt-3">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Amounts that repeat across months
+                    </p>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {confirmReclassify.evidence.recurringAmounts.slice(0, 6).map((r) => (
+                        <Badge key={r.amount} variant="outline" className="tabular-nums">
+                          {formatCurrency(r.amount)} &times; {r.monthCount} mo
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+
               <dl className="grid grid-cols-2 gap-3">
                 <Stat
                   label="Affected transactions"
@@ -437,34 +496,57 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
               </div>
 
               <p className="text-xs leading-relaxed text-muted-foreground text-pretty">
-                {formatCurrency(confirmReclassify.amount)} moves out of cash-out
-                and expense-category totals and into cash-in. The dashboard,
-                cash-flow reports and Advisor insights recalculate for all{' '}
-                {confirmReclassify.months.length} affected month
-                {confirmReclassify.months.length === 1 ? '' : 's'}.
+                {confirmReclassify.evidence.blocksReclassification ? (
+                  <>
+                    This is what reclassifying <em>would</em> do, shown so the cost
+                    of the wrong choice is visible. It would add{' '}
+                    {formatCurrency(confirmReclassify.amount)} of revenue that never
+                    arrived and remove the same amount of real cost, across{' '}
+                    {confirmReclassify.months.length} month
+                    {confirmReclassify.months.length === 1 ? '' : 's'}. The button is
+                    disabled for that reason.
+                  </>
+                ) : (
+                  <>
+                    {formatCurrency(confirmReclassify.amount)} moves out of cash-out
+                    and expense-category totals and into cash-in. The dashboard,
+                    cash-flow reports and Advisor insights recalculate for all{' '}
+                    {confirmReclassify.months.length} affected month
+                    {confirmReclassify.months.length === 1 ? '' : 's'}.
+                  </>
+                )}
               </p>
             </div>
           )}
 
-          <DialogFooter>
+          <DialogFooter className="gap-2">
             <Button variant="ghost" onClick={() => setConfirmReclassify(null)}>
-              Cancel
+              {confirmReclassify?.evidence.blocksReclassification ? 'Close' : 'Cancel'}
             </Button>
-            <Button
-              disabled={pending}
-              onClick={() => {
-                if (!confirmReclassify) return
-                const flag = confirmReclassify
-                setConfirmReclassify(null)
-                run(
-                  `income:${flag.category}`,
-                  () => reclassifyToIncome(flag.transactionIds),
-                  'Reclassified to income',
-                )
-              }}
-            >
-              Reclassify {confirmReclassify?.count} to income
-            </Button>
+            {confirmReclassify?.evidence.blocksReclassification ? (
+              // No override control here on purpose. Overriding is possible, but
+              // it belongs behind a deliberate step rather than one click away
+              // from the evidence that says not to.
+              <Button variant="outline" disabled aria-disabled="true">
+                Reclassifying is blocked
+              </Button>
+            ) : (
+              <Button
+                disabled={pending}
+                onClick={() => {
+                  if (!confirmReclassify) return
+                  const flag = confirmReclassify
+                  setConfirmReclassify(null)
+                  run(
+                    `income:${flag.category}`,
+                    () => reclassifyToIncome(flag.transactionIds),
+                    'Reclassified to income',
+                  )
+                }}
+              >
+                Reclassify {confirmReclassify?.count} to income
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

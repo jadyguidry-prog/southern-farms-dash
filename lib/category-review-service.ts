@@ -18,6 +18,11 @@ import {
   type CheckRow,
   type CheckReviewSummary,
 } from '@/lib/check-review'
+import {
+  assessReclassification,
+  type EvidenceReport,
+  type EvidenceRow,
+} from '@/lib/reclassify-evidence'
 
 const PAGE_SIZE = 1000
 
@@ -115,6 +120,11 @@ export type MistypedFlag = {
   /** Cash totals if the owner approves reclassifying this group to income. */
   resultingCashIn: number
   resultingCashOut: number
+  /**
+   * What the rows themselves say. The UI must offer reclassification only when
+   * this supports it, so a shared label can never move money on its own.
+   */
+  evidence: EvidenceReport
 }
 
 export type AuditEntry = {
@@ -151,7 +161,13 @@ function isSpendRow(row: RawRow): boolean {
   )
 }
 
-/** Income-style labels that should never sit on an expense row. */
+/**
+ * Income-style labels worth *examining* on a spend row.
+ *
+ * A match here is only a reason to look, never a conclusion. `Sales Deposit`
+ * covers both real Square payouts and the monthly Square service fees, so the
+ * verdict comes from `assessReclassification` reading the rows themselves.
+ */
 const INCOME_CATEGORY_HINTS = ['sales deposit', 'loan proceeds', 'deposit', 'income']
 
 export async function getCategoryReviewData(): Promise<CategoryReviewData> {
@@ -185,6 +201,8 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
     amount: number
     transactionIds: string[]
     months: Set<string>
+    /** Raw rows kept so the evidence test can judge direction and recurrence. */
+    evidenceRows: EvidenceRow[]
   }
   const mistypedMap = new Map<string, MistypedAcc>()
 
@@ -223,11 +241,19 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
           amount: 0,
           transactionIds: [],
           months: new Set<string>(),
+          evidenceRows: [],
         }
       m.count += 1
       m.amount += Math.abs(Number(row.amount) || 0)
       m.transactionIds.push(row.id)
       if (row.transactionDate) m.months.add(row.transactionDate.slice(0, 7))
+      // Direction comes from the imported type, not the sign: amounts are stored
+      // as positive magnitudes, so a sign-based guess would invert every row.
+      m.evidenceRows.push({
+        amount: Math.abs(Number(row.amount) || 0),
+        direction: row.transactionType === 'income' ? 'in' : 'out',
+        date: row.transactionDate ?? '',
+      })
       mistypedMap.set(value, m)
     }
   }
@@ -324,6 +350,7 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
       months: [...m.months].sort(),
       resultingCashIn: currentCashIn + m.amount,
       resultingCashOut: currentCashOut - m.amount,
+      evidence: assessReclassification(m.evidenceRows),
     }))
 
   return {
