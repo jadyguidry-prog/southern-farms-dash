@@ -252,7 +252,14 @@ export function CheckResolution({ data }: { data: CheckResolutionDataset }) {
                     key={s.key}
                     className="rounded-lg border border-border p-4"
                   >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
+                    {/*
+                      Stacks on a phone and only splits into two columns from `sm`
+                      up. Side-by-side at 390px squeezed the reasoning into a
+                      ~150px column, and that reasoning is what the owner needs to
+                      read before naming a payee — it can't be the part that gets
+                      crushed. The amount and action sit full width underneath.
+                    */}
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <h3 className="text-sm font-semibold text-pretty">
@@ -267,7 +274,7 @@ export function CheckResolution({ data }: { data: CheckResolutionDataset }) {
                           {s.firstDate} to {s.lastDate}
                         </p>
                       </div>
-                      <div className="flex shrink-0 flex-col items-end gap-2">
+                      <div className="flex shrink-0 items-center justify-between gap-3 sm:flex-col sm:items-end">
                         <p className="text-base font-semibold tabular-nums">
                           {formatCurrency(s.total)}
                         </p>

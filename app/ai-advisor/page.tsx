@@ -49,7 +49,17 @@ export default async function AiAdvisorPage() {
 
   // Insights generated live from the owner's stored thresholds, followed by
   // anything entered by hand in the Admin panel.
-  const recommendations = [...snapshot.insights, ...saved]
+  //
+  // Ordered by severity so the page matches the "prioritized by impact" promise
+  // in its own description. Previously this was raw insertion order, which meant
+  // whichever builder happened to run first led the page — a single critical item
+  // could sit below several "you're doing fine" cards and be missed entirely.
+  // `sort` is stable in Node, so items of equal severity keep their existing
+  // order and nothing else about the page shifts.
+  const severityRank = { critical: 0, warning: 1, opportunity: 2 } as const
+  const recommendations = [...snapshot.insights, ...saved].sort(
+    (a, b) => severityRank[a.severity] - severityRank[b.severity],
+  )
   const { composite, pillars } = snapshot
 
   const critical = recommendations.filter((r) => r.severity === 'critical').length
