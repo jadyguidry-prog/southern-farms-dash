@@ -181,7 +181,7 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
         description,
         amount: signed ?? 0,
         transactionType:
-          knownType ?? inferTransactionType(normalized, canonicalSigned),
+          knownType ?? inferTransactionType(normalized, canonicalSigned, description),
         accountName:
           (accountCol ? String(raw[accountCol] ?? '').trim() : '') ||
           accountName ||

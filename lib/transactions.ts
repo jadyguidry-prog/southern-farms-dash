@@ -122,17 +122,73 @@ export function parseAmount(input: string | number | null | undefined): number |
   return negative ? -value : value
 }
 
+/** Card issuers / lenders whose name signals an account payoff, not a purchase. */
+const ACCOUNT_ISSUER_PATTERN =
+  /\b(?:AMEX|AMERICAN\s+EXPRESS|VISA|MASTERCARD|DISCOVER|CHASE|CAPITAL\s+ONE|CITI(?:BANK)?|SYNCHRONY|BARCLAY(?:S|CARD)?|WELLS\s+FARGO|BANK\s+OF\s+AMERICA)\b/
+
+/**
+ * Distinct electronic account-payoff phrasings, kept separate so they can be
+ * COUNTED. One of these alone is ambiguous — "BILL PAY ENTERGY" is an ordinary
+ * utility bill. Two together ("EPAYMENT ACH PMT") is settlement wording that a
+ * vendor purchase does not use.
+ */
+const ACCOUNT_PAYOFF_PATTERNS: RegExp[] = [
+  /\bE-?PAY(?:MENT)?\b/,
+  /\bE-?PMT\b/,
+  /\bACH\s+PMT\b/,
+  /\bAUTO-?\s?PAY(?:MENT)?\b/,
+  /\bONLINE\s+(?:PAYMENT|PMT)\b/,
+  /\bBILL\s+PAY(?:MENT)?\b/,
+  /\bCREDIT\s+CRD\b/,
+]
+
+/**
+ * Does this line look like paying down a card or loan account?
+ *
+ * Checked against the RAW description on purpose. `normalizeDescription` strips
+ * issuer names as merchant noise, so by the time a line reads "EPAYMENT ACH PMT"
+ * the one word that identified it as a card payoff — "AMEX" — is already gone,
+ * and it falls through to `expense`. That misread 9 AMEX payoffs as $36,354 of
+ * vendor spend while the real purchases were also imported from the card
+ * statement, double-counting the money.
+ *
+ * Accepts on any one of three signals, deliberately ordered strongest first:
+ *   1. explicit "CARD/LOAN/MORTGAGE PAYMENT" wording;
+ *   2. an issuer name plus payoff wording ("AMEX EPAYMENT");
+ *   3. two distinct payoff phrasings together ("EPAYMENT ACH PMT") — needed
+ *      because this bank drops the issuer entirely on some lines, so rule 2
+ *      cannot see them.
+ *
+ * A single payoff phrase with no issuer stays spend, so paying a real vendor
+ * online is never mistaken for a transfer between the owner's own accounts.
+ */
+export function looksLikeAccountPayoff(rawDescription: string): boolean {
+  const raw = String(rawDescription ?? '').toUpperCase()
+  if (!raw) return false
+  if (/\b(?:CARD|CREDIT\s+CARD|LOAN|MORTGAGE)\s+(?:PAYMENT|PMT)\b/.test(raw)) return true
+
+  const payoffHits = ACCOUNT_PAYOFF_PATTERNS.filter((p) => p.test(raw)).length
+  if (payoffHits === 0) return false
+  if (ACCOUNT_ISSUER_PATTERN.test(raw)) return true
+  return payoffHits >= 2
+}
+
 /**
  * Infer a transaction type from the description and the direction of money.
  * `signedAmount` follows the CSV's own convention (negative = money out).
  * Keyword checks are intentionally conservative: anything unrecognized falls
  * back to expense/income by direction rather than guessing a specific type.
+ *
+ * `rawDescription` is optional and defaults to the normalized string. Pass the
+ * pre-normalization line where available so issuer-based checks still work.
  */
 export function inferTransactionType(
   normalizedDescription: string,
   signedAmount: number,
+  rawDescription?: string,
 ): TransactionType {
   const d = normalizedDescription
+  const raw = rawDescription ?? normalizedDescription
   const moneyOut = signedAmount < 0
 
   if (/\bINTEREST\b/.test(d)) return 'interest'
@@ -141,9 +197,9 @@ export function inferTransactionType(
   }
   if (/\bTRANSFER\b|\bXFER\b/.test(d)) return 'transfer'
   if (/\bREFUND\b|\bRETURN\b|\bREVERSAL\b/.test(d)) return 'refund'
-  if (/\b(?:CARD|CREDIT\s+CARD|LOAN|MORTGAGE)\s+(?:PAYMENT|PMT)\b/.test(d)) {
-    return 'payment'
-  }
+  // Checked before the generic direction fallback, and against the raw line so a
+  // stripped issuer name cannot turn an account payoff into vendor spend.
+  if (looksLikeAccountPayoff(raw)) return 'payment'
   if (/\bDEPOSIT\b/.test(d) && !moneyOut) return 'income'
 
   if (moneyOut) return 'expense'
