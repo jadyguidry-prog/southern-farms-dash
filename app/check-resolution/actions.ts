@@ -122,12 +122,32 @@ export async function resolveChecks(input: ResolveCheckInput): Promise<ActionRes
     updated_at: now,
   }))
 
-  // Upsert on the transaction id: re-resolving a check should correct the
-  // existing answer rather than stack a second conflicting one.
-  const { error: upsertError } = await supabase
-    .from('check_resolutions')
-    .upsert(rows, { onConflict: 'financial_transaction_id' })
-  if (upsertError) return { ok: false, error: upsertError.message }
+  // Re-resolving a check must correct its existing answer rather than stack a
+  // second conflicting one. This is deliberately NOT an upsert: the uniqueness
+  // guarantee on this table is a PARTIAL index (one row per transaction only
+  // `where review_status = 'approved'`), and Postgres cannot use a partial index
+  // to arbitrate `ON CONFLICT`, so an upsert here fails outright with 42P10.
+  // Updating the known row by primary key and inserting only the genuinely new
+  // ones keeps the partial index — and the rejected/undone history it protects —
+  // exactly as designed.
+  for (const row of rows) {
+    const prior = previous.get(row.financial_transaction_id)
+    if (prior) {
+      const { error } = await supabase
+        .from('check_resolutions')
+        .update(row)
+        .eq('id', prior.id as string)
+      if (error) return { ok: false, error: error.message }
+    }
+  }
+
+  const newRows = rows.filter((r) => !previous.has(r.financial_transaction_id))
+  if (newRows.length > 0) {
+    const { error: insertError } = await supabase
+      .from('check_resolutions')
+      .insert(newRows)
+    if (insertError) return { ok: false, error: insertError.message }
+  }
 
   const auditRows = ids.map((id) => ({
     bulk_action_id: bulkActionId,
@@ -195,10 +215,24 @@ export async function rejectChecks(
     updated_at: now,
   }))
 
-  const { error } = await supabase
-    .from('check_resolutions')
-    .upsert(rows, { onConflict: 'financial_transaction_id' })
-  if (error) return { ok: false, error: error.message }
+  // Same reason as resolveChecks: the unique index is partial, so `ON CONFLICT`
+  // cannot be used. Update the existing row by primary key, insert the rest.
+  for (const row of rows) {
+    const prior = previous.get(row.financial_transaction_id)
+    if (prior) {
+      const { error } = await supabase
+        .from('check_resolutions')
+        .update(row)
+        .eq('id', prior.id as string)
+      if (error) return { ok: false, error: error.message }
+    }
+  }
+
+  const newRejects = rows.filter((r) => !previous.has(r.financial_transaction_id))
+  if (newRejects.length > 0) {
+    const { error } = await supabase.from('check_resolutions').insert(newRejects)
+    if (error) return { ok: false, error: error.message }
+  }
 
   await supabase.from('check_resolution_audit').insert(
     ids.map((id) => ({
@@ -255,11 +289,22 @@ export async function undoBulkAction(bulkActionId: string): Promise<ActionResult
     if (error) return { ok: false, error: error.message }
   }
 
-  if (toRestore.length > 0) {
-    const { error } = await supabase
-      .from('check_resolutions')
-      .upsert(toRestore, { onConflict: 'financial_transaction_id' })
-    if (error) return { ok: false, error: error.message }
+  // Restore each snapshot by its own primary key. The snapshot was taken with
+  // `OVERLAY_COLUMNS`, which leads with `id`, so the original row is addressed
+  // directly — again avoiding `ON CONFLICT` against the partial unique index.
+  for (const snapshot of toRestore) {
+    const rowId = snapshot.id as string | undefined
+    const { id: _omit, ...values } = snapshot
+    if (rowId) {
+      const { error } = await supabase
+        .from('check_resolutions')
+        .update(values)
+        .eq('id', rowId)
+      if (error) return { ok: false, error: error.message }
+    } else {
+      const { error } = await supabase.from('check_resolutions').insert(values)
+      if (error) return { ok: false, error: error.message }
+    }
   }
 
   const revertedAt = new Date().toISOString()
