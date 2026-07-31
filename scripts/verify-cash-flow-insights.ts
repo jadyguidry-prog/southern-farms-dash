@@ -438,7 +438,7 @@ eq(
     'marketing: the reason the money is invisible is stated',
   )
   eq(
-    insight?.detail.includes('Confirm whether each channel actually ended'),
+    insight?.detail.includes('Confirm which channels are still running'),
     true,
     'marketing: the owner is asked to confirm before trusting the budget',
   )
