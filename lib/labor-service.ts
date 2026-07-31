@@ -27,6 +27,7 @@
  *    2024-07 ratio (3 days of sales against a full month of labor, which reads
  *    as 129%) from being presented as a real result.
  */
+import { cache } from 'react'
 import { createClient } from '@/lib/supabase/server'
 import { monthLabel } from '@/lib/cash-flow-service'
 import {
@@ -899,7 +900,7 @@ export type LaborDataset = {
  * timecards, so a single unpaged select would silently return a third of the
  * labor cost and look plausible while doing it.
  */
-export async function getLaborDataset(): Promise<LaborDataset> {
+export const getLaborDataset = cache(async (): Promise<LaborDataset> => {
   const supabase = await createClient()
   const pageSize = 1000
   const raw: LaborShiftInput[] = []
@@ -960,5 +961,58 @@ export async function getLaborDataset(): Promise<LaborDataset> {
       maxDate: shifts.length > 0 ? shifts[shifts.length - 1].localDate : null,
     },
     empty: shifts.length === 0,
+  }
+})
+
+export type LaborHealthSnapshot = {
+  /**
+   * Labor as a share of net sales for the most recent month with COMPLETE
+   * sales coverage — not the whole range. The dashboard compares this against
+   * the owner's target, and a partial month would understate sales and invent
+   * an alarming ratio.
+   */
+  laborPct: number | null
+  /** Which month `laborPct` describes, for labelling. */
+  monthKey: string | null
+  monthLabel: string | null
+  estimatedGrossLabor: number
+  payableHours: number
+  overtimeHours: number
+  /** Hours priced at $0 because Square has no wage — makes laborPct a floor. */
+  unpricedHours: number
+  unpricedShifts: number
+  likelyMissedClockOuts: number
+  /** False when no timecards exist, so callers can show "unknown" not 0%. */
+  hasData: boolean
+  /** True when a target comparison is meaningful (a complete month exists). */
+  comparable: boolean
+}
+
+/**
+ * The labor figures the dashboard and AI Advisor need, derived from the same
+ * service the Payroll page uses so all three can never disagree.
+ *
+ * Deliberately reports the latest complete month rather than a range-wide
+ * average: the owner's target is a monthly operating ratio, and averaging a
+ * two-year range would hide a bad month behind good ones.
+ */
+export async function getLaborHealthSnapshot(): Promise<LaborHealthSnapshot> {
+  const dataset = await getLaborDataset()
+  const summary = summarizeLabor(dataset.shifts, dataset.coverage)
+  const series = deriveMonthlyLabor(dataset.shifts, dataset.coverage)
+  const headline = latestCompleteLaborMonth(series)
+
+  return {
+    laborPct: headline?.laborPct ?? null,
+    monthKey: headline?.monthKey ?? null,
+    monthLabel: headline?.month ?? null,
+    estimatedGrossLabor: summary.estimatedGrossLabor,
+    payableHours: summary.payableHours,
+    overtimeHours: summary.overtimeHours,
+    unpricedHours: summary.unpricedHours,
+    unpricedShifts: summary.unpricedShifts,
+    likelyMissedClockOuts: summary.likelyMissedClockOuts,
+    hasData: !dataset.empty,
+    comparable: headline !== null,
   }
 }

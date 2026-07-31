@@ -14,6 +14,7 @@ import {
   summarizeDailyRows,
 } from '@/lib/square-sales-service'
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
+import { getLaborHealthSnapshot } from '@/lib/labor-service'
 
 // ---------- Types ----------
 export type KpiRow = {
@@ -706,12 +707,14 @@ export const getCashDebtSummary = cache(async () => {
  * both always agree, and every threshold comes from business_settings.
  */
 export async function getHealthSnapshot() {
-  const [rawKpis, summary, squareDaily, cashFlowInsight] = await Promise.all([
-    getKpis(),
-    getCashDebtSummary(),
-    getSquareDailySales(),
-    getCashFlowInsight(),
-  ])
+  const [rawKpis, summary, squareDaily, cashFlowInsight, labor] =
+    await Promise.all([
+      getKpis(),
+      getCashDebtSummary(),
+      getSquareDailySales(),
+      getCashFlowInsight(),
+      getLaborHealthSnapshot(),
+    ])
   const settings = summary.settings
 
   // Square is the only source that actually measures weekly sales. The stored
@@ -751,7 +754,16 @@ export async function getHealthSnapshot() {
     accountsPayable: derive('accountsPayable', summary.totalObligations),
   }
 
-  const payrollValue = kpi(kpis, 'payrollPct').value
+  // Square timecards are the only source that actually measures labor. The
+  // stored `payrollPct` KPI was never populated, so without this the payroll
+  // pillar sat permanently at "unknown" while the Payroll page showed a real
+  // figure. Falls back to the stored KPI so a farm without Square timecards
+  // keeps its existing behaviour.
+  const storedPayrollPct = kpi(kpis, 'payrollPct').value
+  const payrollValue =
+    labor.laborPct != null && labor.laborPct > 0
+      ? labor.laborPct
+      : storedPayrollPct
   const storedWeeklySales = kpi(kpis, 'weeklySales').value
 
   // Prefer the measured Square figure; fall back to the stored KPI so a farm

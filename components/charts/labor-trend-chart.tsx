@@ -153,9 +153,14 @@ export function LaborPctChart({
             y={target}
             stroke="var(--chart-2)"
             strokeDasharray="4 4"
+            /*
+             * Target and warning sit only a point apart (15% vs 16%), so both
+             * labels are pinned left with opposite vertical offsets. Anchoring
+             * both on the right made them collide and became unreadable.
+             */
             label={{
               value: `Target ${target}%`,
-              position: 'insideTopRight',
+              position: 'insideBottomLeft',
               fill: 'var(--chart-2)',
               fontSize: 11,
             }}
@@ -168,7 +173,7 @@ export function LaborPctChart({
             strokeDasharray="4 4"
             label={{
               value: `Warning ${warning}%`,
-              position: 'insideBottomRight',
+              position: 'insideTopLeft',
               fill: 'var(--destructive)',
               fontSize: 11,
             }}

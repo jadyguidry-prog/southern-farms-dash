@@ -84,7 +84,17 @@ export function LaborFilters({
           onValueChange={(v) => setParam('employee', v ?? ALL)}
         >
           <SelectTrigger id="labor-employee">
-            <SelectValue placeholder="All employees" />
+            {/*
+             * Base UI renders the raw value string, so the sentinel would show
+             * as "__all__". The render form maps the value back to its label.
+             */}
+            <SelectValue placeholder="All employees">
+              {(value) =>
+                value === ALL || value == null
+                  ? 'All employees'
+                  : (employees.find((e) => e.id === value)?.name ?? String(value))
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ALL}>All employees</SelectItem>
@@ -106,7 +116,11 @@ export function LaborFilters({
           onValueChange={(v) => setParam('jobTitle', v ?? ALL)}
         >
           <SelectTrigger id="labor-job">
-            <SelectValue placeholder="All job titles" />
+            <SelectValue placeholder="All job titles">
+              {(value) =>
+                value === ALL || value == null ? 'All job titles' : String(value)
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ALL}>All job titles</SelectItem>
@@ -128,7 +142,13 @@ export function LaborFilters({
           onValueChange={(v) => setParam('from', v ?? ALL)}
         >
           <SelectTrigger id="labor-from">
-            <SelectValue placeholder="Earliest" />
+            <SelectValue placeholder="Earliest">
+              {(value) =>
+                value === ALL || value == null
+                  ? 'Earliest'
+                  : (months.find((m) => m.key === value)?.label ?? String(value))
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ALL}>Earliest</SelectItem>
@@ -150,7 +170,13 @@ export function LaborFilters({
           onValueChange={(v) => setParam('to', v ?? ALL)}
         >
           <SelectTrigger id="labor-to">
-            <SelectValue placeholder="Latest" />
+            <SelectValue placeholder="Latest">
+              {(value) =>
+                value === ALL || value == null
+                  ? 'Latest'
+                  : (months.find((m) => m.key === value)?.label ?? String(value))
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ALL}>Latest</SelectItem>
