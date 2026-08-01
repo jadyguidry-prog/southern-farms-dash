@@ -18,6 +18,7 @@ import {
   summarizeChecks,
   suggestCheckGroups,
   checkResolutionProgress,
+  checkResolvedVia,
   type CheckRow,
   type CheckResolution,
   type CheckReviewSummary,
@@ -25,6 +26,10 @@ import {
   type CheckResolutionProgress,
 } from '@/lib/check-review'
 import { deriveSalesCoverage, monthSalesCoverage } from '@/lib/labor-service'
+import {
+  deriveSalesTaxReview,
+  type SalesTaxReviewGroup,
+} from '@/lib/sales-tax-review'
 
 const PAGE_SIZE = 1000
 
@@ -111,6 +116,11 @@ export type CheckResolutionDataset = {
   payeeOptions: string[]
   /** True when the overlay tables are missing, so the UI can explain rather than crash. */
   overlayUnavailable: boolean
+  /**
+   * Sales tax still filed as an operating expense, or null when there is none.
+   * Surfaced here rather than acted on: the owner decides the treatment.
+   */
+  salesTaxReview: SalesTaxReviewGroup | null
 }
 
 function mapResolution(row: Record<string, unknown>): CheckResolution {
@@ -243,9 +253,24 @@ export async function getCheckResolutionDataset(): Promise<CheckResolutionDatase
     ),
   ].sort((a, b) => a.localeCompare(b))
 
+  // Sales tax filed as an expense. Derived from the same `txns` already in hand,
+  // so this costs no extra query.
+  const salesTaxReview = deriveSalesTaxReview(
+    txns.map((r) => ({
+      id: r.id,
+      transactionDate: (r.transaction_date ?? '').slice(0, 10),
+      amount: Math.abs(Number(r.amount) || 0),
+      description: r.description ?? r.normalized_description ?? '',
+      expenseCategory: (r.expense_category ?? '').trim(),
+      reviewStatus: (r.review_status ?? '').trim(),
+      transactionType: (r.transaction_type ?? '').trim(),
+    })),
+  )
+
   return {
     checks,
     resolutions,
+    salesTaxReview,
     summary: summarizeChecks(checks),
     suggestions: suggestCheckGroups(checks),
     progress: checkResolutionProgress(checks, resolutions, isCogsCategory),
@@ -296,6 +321,11 @@ export function deriveMonthlyCogs(
     expenseCategory: string
     isCheck: boolean
     id: string
+    /**
+     * The row's own review status. Optional so existing COGS-only callers and
+     * tests keep working; when absent a row is simply never treated as excluded.
+     */
+    reviewStatus?: string
   }[],
   resolutions: CheckResolution[],
   /**
@@ -339,17 +369,31 @@ export function deriveMonthlyCogs(
 
     if (t.isCheck) {
       const res = approved.get(t.id)
-      if (!res) {
+      const via = checkResolvedVia(
+        { expenseCategory: t.expenseCategory, reviewStatus: t.reviewStatus ?? '' },
+        res,
+      )
+      if (via === 'unresolved') {
         b.unresolvedCheckAmount += amt
         b.unresolvedCheckCount += 1
-      } else if (res.resolvedCategory && isCogsCategory(res.resolvedCategory)) {
+      } else if (via === 'overlay') {
+        if (res?.resolvedCategory && isCogsCategory(res.resolvedCategory)) {
+          b.resolvedCheckCogs += amt
+        }
+      } else if (via === 'categorized' && isCogsCategory(t.expenseCategory)) {
+        // A check the General Ledger already categorized as cost of goods is
+        // real COGS. Counting it here — and not as unresolved — is what keeps
+        // this figure equal to the one Reporting and the Dashboard show.
         b.resolvedCheckCogs += amt
       }
-      // A check resolved to a NON-COGS category is fully accounted for: it is
-      // neither COGS nor an open question, so it adds to neither total.
+      // A check resolved to a NON-COGS category, or excluded, is fully accounted
+      // for: it is neither COGS nor an open question, so it adds to neither.
       continue
     }
 
+    // Excluded non-check rows are not spend at all, matching cash flow and
+    // vendor spend, so they must not inflate the categorized COGS base.
+    if ((t.reviewStatus ?? '').trim() === 'excluded') continue
     if (isCogsCategory(t.expenseCategory)) b.baseCogs += amt
   }
 
@@ -476,6 +520,7 @@ export async function getCheckResolutionSnapshot(): Promise<CheckResolutionSnaps
       amount: Math.abs(Number(r.amount) || 0),
       expenseCategory: (r.expense_category ?? '').trim(),
       isCheck: isCheckDescription(description),
+      reviewStatus: (r.review_status ?? '').trim(),
     }
   })
 
@@ -534,10 +579,16 @@ export async function getCheckResolutionSnapshot(): Promise<CheckResolutionSnaps
 
   // Only unresolved checks are worth suggesting groups for; resolved ones are
   // already answered and would pad the list the owner is working through.
-  const approvedIds = new Set(
-    resolutions.filter((r) => r.reviewStatus === 'approved').map((r) => r.financialTransactionId),
+  const approvedById = new Map(
+    resolutions
+      .filter((r) => r.reviewStatus === 'approved')
+      .map((r) => [r.financialTransactionId, r]),
   )
-  const pendingRows = checkRows.filter((r) => !approvedIds.has(r.id))
+  // The same predicate the progress figures use, so the clusters offered for
+  // review and the outstanding total can never describe different sets of rows.
+  const pendingRows = checkRows.filter(
+    (r) => checkResolvedVia(r, approvedById.get(r.id)) === 'unresolved',
+  )
   const topClusters = suggestCheckGroups(pendingRows)
     .filter((s) => s.kind === 'amount-cluster')
     .slice(0, 3)

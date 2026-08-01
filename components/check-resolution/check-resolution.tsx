@@ -32,12 +32,14 @@ import type {
   CheckResolutionDataset,
   CheckBulkAction,
 } from '@/lib/check-resolution-service'
+import { checkResolvedVia } from '@/lib/check-review'
 import type { CheckSuggestion, CheckRow } from '@/lib/check-review'
 import {
   resolveChecks,
   rejectChecks,
   undoBulkAction,
 } from '@/app/check-resolution/actions'
+import { SalesTaxReviewCard } from '@/components/check-resolution/sales-tax-review-card'
 
 const CONFIDENCE_STYLE: Record<
   CheckSuggestion['confidence'],
@@ -71,20 +73,37 @@ export function CheckResolution({
   const [excluded, setExcluded] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
-  const approvedIds = useMemo(
-    () =>
-      new Set(
-        data.resolutions
-          .filter((r) => r.reviewStatus === 'approved' || r.reviewStatus === 'rejected')
-          .map((r) => r.financialTransactionId),
-      ),
-    [data.resolutions],
-  )
-
   const checkById = useMemo(
     () => new Map(data.checks.map((c) => [c.id, c])),
     [data.checks],
   )
+
+  // Checks that are no longer an open question. Built from `checkResolvedVia` —
+  // the same predicate the progress figures, the COGS roll-up and gross profit
+  // readiness use — so a check the General Ledger already categorized, or one the
+  // owner excluded, disappears from this queue instead of being asked about
+  // again. A `rejected` overlay also settles a check ("I looked, not COGS").
+  const settledIds = useMemo(() => {
+    const approved = new Map(
+      data.resolutions
+        .filter((r) => r.reviewStatus === 'approved')
+        .map((r) => [r.financialTransactionId, r]),
+    )
+    const rejected = new Set(
+      data.resolutions
+        .filter((r) => r.reviewStatus === 'rejected')
+        .map((r) => r.financialTransactionId),
+    )
+    const out = new Set<string>()
+    for (const c of data.checks) {
+      if (rejected.has(c.id)) {
+        out.add(c.id)
+        continue
+      }
+      if (checkResolvedVia(c, approved.get(c.id)) !== 'unresolved') out.add(c.id)
+    }
+    return out
+  }, [data.resolutions, data.checks])
 
   // Only show groups that still contain unresolved checks, so the queue shrinks
   // as work is done instead of repeating settled answers.
@@ -93,18 +112,34 @@ export function CheckResolution({
       data.suggestions
         .map((s) => ({
           ...s,
-          transactionIds: s.transactionIds.filter((id) => !approvedIds.has(id)),
+          transactionIds: s.transactionIds.filter((id) => !settledIds.has(id)),
         }))
         .filter((s) => s.transactionIds.length > 0)
-        .map((s) => ({
-          ...s,
-          count: s.transactionIds.length,
-          total: s.transactionIds.reduce(
-            (sum, id) => sum + (checkById.get(id)?.amount ?? 0),
-            0,
-          ),
-        })),
-    [data.suggestions, approvedIds, checkById],
+        .map((s) => {
+          const count = s.transactionIds.length
+          const settledCount = s.count - count
+          // The label was written for the whole cluster. Once part of it is
+          // settled, "3 checks of exactly $500.00" above a $500 total is a
+          // contradiction, so the count in the heading is restated to match the
+          // rows actually listed.
+          const amount =
+            s.kind === 'amount-cluster' ? Number(s.key.split(':')[1]) : null
+          const label =
+            settledCount > 0 && amount != null && Number.isFinite(amount)
+              ? `${count} check${count === 1 ? '' : 's'} of exactly ${formatCurrency(amount)}`
+              : s.label
+          return {
+            ...s,
+            label,
+            settledCount,
+            count,
+            total: s.transactionIds.reduce(
+              (sum, id) => sum + (checkById.get(id)?.amount ?? 0),
+              0,
+            ),
+          }
+        }),
+    [data.suggestions, settledIds, checkById],
   )
 
   // Checks not covered by any suggestion — the long tail that must still be
@@ -112,9 +147,9 @@ export function CheckResolution({
   const ungroupedChecks = useMemo(() => {
     const grouped = new Set(openSuggestions.flatMap((s) => s.transactionIds))
     return data.checks
-      .filter((c) => !grouped.has(c.id) && !approvedIds.has(c.id))
+      .filter((c) => !grouped.has(c.id) && !settledIds.has(c.id))
       .sort((a, b) => b.amount - a.amount)
-  }, [data.checks, openSuggestions, approvedIds])
+  }, [data.checks, openSuggestions, settledIds])
 
   const selectedIds = useMemo(
     () => (active ? active.transactionIds.filter((id) => !excluded.has(id)) : []),
@@ -196,21 +231,72 @@ export function CheckResolution({
         />
         <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <div>
+            <dt className="text-xs text-muted-foreground">Total checks</dt>
+            <dd className="text-sm font-semibold tabular-nums">
+              {p.totalChecks}
+            </dd>
+            <dd className="text-xs text-muted-foreground tabular-nums">
+              {formatCurrency(p.totalAmount)}
+            </dd>
+          </div>
+          <div>
             <dt className="text-xs text-muted-foreground">Resolved</dt>
             <dd className="text-sm font-semibold tabular-nums">
+              {p.resolvedCount}
+            </dd>
+            <dd className="text-xs text-muted-foreground tabular-nums">
               {formatCurrency(p.resolvedAmount)}
             </dd>
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">Still unknown</dt>
             <dd className="text-sm font-semibold tabular-nums">
+              {p.pendingCount}
+            </dd>
+            <dd className="text-xs text-muted-foreground tabular-nums">
               {formatCurrency(p.pendingAmount)}
             </dd>
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">Found to be COGS</dt>
             <dd className="text-sm font-semibold tabular-nums">
+              {p.cogsCount}
+            </dd>
+            <dd className="text-xs text-muted-foreground tabular-nums">
               {formatCurrency(p.cogsAmount)}
+            </dd>
+          </div>
+        </dl>
+
+        {/* How the resolved dollars were answered. Shown because "resolved" now
+            covers three different routes, and the owner should see that most of
+            it came from the ledger rather than from work done on this screen. */}
+        <dl className="mt-3 grid grid-cols-2 gap-3 border-t border-border pt-3 sm:grid-cols-4">
+          <div>
+            <dt className="text-xs text-muted-foreground">Categorized</dt>
+            <dd className="text-sm font-semibold tabular-nums">
+              {formatCurrency(p.categorizedAmount)}
+            </dd>
+            <dd className="text-xs text-muted-foreground">
+              {p.categorizedCount} from your ledger
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Excluded</dt>
+            <dd className="text-sm font-semibold tabular-nums">
+              {formatCurrency(p.excludedAmount)}
+            </dd>
+            <dd className="text-xs text-muted-foreground">
+              {p.excludedCount} not business spend
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Named here</dt>
+            <dd className="text-sm font-semibold tabular-nums">
+              {formatCurrency(p.overlayAmount)}
+            </dd>
+            <dd className="text-xs text-muted-foreground">
+              {p.overlayCount} resolved on this page
             </dd>
           </div>
           <div>
@@ -222,10 +308,17 @@ export function CheckResolution({
         </dl>
         <p className="mt-3 text-xs text-muted-foreground text-pretty">
           Progress is measured in dollars rather than checks, because a handful of
-          large checks affect gross profit far more than many small ones. Every
-          resolution is saved separately from your bank records and can be undone.
+          large checks affect gross profit far more than many small ones. A check
+          counts as resolved once it has a category from your ledger, has been
+          excluded, or has been named here — the same rule Cash Flow, Reporting
+          and the Advisor use, so these figures always agree. Every resolution is
+          saved separately from your bank records and can be undone.
         </p>
       </section>
+
+      {data.salesTaxReview ? (
+        <SalesTaxReviewCard group={data.salesTaxReview} />
+      ) : null}
 
       <Tabs defaultValue="groups">
         <TabsList>

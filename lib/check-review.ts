@@ -407,9 +407,50 @@ export type CheckResolutionProgress = {
   pendingAmount: number
   /** Share of check DOLLARS resolved — the figure that matters for COGS trust. */
   resolvedPctOfAmount: number
-  /** Approved resolutions that map a check into a COGS category. */
+  /** Resolutions (from any source) that map a check into a COGS category. */
   cogsCount: number
   cogsAmount: number
+  /** Resolved by an approved row in the `check_resolutions` overlay. */
+  overlayCount: number
+  overlayAmount: number
+  /** Resolved because the transaction itself carries an `expense_category`. */
+  categorizedCount: number
+  categorizedAmount: number
+  /** Resolved because the owner marked the transaction `excluded`. */
+  excludedCount: number
+  excludedAmount: number
+}
+
+/** How a given check came to be answered — or that it has not been. */
+export type CheckResolvedVia = 'overlay' | 'categorized' | 'excluded' | 'unresolved'
+
+/**
+ * The single definition of "this check is answered", shared by the review queue,
+ * the progress figures and the COGS roll-up.
+ *
+ * A check stops being an open question through any of three routes, and all
+ * three must count or the same dollar is reported as both known and unknown:
+ *
+ *  1. `overlay`     — an approved `check_resolutions` row names the payee.
+ *  2. `excluded`    — the owner marked the row excluded (an owner draw, a
+ *                     transfer, capitalized equipment). This is the same
+ *                     `reviewStatus !== 'excluded'` convention cash flow,
+ *                     reporting and vendor spend already use.
+ *  3. `categorized` — the transaction itself carries an `expense_category`,
+ *                     e.g. applied from the accountant's General Ledger, which
+ *                     identifies checks by check number.
+ *
+ * Route 1 is checked first so an explicit resolution always wins over a category
+ * that may have been applied in bulk.
+ */
+export function checkResolvedVia(
+  row: Pick<CheckRow, 'expenseCategory' | 'reviewStatus'>,
+  approvedOverlay: CheckResolution | undefined,
+): CheckResolvedVia {
+  if (approvedOverlay) return 'overlay'
+  if ((row.reviewStatus ?? '').trim() === 'excluded') return 'excluded'
+  if ((row.expenseCategory ?? '').trim().length > 0) return 'categorized'
+  return 'unresolved'
 }
 
 /**
@@ -417,6 +458,10 @@ export type CheckResolutionProgress = {
  *
  * Reports dollars as well as counts, and leads with dollars: resolving 100 small
  * checks matters far less to gross profit than resolving five large ones.
+ *
+ * Each check lands in exactly one of the four buckets, so `overlayAmount +
+ * categorizedAmount + excludedAmount + pendingAmount === totalAmount` always
+ * holds and no dollar can be double-counted.
  */
 export function checkResolutionProgress(
   rows: CheckRow[],
@@ -434,15 +479,41 @@ export function checkResolutionProgress(
   let cogsCount = 0
   let cogsAmount = 0
   let totalAmount = 0
+  let overlayCount = 0
+  let overlayAmount = 0
+  let categorizedCount = 0
+  let categorizedAmount = 0
+  let excludedCount = 0
+  let excludedAmount = 0
 
   for (const row of rows) {
     const amt = Math.abs(Number(row.amount) || 0)
     totalAmount += amt
     const res = approved.get(row.id)
-    if (!res) continue
+    const via = checkResolvedVia(row, res)
+    if (via === 'unresolved') continue
+
     resolvedCount++
     resolvedAmount += amt
-    if (res.resolvedCategory && isCogsCategory(res.resolvedCategory)) {
+
+    // The category that answers this check depends on which route resolved it.
+    // An excluded row is answered precisely BY not being spend, so it never
+    // contributes to COGS regardless of any category left on it.
+    let category = ''
+    if (via === 'overlay') {
+      overlayCount++
+      overlayAmount += amt
+      category = res?.resolvedCategory ?? ''
+    } else if (via === 'categorized') {
+      categorizedCount++
+      categorizedAmount += amt
+      category = row.expenseCategory ?? ''
+    } else {
+      excludedCount++
+      excludedAmount += amt
+    }
+
+    if (category && isCogsCategory(category)) {
       cogsCount++
       cogsAmount += amt
     }
@@ -458,5 +529,11 @@ export function checkResolutionProgress(
     resolvedPctOfAmount: totalAmount > 0 ? (resolvedAmount / totalAmount) * 100 : 0,
     cogsCount,
     cogsAmount,
+    overlayCount,
+    overlayAmount,
+    categorizedCount,
+    categorizedAmount,
+    excludedCount,
+    excludedAmount,
   }
 }

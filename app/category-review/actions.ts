@@ -4,11 +4,13 @@ import { randomUUID } from 'node:crypto'
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
 import { assessReclassification } from '@/lib/reclassify-evidence'
+import { isSalesTaxCategory } from '@/lib/sales-tax-review'
 
 type ActionResult = { ok: boolean; error?: string; updated?: number }
 
 function revalidateAll() {
   revalidatePath('/category-review')
+  revalidatePath('/check-resolution')
   revalidatePath('/cash-flow')
   revalidatePath('/admin')
   revalidatePath('/ai-advisor')
@@ -342,6 +344,90 @@ export async function categorizeTransactions(input: {
     expense_category: category,
     review_status: 'matched',
   })
+  if (updErr) return { ok: false, error: updErr }
+
+  revalidateAll()
+  return { ok: true, updated: ids.length, bulkActionId }
+}
+
+/**
+ * Apply the owner's chosen treatment to sales tax currently filed as an expense.
+ *
+ * Lives here rather than in `app/check-resolution/actions.ts` on purpose: that
+ * file's invariant is that it NEVER writes `financial_transactions`, and this
+ * write does. Reusing this module also means undo is already handled — the audit
+ * rows below are the same shape `revertBulkAction` restores.
+ *
+ * Nothing happens without an explicit call: the review card only describes.
+ */
+export async function applySalesTaxTreatment(input: {
+  transactionIds: string[]
+  treatment: 'reclassify' | 'exclude'
+  category?: string
+}): Promise<ActionResult & { bulkActionId?: string }> {
+  const ids = [...new Set((input.transactionIds ?? []).filter(Boolean))]
+  if (ids.length === 0) return { ok: false, error: 'No sales tax rows selected.' }
+
+  const treatment = input.treatment
+  if (treatment !== 'reclassify' && treatment !== 'exclude') {
+    return { ok: false, error: 'Choose whether to reclassify or exclude.' }
+  }
+  const category = (input.category ?? '').trim()
+  if (treatment === 'reclassify' && !category) {
+    return { ok: false, error: 'A category is required to reclassify.' }
+  }
+
+  const supabase = await createClient()
+  const actor = await actorEmail(supabase)
+  const bulkActionId = randomUUID()
+
+  const { data: rows, error: fetchErr } = await supabase
+    .from('financial_transactions')
+    .select('id, expense_category, review_status')
+    .in('id', ids)
+    .is('deleted_at', null)
+  if (fetchErr) return { ok: false, error: fetchErr.message }
+
+  // Refuse to touch anything that is not currently sales tax. Without this an
+  // out-of-date page could recategorize rows the owner never saw.
+  const live = rows ?? []
+  if (live.length !== ids.length) {
+    return {
+      ok: false,
+      error: `${ids.length - live.length} of the selected rows are no longer available. Refresh and try again.`,
+    }
+  }
+  const notSalesTax = live.filter((r) => !isSalesTaxCategory(String(r.expense_category ?? '')))
+  if (notSalesTax.length > 0) {
+    return {
+      ok: false,
+      error: `${notSalesTax.length} of the selected rows are no longer categorized as sales tax. Refresh and try again.`,
+    }
+  }
+
+  const field = treatment === 'reclassify' ? 'expense_category' : 'review_status'
+  const newValue = treatment === 'reclassify' ? category : 'excluded'
+  const reason =
+    treatment === 'reclassify'
+      ? `Reclassified ${ids.length} sales tax payment(s) to "${category}" — tax collected for the state is a pass-through, not an operating expense.`
+      : `Excluded ${ids.length} sales tax payment(s) from spend at the owner's direction.`
+
+  const audit = live.map((r) => ({
+    transaction_id: r.id,
+    field,
+    previous_value: String(
+      (treatment === 'reclassify' ? r.expense_category : r.review_status) ?? '',
+    ),
+    new_value: newValue,
+    action: 'sales_tax_treatment',
+    bulk_action_id: bulkActionId,
+    actor_email: actor,
+    reason,
+  }))
+  const auditErr = await insertAuditInChunks(supabase, audit)
+  if (auditErr) return { ok: false, error: auditErr }
+
+  const updErr = await updateInChunks(supabase, ids, { [field]: newValue })
   if (updErr) return { ok: false, error: updErr }
 
   revalidateAll()
