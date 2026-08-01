@@ -373,6 +373,17 @@ export function CheckResolution({
                         <p className="mt-1 text-sm text-muted-foreground text-pretty">
                           {s.rationale}
                         </p>
+                        {/* The rationale describes the original cluster, so say
+                            plainly how much of it is already answered rather
+                            than letting the shrunken list look unexplained. */}
+                        {s.settledCount > 0 ? (
+                          <p className="mt-1 text-xs text-muted-foreground text-pretty">
+                            {s.settledCount} other check
+                            {s.settledCount === 1 ? '' : 's'} in this group{' '}
+                            {s.settledCount === 1 ? 'is' : 'are'} already
+                            answered and no longer listed here.
+                          </p>
+                        ) : null}
                         <p className="mt-2 text-xs text-muted-foreground">
                           {s.firstDate} to {s.lastDate}
                         </p>

@@ -17,6 +17,7 @@ import {
   describeCadence,
   suggestCheckGroups,
   checkResolutionProgress,
+  checkResolvedVia,
   type CheckRow,
   type CheckResolution,
 } from '../lib/check-review'
@@ -203,6 +204,59 @@ eq(prog.pendingAmount, 250, 'progress: pending dollars exclude approved')
 eq(prog.cogsCount, 1, 'progress: only COGS-categorized resolutions count toward COGS')
 eq(prog.cogsAmount, 1000, 'progress: non-COGS resolution adds no COGS dollars')
 approx(prog.resolvedPctOfAmount, (1500 / 1750) * 100, 0.01, 'progress: percentage is of DOLLARS not count')
+
+// ---------- resolution routes ----------
+// A check is answered by any of three routes. These pin each one, and pin that
+// they are mutually exclusive, so the page can never re-ask an answered check.
+
+eq(
+  checkResolvedVia(row({ id: 'r1', expenseCategory: '', reviewStatus: '' }), undefined),
+  'unresolved',
+  'route: no category, not excluded, no overlay -> unresolved',
+)
+eq(
+  checkResolvedVia(row({ id: 'r2', expenseCategory: 'COGS', reviewStatus: '' }), undefined),
+  'categorized',
+  'route: a ledger category alone resolves a check',
+)
+eq(
+  checkResolvedVia(row({ id: 'r3', expenseCategory: '', reviewStatus: 'excluded' }), undefined),
+  'excluded',
+  'route: excluded resolves a check even with no category',
+)
+eq(
+  checkResolvedVia(
+    row({ id: 'r4', expenseCategory: 'COGS', reviewStatus: '' }),
+    res({ financialTransactionId: 'x', resolvedCategory: 'Meat / COGS' }),
+  ),
+  'overlay',
+  'route: an explicit resolution outranks a bulk-applied category',
+)
+eq(
+  checkResolvedVia(row({ id: 'r5', expenseCategory: '   ', reviewStatus: '  ' }), undefined),
+  'unresolved',
+  'route: whitespace-only category is not a resolution',
+)
+
+// Excluded dollars must never reach COGS, even if a category was left behind.
+const exProg = checkResolutionProgress(
+  [
+    row({ id: 'e1', amount: 800, expenseCategory: 'Meat / COGS', reviewStatus: 'excluded' }),
+    row({ id: 'e2', amount: 200, expenseCategory: 'Meat / COGS', reviewStatus: '' }),
+  ],
+  [],
+  isCogsCategory,
+)
+eq(exProg.excludedCount, 1, 'progress: excluded check counted as excluded')
+eq(exProg.excludedAmount, 800, 'progress: excluded dollars tracked separately')
+eq(exProg.categorizedCount, 1, 'progress: categorized check counted as categorized')
+eq(exProg.cogsAmount, 200, 'progress: an EXCLUDED check never adds COGS dollars')
+eq(exProg.pendingCount, 0, 'progress: neither check is still an open question')
+eq(
+  exProg.overlayAmount + exProg.categorizedAmount + exProg.excludedAmount + exProg.pendingAmount,
+  1000,
+  'progress: buckets partition total dollars',
+)
 
 // ---------- monthly COGS overlay ----------
 
@@ -413,10 +467,13 @@ async function reconcile() {
     amount: number | string | null
     expense_category: string | null
     check_number: string | null
+    review_status: string | null
   }
+  // `review_status` MUST be selected: resolution now depends on it, so a test
+  // that omits it silently measures a different rule than production does.
   const txnRows = await all<Txn>(
     'financial_transactions',
-    'id, transaction_date, description, normalized_description, amount, expense_category, check_number',
+    'id, transaction_date, description, normalized_description, amount, expense_category, check_number, review_status',
   )
 
   const isCheck = (r: Txn) =>
@@ -428,6 +485,7 @@ async function reconcile() {
     amount: Math.abs(Number(r.amount) || 0),
     expenseCategory: (r.expense_category ?? '').trim(),
     isCheck: isCheck(r),
+    reviewStatus: (r.review_status ?? '').trim(),
   }))
 
   const liveChecks: CheckRow[] = txnRows.filter(isCheck).map((r) => ({
@@ -439,7 +497,7 @@ async function reconcile() {
     accountName: '',
     expenseCategory: (r.expense_category ?? '').trim(),
     vendorId: null,
-    reviewStatus: '',
+    reviewStatus: (r.review_status ?? '').trim(),
   }))
 
   const months = deriveMonthlyCogs(prepared, [])
@@ -451,7 +509,49 @@ async function reconcile() {
   const directChecks = liveChecks.reduce((s, r) => s + r.amount, 0)
 
   approx(baseTotal, directCogs, 0.01, 'live: monthly base COGS reconciles with a direct sum')
-  approx(unresolvedTotal, directChecks, 0.01, 'live: unattributed check dollars reconcile with a direct sum')
+
+  /*
+   * Unattributed check dollars are now a SUBSET of all check dollars, not all of
+   * them: a check carrying a General Ledger category, or marked excluded, is
+   * answered. So reconcile against a direct sum of the checks that are genuinely
+   * still open, using the shared predicate.
+   */
+  const directUnresolved = liveChecks
+    .filter((r) => checkResolvedVia(r, undefined) === 'unresolved')
+    .reduce((s, r) => s + r.amount, 0)
+  approx(
+    unresolvedTotal,
+    directUnresolved,
+    0.01,
+    'live: unattributed check dollars reconcile with a direct sum of still-open checks',
+  )
+
+  // The stronger property: every check dollar is either open or answered, never
+  // both and never neither. This is what actually prevents the double-count the
+  // old assertion was reaching for.
+  const progress = checkResolutionProgress(liveChecks, [], isCogsCategory)
+  approx(
+    progress.overlayAmount +
+      progress.categorizedAmount +
+      progress.excludedAmount +
+      progress.pendingAmount,
+    directChecks,
+    0.01,
+    'live: resolved + excluded + pending check dollars partition the total exactly',
+  )
+  eq(
+    progress.overlayCount +
+      progress.categorizedCount +
+      progress.excludedCount +
+      progress.pendingCount,
+    liveChecks.length,
+    'live: every check falls in exactly one resolution bucket',
+  )
+  // And the page can never claim more is unknown than is actually unknown.
+  ok(
+    progress.pendingAmount <= directChecks + 0.01,
+    'live: pending dollars never exceed total check dollars',
+  )
 
   const summary = summarizeChecks(liveChecks)
   eq(summary.totalChecks, liveChecks.length, 'live: summary counts every check')
