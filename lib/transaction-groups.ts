@@ -78,12 +78,56 @@ export function isGenericDescription(normalized: string): boolean {
 }
 
 /**
+ * True for per-transaction reference codes such as Square's `T3HE2CY0135A7GJ`.
+ *
+ * These must not reach the group key: they are unique per payment, so keeping
+ * them puts every single run in its own group of one. That silently defeats
+ * category learning — 54 `Square Inc PAYROLL <ref>` rows produced 54 distinct
+ * "payees", so the category the owner had already assigned 39 times could never
+ * propagate to a new payroll row.
+ *
+ * Kept deliberately narrow: a token must mix letters with at least two digits
+ * AND be at least six characters long. Real merchant names that contain a digit
+ * ("7 ELEVEN", "76", "STORE 5") stay intact because they are short, hold a
+ * single digit, or split into separate tokens.
+ */
+function isReferenceToken(token: string): boolean {
+  if (token.length < 6) return false
+  const digits = (token.match(/\d/g) ?? []).length
+  return digits >= 2 && /[A-Z]/.test(token) && /^[A-Z0-9]+$/.test(token)
+}
+
+/**
+ * Company-form words that don't identify anything on their own. A key made only
+ * of these is worse than a noisy one: `Square Inc SQ250505 <ref>` reduces to
+ * "INC", which would sweep sales deposits and card fees into a single group.
+ */
+const CORPORATE_SUFFIXES = new Set([
+  'INC',
+  'INCORPORATED',
+  'LLC',
+  'LLP',
+  'CO',
+  'CORP',
+  'CORPORATION',
+  'LTD',
+  'LP',
+  'PLLC',
+])
+
+/** A token that actually says who was paid. */
+function isMeaningfulToken(token: string): boolean {
+  return token.length >= 3 && !CORPORATE_SUFFIXES.has(token)
+}
+
+/**
  * Derive the grouping key for a statement line.
  *
  * For generic lines the key is the matching generic prefix, so every `CHECK
  * 1041`, `CHECK 1042`... lands in a single "Check" group. For real payees we
- * drop leading bank noise and keep the first few significant tokens, which
- * merges the same merchant written slightly differently across statements.
+ * drop leading bank noise plus per-transaction reference codes and keep the
+ * first few significant tokens, which merges the same merchant written slightly
+ * differently across statements.
  */
 export function payeeKeyOf(normalized: string): string {
   const text = (normalized ?? '').trim().toUpperCase()
@@ -100,10 +144,19 @@ export function payeeKeyOf(normalized: string): string {
   let start = 0
   while (start < tokens.length - 1 && LEAD_NOISE.has(tokens[start])) start += 1
 
-  const significant = tokens.slice(start).filter((t) => !/^\d+$/.test(t))
-  const key = (significant.length > 0 ? significant : tokens.slice(start))
-    .slice(0, 3)
-    .join(' ')
+  const rest = tokens.slice(start)
+  const withoutRefs = rest.filter(
+    (t) => !/^\d+$/.test(t) && !isReferenceToken(t),
+  )
+
+  // Dropping the reference code is only safe while something identifying
+  // survives. When it doesn't, the code was the sole distinguishing content, so
+  // we keep the raw tokens rather than collapse unrelated activity together.
+  const significant = withoutRefs.some(isMeaningfulToken)
+    ? withoutRefs
+    : rest.filter((t) => !/^\d+$/.test(t))
+
+  const key = (significant.length > 0 ? significant : rest).slice(0, 3).join(' ')
 
   return key || text
 }
