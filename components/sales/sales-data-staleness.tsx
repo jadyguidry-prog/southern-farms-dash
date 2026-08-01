@@ -52,7 +52,8 @@ export function SalesDataStaleness({
       </span>
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-foreground">
-          Square sales are {daysBehind} days behind
+          {/* Pluralized because `warnAfterDays` is adjustable and could be set to 1. */}
+          Square sales are {daysBehind} {daysBehind === 1 ? 'day' : 'days'} behind
         </p>
         <p className="mt-0.5 text-sm text-muted-foreground text-pretty">
           The latest sales data is from {throughLabel}. Sales figures below are
