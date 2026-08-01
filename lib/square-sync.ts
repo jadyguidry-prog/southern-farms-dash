@@ -96,6 +96,32 @@ export type FullSyncResult = {
 /* ------------------------------------------------------------------ */
 
 /**
+ * True only while a trusted non-interactive sync is running (the nightly cron).
+ *
+ * Module-scoped rather than threaded through every function because the sync is
+ * a single sequential pipeline: one run, one client choice. Node runs each
+ * request on one thread and nothing here awaits concurrently across runs, and
+ * `runServiceRoleSync` restores the previous value in a `finally`, so a cron run
+ * cannot leak elevated access into a later user request.
+ */
+let serviceRoleSync = false
+
+/**
+ * Run `fn` with the service-role client, for callers that have authenticated by
+ * some means other than a Supabase session (the cron route verifies
+ * CRON_SECRET). Keep the wrapped region as small as possible.
+ */
+export async function runServiceRoleSync<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = serviceRoleSync
+  serviceRoleSync = true
+  try {
+    return await fn()
+  } finally {
+    serviceRoleSync = previous
+  }
+}
+
+/**
  * Resolve the Supabase client for sync work.
  *
  * The sync runs in two very different contexts:
@@ -109,8 +135,18 @@ export type FullSyncResult = {
  * service-role client. Any other error is rethrown, so a genuine Supabase
  * misconfiguration surfaces instead of being silently upgraded to a
  * privileged client.
+ *
+ * A third context was missing: a cron request. It *is* inside a request scope,
+ * so `createClient()` succeeds, but it carries no session cookie, so every write
+ * is rejected by RLS ("new row violates row-level security policy").
+ *
+ * `runServiceRoleSync()` below marks that case explicitly. It is an opt-in
+ * wrapper rather than a widened catch so that a genuine RLS denial during a
+ * user's own "Sync now" still fails loudly instead of being quietly escalated to
+ * full database privileges.
  */
 async function getSyncDb() {
+  if (serviceRoleSync) return createServiceClient()
   try {
     return await createClient()
   } catch (err) {
