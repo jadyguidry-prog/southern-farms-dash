@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState, useTransition } from 'react'
+import { useCallback, useEffect, useRef, useState, useTransition } from 'react'
 import { usePlaidLink } from 'react-plaid-link'
 import {
   Card,
@@ -55,6 +55,63 @@ function dayAfter(date: string | null): string {
   if (Number.isNaN(d.getTime())) return ''
   d.setUTCDate(d.getUTCDate() + 1)
   return d.toISOString().slice(0, 10)
+}
+
+/**
+ * Mounts Plaid Link for exactly one token and opens it exactly once.
+ *
+ * This is deliberately a separate component. Previously `usePlaidLink` lived in the
+ * panel itself and was opened from an effect that depended on `open`. Because the
+ * SDK returns a NEW `open` function on every render — and it destroys/recreates the
+ * underlying Link instance whenever the token changes — that effect re-fired and
+ * stacked multiple Link instances. The browser logged "link-initialize.js was
+ * embedded more than once", the user's completed flow was bound to a torn-down
+ * instance, and `onSuccess` never fired: Link appeared to work but nothing was ever
+ * exchanged or saved.
+ *
+ * Isolating it means the hook is only ever created with a real token, and unmounting
+ * (token -> null) fully tears the instance down.
+ */
+function PlaidLinkLauncher({
+  token,
+  onSuccess,
+  onExit,
+}: {
+  token: string
+  onSuccess: (publicToken: string) => void
+  onExit: (message: string | null) => void
+}) {
+  const opened = useRef(false)
+
+  const { open, ready } = usePlaidLink({
+    token,
+    onSuccess: (publicToken) => {
+      // The SDK types public_token as nullable. Without a token there is nothing to
+      // exchange, so surface it rather than POSTing null to the server.
+      if (!publicToken) {
+        onExit('Plaid did not return a token. Nothing was connected — try again.')
+        return
+      }
+      onSuccess(publicToken)
+    },
+    onExit: (err) => {
+      onExit(
+        err
+          ? `Plaid Link closed: ${err.display_message ?? err.error_message ?? err.error_code ?? 'unknown error'}`
+          : null,
+      )
+    },
+  })
+
+  // Fires once per mounted token. The ref guard is what prevents the re-open loop.
+  useEffect(() => {
+    if (ready && !opened.current) {
+      opened.current = true
+      open()
+    }
+  }, [ready, open])
+
+  return null
 }
 
 export function PlaidIntegrationPanel({
@@ -121,26 +178,13 @@ export function PlaidIntegrationPanel({
     }
   }, [])
 
-  const { open: openLink, ready: linkReady } = usePlaidLink({
-    token: linkToken,
-    onSuccess: (publicToken) => {
-      // The SDK types public_token as nullable. Without a token there is nothing
-      // to exchange, so surface it rather than POSTing null to the server.
-      if (!publicToken) {
-        setResult({
-          ok: false,
-          message: 'Plaid did not return a token. Nothing was connected — try again.',
-        })
-        setLinking(false)
-        return
-      }
-      void onLinkSuccess(publicToken)
-    },
-    onExit: () => {
-      setLinkToken(null)
-      setLinking(false)
-    },
-  })
+  // Link closed without finishing, or errored. Clearing the token unmounts the
+  // launcher so a later attempt starts from a clean instance.
+  const handleLinkExit = useCallback((message: string | null) => {
+    setLinkToken(null)
+    setLinking(false)
+    if (message) setResult({ ok: false, message })
+  }, [])
 
   async function startLink(itemId?: string) {
     setLinking(true)
@@ -166,19 +210,6 @@ export function PlaidIntegrationPanel({
       setLinking(false)
     }
   }
-
-  /**
-   * Open Link once the token has arrived and the SDK reports ready.
-   *
-   * This must be an effect, not a render-time branch: calling openLink() during
-   * render sets state inside the SDK and triggers an infinite re-render loop.
-   */
-  useEffect(() => {
-    if (linkToken && linkReady) {
-      setLinking(false)
-      openLink()
-    }
-  }, [linkToken, linkReady, openLink])
 
   const totalMapped = overview.items.reduce(
     (sum, item) => sum + item.accounts.filter((a) => a.isEnabled && a.accountName).length,
@@ -207,6 +238,15 @@ export function PlaidIntegrationPanel({
       </CardHeader>
 
       <CardContent className="space-y-5">
+        {/* Mounted only while a token is live, so exactly one Link instance exists. */}
+        {linkToken && (
+          <PlaidLinkLauncher
+            token={linkToken}
+            onSuccess={onLinkSuccess}
+            onExit={handleLinkExit}
+          />
+        )}
+
         {!overview.configured && (
           <div className="rounded-lg border border-dashed p-4">
             <p className="text-sm font-medium">Add your Plaid keys to get started</p>

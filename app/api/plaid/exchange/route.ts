@@ -1,3 +1,4 @@
+import { CountryCode } from 'plaid'
 import {
   describePlaidError,
   isPlaidConfigured,
@@ -84,9 +85,7 @@ export async function POST(request: Request) {
       if (institutionId) {
         const inst = await client.institutionsGetById({
           institution_id: institutionId,
-          country_codes: [
-            (await import('plaid')).CountryCode.Us,
-          ],
+          country_codes: [CountryCode.Us],
         })
         institutionName = inst.data.institution.name ?? null
       }
