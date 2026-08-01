@@ -6,6 +6,7 @@ import { ScenarioExplorer } from '@/components/marketing/scenario-explorer'
 import { AffordabilityBreakdown } from '@/components/marketing/affordability-breakdown'
 import { MarketingSpendPanel } from '@/components/marketing/marketing-spend-panel'
 import { ConfidencePanel } from '@/components/marketing/confidence-panel'
+import { MarketingDataFreshness } from '@/components/marketing/marketing-data-freshness'
 import { getMarketingAffordabilitySnapshot } from '@/lib/queries'
 
 export const metadata = {
@@ -46,6 +47,14 @@ export default async function MarketingPage() {
       <PageHeader
         title="Marketing Affordability"
         description={`How much you can afford to spend on marketing in ${metrics.targetMonthLabel}, worked out from your real cash, bills and sales history — not a percentage-of-revenue rule of thumb.`}
+      />
+
+      {/* Above the verdict on purpose: if the feed is stale, that has to be known
+          before the recommended number is read, not after. */}
+      <MarketingDataFreshness
+        latestTransactionDate={data.dataFreshness.latestTransactionDate}
+        daysBehind={data.dataFreshness.daysBehind}
+        isStale={data.dataFreshness.isStale}
       />
 
       <MarketingVerdict

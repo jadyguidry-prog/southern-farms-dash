@@ -1528,6 +1528,19 @@ export type MarketingAffordability = {
     targetMonthKey: string
     targetMonthLabel: string
   }
+  /**
+   * How current the bank feed is. Every cash figure is only as fresh as the last
+   * imported transaction, so when this lags the whole page must say so rather
+   * than presenting month-old data as today's position.
+   */
+  dataFreshness: {
+    /** ISO date of the most recent bank transaction on file, or null. */
+    latestTransactionDate: string | null
+    /** Whole days between that transaction and today. */
+    daysBehind: number | null
+    /** True once the feed is far enough behind to distrust the numbers. */
+    isStale: boolean
+  }
   /** Empty until ad-platform data exists; see `optimizeByRoi`. */
   roi: ChannelRoi[]
   /**
@@ -1928,10 +1941,29 @@ export async function getMarketingAffordability(
         }
       : null
 
+  // Freshness is anchored on the newest bank transaction, not the balance
+  // "updated_at" timestamp: a balance can be re-saved while the transaction feed
+  // itself is weeks behind. 10 days is the threshold — beyond a week, a month
+  // like this one is materially incomplete.
+  const latestTransactionDate =
+    txns.reduce<string | null>(
+      (latest, t) =>
+        t.transactionDate && (!latest || t.transactionDate > latest)
+          ? t.transactionDate
+          : latest,
+      null,
+    ) ?? null
+  const freshnessDaysBehind = daysBetween(latestTransactionDate, today)
+
   return {
     spend,
     uncategorizedMarketing,
     reconciliation,
+    dataFreshness: {
+      latestTransactionDate,
+      daysBehind: freshnessDaysBehind,
+      isStale: freshnessDaysBehind !== null && freshnessDaysBehind > 10,
+    },
     cash: cashResult,
     budget,
     score,
