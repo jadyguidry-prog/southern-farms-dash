@@ -275,7 +275,12 @@ export async function categorizeTransactions(input: {
    * write serves the CHECK queue and the mis-typed-fee correction; logging both
    * as "check(s)" would make the history misdescribe what the owner did.
    */
-  source?: 'checks' | 'mistyped_fee'
+  source?: 'checks' | 'mistyped_fee' | 'uncategorized_payee'
+  /**
+   * The payee whose rows are being categorized. Recorded in the audit reason so
+   * the history says which vendor was filed, not just how many rows moved.
+   */
+  payee?: string
 }): Promise<ActionResult & { bulkActionId?: string }> {
   const ids = (input.transactionIds ?? []).filter(Boolean)
   const category = (input.category ?? '').trim()
@@ -283,11 +288,19 @@ export async function categorizeTransactions(input: {
   if (!category) return { ok: false, error: 'Enter a category.' }
 
   const source = input.source ?? 'checks'
-  const action = source === 'mistyped_fee' ? 'recategorize_mistyped' : 'categorize_checks'
+  const action =
+    source === 'mistyped_fee'
+      ? 'recategorize_mistyped'
+      : source === 'uncategorized_payee'
+        ? 'categorize_payee'
+        : 'categorize_checks'
+  const payee = (input.payee ?? '').trim()
   const reason =
     source === 'mistyped_fee'
       ? `Recategorized ${ids.length} row(s) to "${category}" after the evidence showed a recurring fee, not income.`
-      : `Assigned "${category}" to ${ids.length} check(s).`
+      : source === 'uncategorized_payee'
+        ? `Filed ${ids.length} uncategorized row(s)${payee ? ` from ${payee}` : ''} as "${category}".`
+        : `Assigned "${category}" to ${ids.length} check(s).`
 
   const supabase = await createClient()
   const actor = await actorEmail(supabase)

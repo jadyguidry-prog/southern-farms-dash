@@ -11,7 +11,9 @@ import {
   Layers,
   ReceiptText,
   HelpCircle,
+  Store,
 } from 'lucide-react'
+import { UncategorizedPayees } from '@/components/category-review/uncategorized-payees'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -102,6 +104,15 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
             Type flags
             {data.mistyped.length > 0 && (
               <Badge variant="secondary">{data.mistyped.length}</Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="uncategorized" className="gap-2">
+            <Store className="size-4" aria-hidden />
+            Uncategorized payees
+            {data.uncategorizedSummary.payeeCount > 0 && (
+              <Badge variant="secondary">
+                {data.uncategorizedSummary.payeeCount}
+              </Badge>
             )}
           </TabsTrigger>
           <TabsTrigger value="checks" className="gap-2">
@@ -290,6 +301,17 @@ export function CategoryReview({ data }: { data: CategoryReviewData }) {
         {/* -------------------------------------------------------------- */}
         {/* CHECK review queue                                             */}
         {/* -------------------------------------------------------------- */}
+        {/* -------------------------------------------------------------- */}
+        {/* Payees with no category — the gap the other queues cannot close */}
+        {/* -------------------------------------------------------------- */}
+        <TabsContent value="uncategorized" className="mt-4 flex flex-col gap-4">
+          <UncategorizedPayees
+            groups={data.uncategorizedPayees}
+            summary={data.uncategorizedSummary}
+            categoryOptions={data.categoryOptions}
+          />
+        </TabsContent>
+
         <TabsContent value="checks" className="mt-4 flex flex-col gap-4">
           <CheckQueue
             checks={data.checks}

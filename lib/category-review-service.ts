@@ -25,6 +25,11 @@ import {
   type EvidenceReport,
   type EvidenceRow,
 } from '@/lib/reclassify-evidence'
+import {
+  buildUncategorizedPayeeGroups,
+  summarizeUncategorizedPayees,
+  type UncategorizedPayeeGroup,
+} from '@/lib/uncategorized-payees'
 
 const PAGE_SIZE = 1000
 
@@ -156,6 +161,22 @@ export type CategoryReviewData = {
   /** Income-style categories sitting on spend rows — likely a mis-type. */
   mistyped: MistypedFlag[]
   recentActions: AuditEntry[]
+  /**
+   * Rows that have a real payee but no category — the gap that neither the merge
+   * queue (which needs a category to compare) nor Check Resolution (which owns
+   * payee-less rows) can close.
+   */
+  uncategorizedPayees: UncategorizedPayeeGroup[]
+  uncategorizedSummary: {
+    payeeCount: number
+    transactionCount: number
+    total: number
+  }
+  /**
+   * The owner's existing category vocabulary, derived from the rows themselves so
+   * no taxonomy is hardcoded here (rules 5 and 6).
+   */
+  categoryOptions: string[]
   transactionCount: number
   /** Live cash totals, so a reclassification can show before-and-after. */
   currentCashIn: number
@@ -450,6 +471,29 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
       }
     })
 
+  const uncategorizedPayees = buildUncategorizedPayeeGroups(
+    rows.map((r) => ({
+      id: r.id,
+      transactionDate: r.transactionDate,
+      description: r.description,
+      amount: r.amount,
+      transactionType: r.transactionType,
+      reviewStatus: r.reviewStatus,
+      expenseCategory: r.expenseCategory,
+    })),
+  )
+
+  // The picker offers only categories the owner already uses, so this screen can
+  // never introduce a new taxonomy of its own (rules 5 and 6).
+  const categoryOptions = [
+    ...new Set(
+      rows
+        .filter(isSpendRow)
+        .map((r) => (r.expenseCategory ?? '').trim())
+        .filter((c) => c.length > 0),
+    ),
+  ].sort((a, b) => a.localeCompare(b))
+
   return {
     proposals,
     decisions,
@@ -457,6 +501,9 @@ export async function getCategoryReviewData(): Promise<CategoryReviewData> {
     checks: { ...checkSummary, transactionIds: checkRows.map((r) => r.id) },
     mistyped,
     recentActions: [...byBulk.values()].slice(0, 25),
+    uncategorizedPayees,
+    uncategorizedSummary: summarizeUncategorizedPayees(uncategorizedPayees),
+    categoryOptions,
     transactionCount: rows.length,
     currentCashIn,
     currentCashOut,
