@@ -21,6 +21,30 @@ export function isPlaidConfigured(): boolean {
 }
 
 /**
+ * The registered OAuth redirect URI, or null when not configured.
+ *
+ * Required for OAuth institutions, which now includes **American Express** —
+ * credential-based login is unavailable for banks that have migrated to OAuth, so
+ * without this the Amex card simply cannot be linked. Plaid sends the owner to the
+ * bank's own site, and the bank returns them to this exact URI.
+ *
+ * The value must match the entry in the Plaid Dashboard (Developers > API >
+ * Allowed redirect URIs) character for character, including `www` and any path, and
+ * must be HTTPS in production. A mismatch surfaces as `INVALID_FIELD` at link-token
+ * creation rather than at the moment of redirect.
+ *
+ * Optional on purpose: non-OAuth institutions link fine without it, so a missing
+ * value must not break the whole panel.
+ */
+export function plaidRedirectUri(): string | null {
+  const raw = process.env.PLAID_REDIRECT_URI?.trim()
+  if (!raw) return null
+  // A trailing slash or stray quote is a config typo that Plaid rejects with a
+  // confusing error, so normalise the cheap cases here.
+  return raw.replace(/^['"]|['"]$/g, '')
+}
+
+/**
  * True once a 32-byte encryption key is present. Access tokens are long-lived
  * bank credentials, so we refuse to store them without one rather than writing
  * them in the clear.

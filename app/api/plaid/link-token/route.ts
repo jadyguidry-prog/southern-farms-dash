@@ -4,6 +4,7 @@ import {
   isPlaidConfigured,
   plaidClient,
   plaidEnv,
+  plaidRedirectUri,
 } from '@/lib/plaid-client'
 import { createClient } from '@/lib/supabase/server'
 
@@ -65,11 +66,19 @@ export async function POST(request: Request) {
       }
     }
 
+    // OAuth institutions — American Express among them — send the owner to the
+    // bank's own site and return them to this exact registered URI. Omitting it
+    // makes those banks unselectable, so the Amex card could never be linked.
+    // Sent only when configured, because non-OAuth banks work without it and an
+    // empty string would be rejected outright.
+    const redirectUri = plaidRedirectUri()
+
     const response = await plaidClient().linkTokenCreate({
       user: { client_user_id: user.id },
       client_name: 'Southern Farms Operations Center',
       language: 'en',
       country_codes: [CountryCode.Us],
+      ...(redirectUri ? { redirect_uri: redirectUri } : {}),
       // Transactions only. Requesting fewer products keeps the consent screen
       // honest about what the app actually reads.
       ...(accessToken
@@ -83,6 +92,8 @@ export async function POST(request: Request) {
       expiration: response.data.expiration,
       environment: plaidEnv(),
       mode: accessToken ? 'update' : 'create',
+      // Lets the panel warn that OAuth banks will fail before the owner tries one.
+      oauthReady: Boolean(redirectUri),
     })
   } catch (error) {
     const message = describePlaidError(error)

@@ -74,10 +74,12 @@ function dayAfter(date: string | null): string {
  */
 function PlaidLinkLauncher({
   token,
+  receivedRedirectUri,
   onSuccess,
   onExit,
 }: {
   token: string
+  receivedRedirectUri?: string
   onSuccess: (publicToken: string) => void
   onExit: (message: string | null) => void
 }) {
@@ -85,6 +87,9 @@ function PlaidLinkLauncher({
 
   const { open, ready } = usePlaidLink({
     token,
+    // Set only when returning from an OAuth bank. It tells Link to resume the
+    // in-flight authorisation instead of starting a fresh institution picker.
+    ...(receivedRedirectUri ? { receivedRedirectUri } : {}),
     onSuccess: (publicToken) => {
       // The SDK types public_token as nullable. Without a token there is nothing to
       // exchange, so surface it rather than POSTing null to the server.
@@ -114,6 +119,17 @@ function PlaidLinkLauncher({
   return null
 }
 
+/** Holds the in-flight link token across an OAuth navigation away and back. */
+const OAUTH_TOKEN_KEY = 'plaid_link_token_in_flight'
+
+function clearInFlightToken() {
+  try {
+    window.localStorage.removeItem(OAUTH_TOKEN_KEY)
+  } catch {
+    // Storage unavailable; nothing was stored either.
+  }
+}
+
 export function PlaidIntegrationPanel({
   overview,
   onSaveMapping,
@@ -125,8 +141,43 @@ export function PlaidIntegrationPanel({
   const [isPending, startTransition] = useTransition()
   const [linkToken, setLinkToken] = useState<string | null>(null)
   const [linking, setLinking] = useState(false)
+  // Non-null only while finishing an OAuth hand-back.
+  const [oauthRedirectUri, setOauthRedirectUri] = useState<string | undefined>(undefined)
 
   const ready = overview.configured && overview.encryptionConfigured
+
+  /**
+   * Resume an OAuth connection.
+   *
+   * OAuth banks (American Express, and most large institutions) navigate the whole
+   * browser to the bank's site, so every bit of React state is destroyed. Plaid
+   * returns the owner to the registered redirect URI carrying `?oauth_state_id=`,
+   * and Link must then be re-created with the ORIGINAL link token plus
+   * `receivedRedirectUri`. A fresh token would restart the picker and silently lose
+   * the authorisation the owner just completed at their bank.
+   *
+   * The token therefore has to outlive the navigation, which means storage rather
+   * than state. It is a short-lived token that cannot read data by itself.
+   */
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (!new URLSearchParams(window.location.search).has('oauth_state_id')) return
+
+    const stored = window.localStorage.getItem(OAUTH_TOKEN_KEY)
+    if (!stored) {
+      // Landed on an OAuth return without the token — usually a different browser
+      // or cleared storage. Say so instead of showing an inert page.
+      setResult({
+        ok: false,
+        message:
+          'The bank sent you back, but this browser no longer has the connection in progress. Start "Connect a bank or card" again in this same browser.',
+      })
+      return
+    }
+    setOauthRedirectUri(window.location.href)
+    setLinkToken(stored)
+    setLinking(true)
+  }, [])
 
   function run(label: string, action: () => Promise<PlaidActionResult>) {
     setPendingLabel(label)
@@ -175,6 +226,10 @@ export function PlaidIntegrationPanel({
     } finally {
       setLinking(false)
       setLinkToken(null)
+      setOauthRedirectUri(undefined)
+      // The token is single-use once exchanged; leaving it behind would make the
+      // next page load think an OAuth flow was still in progress.
+      clearInFlightToken()
     }
   }, [])
 
@@ -182,7 +237,9 @@ export function PlaidIntegrationPanel({
   // launcher so a later attempt starts from a clean instance.
   const handleLinkExit = useCallback((message: string | null) => {
     setLinkToken(null)
+    setOauthRedirectUri(undefined)
     setLinking(false)
+    clearInFlightToken()
     if (message) setResult({ ok: false, message })
   }, [])
 
@@ -201,6 +258,15 @@ export function PlaidIntegrationPanel({
         setLinking(false)
         return
       }
+      // Persist before opening: an OAuth bank may navigate away immediately, and
+      // the token must still be here when the browser comes back.
+      try {
+        window.localStorage.setItem(OAUTH_TOKEN_KEY, data.linkToken)
+      } catch {
+        // Private browsing can refuse writes. Non-OAuth banks still work, so
+        // continue rather than blocking the whole flow.
+      }
+      setOauthRedirectUri(undefined)
       setLinkToken(data.linkToken)
     } catch (err) {
       setResult({
@@ -242,6 +308,7 @@ export function PlaidIntegrationPanel({
         {linkToken && (
           <PlaidLinkLauncher
             token={linkToken}
+            receivedRedirectUri={oauthRedirectUri}
             onSuccess={onLinkSuccess}
             onExit={handleLinkExit}
           />
