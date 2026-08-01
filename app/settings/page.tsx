@@ -87,6 +87,13 @@ export default async function SettingsPage() {
           onRebuild={rebuildRollupAction}
         />
 
+        <PlaidIntegrationPanel
+          overview={plaidOverview}
+          onSaveMapping={savePlaidAccountMapping}
+          onSync={runPlaidSync}
+          onDisconnect={disconnectPlaidItem}
+        />
+
         <FinancialTargetsForm values={settings} />
 
         <Card>

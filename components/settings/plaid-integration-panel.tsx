@@ -124,6 +124,16 @@ export function PlaidIntegrationPanel({
   const { open: openLink, ready: linkReady } = usePlaidLink({
     token: linkToken,
     onSuccess: (publicToken) => {
+      // The SDK types public_token as nullable. Without a token there is nothing
+      // to exchange, so surface it rather than POSTing null to the server.
+      if (!publicToken) {
+        setResult({
+          ok: false,
+          message: 'Plaid did not return a token. Nothing was connected — try again.',
+        })
+        setLinking(false)
+        return
+      }
       void onLinkSuccess(publicToken)
     },
     onExit: () => {
@@ -440,7 +450,11 @@ function AccountMappingRow({
           <Label htmlFor={`name-${account.accountId}`} className="text-xs">
             Maps to existing account
           </Label>
-          <Select value={accountName} onValueChange={setAccountName} disabled={disabled}>
+          <Select
+            value={accountName}
+            onValueChange={(value) => setAccountName(value ?? '')}
+            disabled={disabled}
+          >
             <SelectTrigger id={`name-${account.accountId}`} className="text-sm">
               <SelectValue placeholder="Choose an account…" />
             </SelectTrigger>
