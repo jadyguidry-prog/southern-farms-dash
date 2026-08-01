@@ -42,6 +42,64 @@ export const SPEND_TYPES: TransactionType[] = ['expense', 'fee', 'interest']
 /** Types that reduce spend when computing a net figure. */
 export const SPEND_OFFSET_TYPES: TransactionType[] = ['refund', 'credit']
 
+// ---------- Statement direction words ----------
+
+/**
+ * What a statement's type/indicator column is saying about DIRECTION.
+ *
+ * A bank writes "Credit" for money arriving and "Debit" for money leaving. Those
+ * are directions, not this app's semantic types — and the vocabularies collide
+ * dangerously on one word: here `credit` is a SPEND OFFSET (a refund that
+ * reduces spending, see `SPEND_OFFSET_TYPES`). Trusting a bank's "Credit" label
+ * as our `credit` type therefore turns every deposit into negative spending.
+ *
+ * That is exactly what happened to one imported month: 51 deposits (Square
+ * payouts, DEPOSIT lines, WooPayments) were stored as `credit`, subtracted from
+ * $1,527 of real costs, and the month reported cash out of -$96,116.
+ *
+ * So direction words are mapped to a sign and never used as a type.
+ */
+const STATEMENT_DIRECTION_WORDS: Record<string, 1 | -1> = {
+  credit: 1,
+  credits: 1,
+  cr: 1,
+  deposit: 1,
+  deposits: 1,
+  debit: -1,
+  debits: -1,
+  dr: -1,
+  withdrawal: -1,
+  withdrawals: -1,
+}
+
+/**
+ * Read a statement's type column as a direction: `1` money in, `-1` money out,
+ * `null` when the value says nothing about direction.
+ *
+ * This matters most for exports that list every amount as an unsigned magnitude
+ * and carry the direction only in a separate column. Without it, such a file
+ * looks like it is entirely income.
+ */
+export function parseStatementDirection(rawType: string): 1 | -1 | null {
+  const key = rawType.trim().toLowerCase()
+  return STATEMENT_DIRECTION_WORDS[key] ?? null
+}
+
+/**
+ * A type from the statement that we trust verbatim, or `null` to infer instead.
+ *
+ * Deliberately rejects anything that is really a direction word (above), so an
+ * ambiguous label is resolved from the description and sign by
+ * `inferTransactionType` rather than taken at face value.
+ */
+export function trustedStatementType(rawType: string): TransactionType | null {
+  const key = rawType.trim().toLowerCase()
+  if (parseStatementDirection(key) !== null) return null
+  return (TRANSACTION_TYPES as readonly string[]).includes(key)
+    ? (key as TransactionType)
+    : null
+}
+
 // ---------- Description normalization ----------
 
 // Noise that banks prepend/append to the real merchant name.

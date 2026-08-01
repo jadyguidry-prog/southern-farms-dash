@@ -38,6 +38,8 @@ import {
   parseAmount,
   parseDate,
   inferTransactionType,
+  parseStatementDirection,
+  trustedStatementType,
   canonicalizeSign,
   AMOUNT_CONVENTIONS,
   AMOUNT_CONVENTION_LABELS,
@@ -158,21 +160,22 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
       const canonicalSigned =
         signed == null ? 0 : canonicalizeSign(signed, convention)
 
-      // A type column from the bank is respected only when it matches a type we
-      // understand; otherwise we infer from the description and direction.
+      // A type column from the bank is respected only when it names a type we
+      // understand AND is not merely a direction word. A bank's "Credit"/"Debit"
+      // describes which way money moved, not what kind of transaction it was, and
+      // this app's `credit` type means a refund that REDUCES spend — so taking
+      // "Credit" at face value books deposits as negative spending.
       const rawType = typeCol ? String(raw[typeCol] ?? '').trim().toLowerCase() : ''
-      const knownType = [
-        'expense',
-        'payment',
-        'credit',
-        'refund',
-        'transfer',
-        'fee',
-        'interest',
-        'income',
-      ].includes(rawType)
-        ? (rawType as StagedRow['transactionType'])
-        : null
+      const knownType = trustedStatementType(rawType)
+
+      // When the column is a direction word, use it to sign the amount. Exports
+      // that list unsigned magnitudes carry direction ONLY here, so without this
+      // every row looks positive and the whole file reads as income.
+      const statementDirection = parseStatementDirection(rawType)
+      const directedSigned =
+        statementDirection === null
+          ? canonicalSigned
+          : statementDirection * Math.abs(canonicalSigned)
 
       return {
         rowNumber,
@@ -181,7 +184,7 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
         description,
         amount: signed ?? 0,
         transactionType:
-          knownType ?? inferTransactionType(normalized, canonicalSigned, description),
+          knownType ?? inferTransactionType(normalized, directedSigned, description),
         accountName:
           (accountCol ? String(raw[accountCol] ?? '').trim() : '') ||
           accountName ||
