@@ -492,7 +492,20 @@ function AccountMappingRow({
           </Label>
           <Select
             value={accountName}
-            onValueChange={(value) => setAccountName(value ?? '')}
+            onValueChange={(value) => {
+              const next = value ?? ''
+              setAccountName(next)
+              // Fill the cutover with the day after that account's last imported
+              // transaction. Only when the field is still empty, so a date the owner
+              // deliberately chose is never overwritten. The suggestion link below
+              // remains for changing it afterwards.
+              if (!importFrom) {
+                const suggestion = dayAfter(
+                  existingAccounts.find((e) => e.accountName === next)?.latest ?? null,
+                )
+                if (suggestion) setImportFrom(suggestion)
+              }
+            }}
             disabled={disabled}
           >
             <SelectTrigger id={`name-${account.accountId}`} className="text-sm">
