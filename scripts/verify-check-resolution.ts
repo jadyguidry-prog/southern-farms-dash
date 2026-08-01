@@ -460,12 +460,33 @@ async function reconcile() {
   const readiness = grossProfitReadiness(months, directChecks)
   ok(!readiness.ready, 'live: gross profit is currently withheld, as it should be')
 
-  // The overlay must not have touched the source export.
+  /*
+   * The check-resolution OVERLAY still must never write expense_category itself —
+   * that invariant is unchanged. But a CHECK row may now legitimately carry a
+   * category: the 2025 accountant General Ledger identifies many checks by check
+   * number, and those were applied from that external evidence under
+   * action='categorize_from_2025_ledger'. So assert PROVENANCE rather than
+   * absence — anything categorized without that audit trail is still a bug.
+   */
   const categorizedChecks = liveChecks.filter((r) => r.expenseCategory.length > 0)
+  const ledgerAudit = await all<{ transaction_id: string }>(
+    'transaction_audit_log',
+    'transaction_id, field, action',
+  )
+  const fromLedger = new Set(
+    ledgerAudit
+      .filter(
+        (a) =>
+          (a as unknown as { field?: string }).field === 'expense_category' &&
+          (a as unknown as { action?: string }).action === 'categorize_from_2025_ledger',
+      )
+      .map((a) => String(a.transaction_id)),
+  )
+  const unexplained = categorizedChecks.filter((r) => !fromLedger.has(String(r.id)))
   eq(
-    categorizedChecks.length,
+    unexplained.length,
     0,
-    'live: no CHECK row has been written into expense_category — the export is untouched',
+    'live: every categorized CHECK row traces to the 2025 ledger import — none written by the overlay',
   )
 
   const { count: resCount } = await db
