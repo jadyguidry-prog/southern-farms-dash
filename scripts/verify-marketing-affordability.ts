@@ -97,22 +97,31 @@ console.log('\nAvailable operating cash')
     monthlyDebtService: 5_000,
     payrollDue: 8_000,
     payrollBasis: 'test',
+    expectedInflow: 60_000,
+    inflowBasis: 'test',
+    expectedOutflow: 55_000,
+    outflowBasis: 'test',
   })
   check('placeholder receivable excluded from expected cash', r.expectedReceivables, 4_000)
   check('placeholder is reported, not hidden', r.excludedReceivables.length, 1)
+  // The identifiable pieces are still listed for reference, but they are no
+  // longer what the projection subtracts — expectedOutflow is.
   check('deductions total', r.totalDeductions, 23_000)
-  // 50,000 + 4,000 - 23,000 = 31,000
-  check('projected cash', r.projectedCash, 31_000)
-  // 31,000 - 20,000 reserve = 11,000 spendable
-  check('available operating cash respects the reserve', r.availableOperatingCash, 11_000)
+  // cash 50,000 + receivable 4,000 + inflow 60,000 - outflow 55,000 = 59,000
+  check('projected cash counts inflow, not just bills', r.projectedCash, 59_000)
+  // 59,000 - 20,000 reserve = 39,000 spendable
+  check('available operating cash respects the reserve', r.availableOperatingCash, 39_000)
 }
 {
-  // Regression: every cash_obligations row in this business has a null due_date,
-  // so getCashDebtSummary reports obligations30 = $0 and holds them in
-  // unscheduledObligations instead. Ignoring those overstated spendable cash by
-  // $6,211/month (Rent, Electric, Trash, Gas and an $800 Marketing line).
+  // Regression for the "$229 / projected -$1,663" bug. Same Southern Farms
+  // inputs as before (every cash_obligations row is undated, so they arrive in
+  // unscheduledObligations), but now with the month's real inflow/outflow.
+  //
+  // Old behaviour: subtracted $17,421 of bills against ZERO revenue and reported
+  // projected cash of -$1,663, capping marketing at nothing. A store that
+  // collects ~$77k/month is not actually $1,663 in the hole every month.
   const r = computeAvailableOperatingCash({
-    cashOnHand: 15_758,
+    cashOnHand: 18_845,
     minCashReserve: 15_000,
     receivables: [],
     obligationsDue: 0,
@@ -122,9 +131,15 @@ console.log('\nAvailable operating cash')
     monthlyDebtService: 817,
     payrollDue: 10_393,
     payrollBasis: 'test',
+    // Complete-month averages from bank history: roughly break-even to modestly
+    // positive month to month.
+    expectedInflow: 56_000,
+    inflowBasis: 'test',
+    expectedOutflow: 54_150,
+    outflowBasis: 'test',
   })
   ok(
-    'undated recurring bills are still deducted',
+    'undated recurring bills are still surfaced for reference',
     r.deductions.some((d) => d.amount === 6_211),
     JSON.stringify(r.deductions.map((d) => `${d.label}=${d.amount}`)),
   )
@@ -132,16 +147,16 @@ console.log('\nAvailable operating cash')
     'the undated bills are named so the owner can fix the dates',
     r.deductions.some((d) => d.basis.includes('Rent') && d.basis.includes('Electric')),
   )
-  check('deductions total includes the undated bills', r.totalDeductions, 17_421)
-  // 15,758 - 17,421 = -1,663. Previously this reported +$4,548 of cash.
-  check('projected cash is negative once real bills count', r.projectedCash, -1_663)
+  // 18,845 + 56,000 - 54,150 = 20,695
+  check('projected cash reflects a real, roughly break-even month', r.projectedCash, 20_695)
   ok(
-    'no marketing headroom is invented',
-    r.availableOperatingCash < 0,
+    'a profitable business is no longer reported as underwater',
+    r.availableOperatingCash > 0,
     `available ${r.availableOperatingCash}`,
   )
 }
 {
+  // Genuinely tight month: low cash, and costs outrun the money coming in.
   const r = computeAvailableOperatingCash({
     cashOnHand: 10_000,
     minCashReserve: 20_000,
@@ -151,9 +166,14 @@ console.log('\nAvailable operating cash')
     monthlyDebtService: 0,
     payrollDue: 0,
     payrollBasis: 'test',
+    expectedInflow: 40_000,
+    inflowBasis: 'test',
+    expectedOutflow: 45_000,
+    outflowBasis: 'test',
   })
+  // 10,000 + 40,000 - 45,000 = 5,000; 5,000 - 20,000 reserve = -15,000
   ok(
-    'a reserve breach reports negative headroom rather than zero',
+    'a reserve breach still reports negative headroom, not zero',
     r.availableOperatingCash === -15_000,
     `got ${r.availableOperatingCash}`,
   )

@@ -103,13 +103,15 @@ export function MarketingVerdict({
               {formatCurrency(currentMonthly)}
               <span className="ml-1 font-sans text-xs font-normal text-muted-foreground">/mo</span>
             </p>
-            {/* "Spending now" implied this was everything the owner spends. It is
-                a 3-month average of rows CATEGORIZED as marketing, which reads as
-                absurdly low when ad spend is filed under a blank category. */}
+            {/* This is the long-run typical monthly rate from the bank (total
+                marketing over the months it spans), not a trailing window — a
+                trailing 3-month average collapsed toward zero whenever the bank
+                feed lagged. It still only counts rows CATEGORIZED as marketing,
+                so it reads low when ad spend sits under a blank category. */}
             <p className="mt-1 text-xs text-muted-foreground">
               {understated
-                ? '3-month average — understated, see below'
-                : 'Average of the last 3 months'}
+                ? 'Typical month so far — understated, see below'
+                : 'Typical month, from your bank history'}
             </p>
           </div>
           <div className="min-w-0">

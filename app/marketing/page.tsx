@@ -52,7 +52,7 @@ export default async function MarketingPage() {
         recommendation={data.recommendation}
         score={data.score}
         recommended={data.budget.recommended}
-        currentMonthly={data.spend.avg3Month}
+        currentMonthly={data.spend.typicalMonthly}
         understated={data.uncategorizedMarketing.channels.length > 0}
         targetMonthLabel={metrics.targetMonthLabel}
       />

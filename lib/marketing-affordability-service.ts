@@ -285,6 +285,9 @@ const MARKETING_PATTERNS: { test: RegExp; channel: string; confident: boolean }[
     confident: true,
   },
   { test: /GOOGLE\s*ADS|ADWORDS/, channel: 'Google Ads', confident: true },
+  // TikTok bills as `TIKTOK PROMOTE ...` / `TIKTOK ADS`. Confident: the only
+  // TikTok charges a store like this sees are paid promotion.
+  { test: /TIKTOK|TIK TOK/, channel: 'TikTok Ads', confident: true },
   {
     test: /MAILCHIMP|KLAVIYO|CONSTANT CONTACT|SENDGRID/,
     channel: 'Email marketing',
