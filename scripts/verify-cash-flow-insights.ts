@@ -349,9 +349,9 @@ eq(
   )
   // The whole point is to explain the number the owner disputes.
   eq(
-    insight?.detail.includes('$16/mo is understated'),
-    true,
-    'marketing: the understated figure is named so the gap is explained',
+  insight?.detail.includes('$16/mo of marketing the bank feed can see is understated'),
+  true,
+  'marketing: the understated figure is named so the gap is explained',
   )
   // Regression: quoting the $800 commitment here pointed at a number the owner
   // never questioned and made the sentence read as wrong.
@@ -402,6 +402,45 @@ eq(
     (i) => i.id === 'auto-marketing-lapsed',
   )
   eq(insight?.severity, 'warning', 'marketing: lapsed channels warn')
+  // Regression: the owner asked why the app "thinks" he spends $16/mo when he
+  // has an $800/mo Marketing obligation on file. The bank-visible average must
+  // never be presented as the budget when a real obligation exists.
+  {
+    const withCommitment = generateInsights({
+      settings,
+      pillars,
+      marketing: {
+        ...lapsed,
+        commitmentMismatch: { committed: 800, actual: 16, note: '' },
+      },
+    }).find((i) => i.id === 'auto-marketing-lapsed')
+    eq(
+      withCommitment?.detail.includes('That is measured spend, not your budget'),
+      true,
+      'marketing: the bank average is not called a budget',
+    )
+    eq(
+      withCommitment?.detail.includes('$800/mo of marketing obligations on file'),
+      true,
+      'marketing: the obligation the owner recorded is named',
+    )
+    eq(
+      withCommitment?.detail.includes('not on $16'),
+      true,
+      'marketing: the advice is stated to rest on $800, not $16',
+    )
+  }
+  // With nothing on file, the fix is to tell them where to record it.
+  eq(
+    insight?.detail.includes('Record what you actually pay each month'),
+    true,
+    'marketing: with no obligation on file, the owner is told where to enter it',
+  )
+  eq(
+    insight?.detail.includes('only what the bank feed can see, so it is not a budget'),
+    true,
+    'marketing: the measured figure is still never called a budget',
+  )
   eq(
     insight?.title,
     '2 marketing channels stopped appearing in the bank feed',

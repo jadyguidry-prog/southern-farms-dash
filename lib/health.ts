@@ -1035,7 +1035,16 @@ export function generateInsights({
             (l) =>
               `${l.channel} last billed ${l.lastDate} (${l.monthsSinceLastCharge} months ago, averaging ${formatCurrency(l.typicalMonthly)} in the months it did bill)`,
           )
-          .join('; ')}. If you are still paying any of these, the money is leaving by a route the bank export cannot attribute — usually a check — so it is missing from the ${formatCurrency(marketing.categorizedMonthly)}/mo figure and from the budget below. How much is missing cannot be measured from this data: those averages cover different periods and must not be added together. Confirm which channels are still running before trusting this recommendation.`,
+          .join(
+            '; ',
+          )}. If you are still paying any of these, the money is leaving by a route the bank export cannot attribute — usually a check — so it is missing from the ${formatCurrency(marketing.categorizedMonthly)}/mo the bank feed shows. ${
+          // Naming the obligation the owner already recorded is the difference
+          // between "the app thinks I spend $16" and "the bank can only see $16
+          // of my $800". Without it this insight implies the $16 is the budget.
+          marketing.commitmentMismatch
+            ? `That is measured spend, not your budget: you have ${formatCurrency(marketing.commitmentMismatch.committed)}/mo of marketing obligations on file, and the recommendation below is built on that figure, not on ${formatCurrency(marketing.categorizedMonthly)}.`
+            : `That figure is only what the bank feed can see, so it is not a budget. Record what you actually pay each month as a marketing obligation on the Cash Obligations page and the recommendation below will use it instead.`
+        } How much is missing cannot be measured from this data: those averages cover different periods and must not be added together. Confirm which channels are still running before trusting this recommendation.`,
         impact: 'Marketing baseline understated',
       })
     }
@@ -1048,7 +1057,7 @@ export function generateInsights({
         severity: 'warning',
         category: 'Marketing',
         title: `${formatCurrency(marketing.uncategorized.impliedMonthly)}/mo of advertising is not categorized as marketing`,
-        detail: `${formatCurrency(marketing.uncategorized.total)} of charges that look like advertising (${marketing.uncategorized.topChannels.join(', ')}) are filed under a blank category, so reported marketing spend of ${formatCurrency(marketing.categorizedMonthly)}/mo is understated. Set their category to Marketing on the Transactions page — until then, treat the marketing budget above as provisional.`,
+        detail: `${formatCurrency(marketing.uncategorized.total)} of charges that look like advertising (${marketing.uncategorized.topChannels.join(', ')}) are filed under a blank category, so the ${formatCurrency(marketing.categorizedMonthly)}/mo of marketing the bank feed can see is understated${marketing.commitmentMismatch ? ` against the ${formatCurrency(marketing.commitmentMismatch.committed)}/mo you have on file` : ''}. Set their category to Marketing on the Transactions page — until then, treat the marketing budget above as provisional.`,
         impact: 'Understates marketing spend',
       })
     }
