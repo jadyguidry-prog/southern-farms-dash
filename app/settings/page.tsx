@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { FinancialTargetsForm } from '@/components/settings/financial-targets-form'
 import { SquareIntegrationPanel } from '@/components/settings/square-integration-panel'
+import { PlaidIntegrationPanel } from '@/components/settings/plaid-integration-panel'
 import { getBusinessSettings } from '@/lib/queries'
 import { getSquareConfigState } from '@/lib/square-client'
 import { getSyncState, getSquareDataCounts } from '@/lib/square-sync'
@@ -19,6 +20,12 @@ import {
   syncNowAction,
   rebuildRollupAction,
 } from './square-actions'
+import {
+  getPlaidOverview,
+  savePlaidAccountMapping,
+  runPlaidSync,
+  disconnectPlaidItem,
+} from './plaid-actions'
 
 const alertToggles = [
   { id: 'cash', label: 'Low cash forecast alerts', desc: 'Warn when projected balance nears the minimum buffer', on: true },
@@ -29,10 +36,11 @@ const alertToggles = [
 
 export default async function SettingsPage() {
   const squareConfig = getSquareConfigState()
-  const [settings, syncState, counts] = await Promise.all([
+  const [settings, syncState, counts, plaidOverview] = await Promise.all([
     getBusinessSettings(),
     getSyncState(),
     getSquareDataCounts(),
+    getPlaidOverview(),
   ])
 
   return (
