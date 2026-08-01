@@ -38,7 +38,7 @@ export type PlaidSyncResult = {
   removed: number
   skippedBeforeCutover: number
   skippedUnmapped: number
-  status: 'ok' | 'error' | 'skipped'
+  status: 'ok' | 'error' | 'skipped' | 'pending'
   message?: string
   needsReauth?: boolean
 }
@@ -187,6 +187,15 @@ export async function syncItem(
     let pages = 0
     const MAX_PAGES = 60
 
+    // A freshly connected Item has no transactions prepared yet. Plaid signals
+    // this by returning empty added/modified/removed AND an empty next_cursor.
+    // Verified in Sandbox: the first call returns 0 rows, then ~3s later 16 rows.
+    // Without this wait the owner clicks "Sync now", sees "0 transactions", and
+    // reasonably concludes the integration is broken.
+    let notReadyWaits = 0
+    const MAX_NOT_READY_WAITS = 5
+    const NOT_READY_DELAY_MS = 3000
+
     while (hasMore && pages < MAX_PAGES) {
       pages += 1
 
@@ -196,6 +205,33 @@ export async function syncItem(
         count: 500,
       })
       const data = response.data
+
+      const nothingReturned =
+        (data.added ?? []).length === 0 &&
+        (data.modified ?? []).length === 0 &&
+        (data.removed ?? []).length === 0
+
+      // Plaid returns "" for next_cursor while an Item is still initialising.
+      const cursorIsEmpty = !data.next_cursor
+
+      if (nothingReturned && cursorIsEmpty && !data.has_more) {
+        if (notReadyWaits < MAX_NOT_READY_WAITS) {
+          notReadyWaits += 1
+          pages -= 1 // a wait is not a real page
+          await new Promise((r) => setTimeout(r, NOT_READY_DELAY_MS))
+          continue
+        }
+        // Still not ready after waiting. Leave the stored cursor untouched and
+        // report honestly rather than claiming a successful empty sync.
+        result.status = 'pending'
+        result.message =
+          'The bank is still preparing this account. Nothing was imported yet - run Sync again in a minute.'
+        await recordState(db, item.item_id, {
+          status: 'pending',
+          last_error: result.message,
+        })
+        return result
+      }
 
       const added = collect(data.added ?? [], mappings, result)
       const modified = collect(data.modified ?? [], mappings, result)
@@ -209,12 +245,17 @@ export async function syncItem(
       // Persist the cursor only after this page's rows are committed. If the run
       // dies mid-way, the next run re-fetches this page rather than skipping it,
       // and the upsert makes the retry harmless.
-      cursor = data.next_cursor
+      //
+      // Never overwrite a good cursor with an empty one: that would silently reset
+      // the Item to "fetch everything from scratch" on the next run.
       hasMore = data.has_more
-      await db
-        .from('plaid_items')
-        .update({ cursor, updated_at: new Date().toISOString() })
-        .eq('item_id', item.item_id)
+      if (data.next_cursor) {
+        cursor = data.next_cursor
+        await db
+          .from('plaid_items')
+          .update({ cursor, updated_at: new Date().toISOString() })
+          .eq('item_id', item.item_id)
+      }
     }
 
     if (hasMore) {
