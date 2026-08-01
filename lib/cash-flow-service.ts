@@ -545,6 +545,33 @@ async function fetchApprovedAliasMap(): Promise<CategoryAliasMap> {
   )
 }
 
+/**
+ * First day of the most recent complete month — the start of "the present".
+ *
+ * Data-quality warnings are only actionable for recent activity. Measured across
+ * all history they are dominated by an old, permanently unfixable backlog (~200
+ * `CHECK ####` lines from 2025 that name no payee on the statement at all), so a
+ * six-figure headline never falls no matter how diligent the owner is. Scoping to
+ * last month onward keeps the number responsive to work actually done.
+ *
+ * `today` is `YYYY-MM-DD`. On 2026-08-01 this returns 2026-07-01.
+ */
+export function presentWindowStart(today: string): string {
+  const year = Number(today.slice(0, 4))
+  const month = Number(today.slice(5, 7))
+  const prevYear = month === 1 ? year - 1 : year
+  const prevMonth = month === 1 ? 12 : month - 1
+  return `${prevYear}-${String(prevMonth).padStart(2, '0')}-01`
+}
+
+/** Spend that needs attention but sits before the present window. */
+export type HistoricalBacklog = {
+  unidentifiedAmount: number
+  unidentifiedCount: number
+  uncategorizedAmount: number
+  uncategorizedCount: number
+}
+
 export type CashFlowInsight = {
   monthly: MonthlyCashFlowResult
   outflows: OutflowsByPayee
@@ -552,6 +579,18 @@ export type CashFlowInsight = {
   transactionCount: number
   /** Earliest and latest dates covered, so the page can state its own range. */
   dateRange: { from: string; to: string } | null
+  /**
+   * The same summaries restricted to last month onward. Warnings read from here
+   * so they stay actionable; the charts keep using the full-history versions
+   * above so no data disappears from view.
+   */
+  present: {
+    windowStart: string
+    outflows: OutflowsByPayee
+    spendByCategory: SpendByCategory
+  }
+  /** Older gaps, reported quietly rather than as a headline. */
+  historicalBacklog: HistoricalBacklog
 }
 
 /**
@@ -560,7 +599,7 @@ export type CashFlowInsight = {
  * the page can show an honest empty state instead of an error.
  */
 export async function getCashFlowInsight(
-  options: { months?: number } = {},
+  options: { months?: number; today?: string } = {},
 ): Promise<CashFlowInsight> {
   const [rows, vendorCategories, approvedAliases] = await Promise.all([
     fetchAllTransactions(),
@@ -572,6 +611,21 @@ export async function getCashFlowInsight(
     .map((r) => r.transactionDate)
     .filter((d) => /^\d{4}-\d{2}-\d{2}/.test(d))
     .sort()
+
+  const today = options.today ?? new Date().toISOString().slice(0, 10)
+  const windowStart = presentWindowStart(today)
+
+  // Same summarizers, narrower input — so "present" and full-history figures can
+  // never drift apart through duplicated logic.
+  const recent = rows.filter((r) => r.transactionDate.slice(0, 10) >= windowStart)
+  const older = rows.filter((r) => r.transactionDate.slice(0, 10) < windowStart)
+
+  const olderOutflows = summarizeOutflowsByPayee(older)
+  const olderSpend = summarizeSpendByCategory(
+    older,
+    vendorCategories,
+    approvedAliases,
+  )
 
   return {
     monthly: deriveMonthlyCashFlow(rows, options),
@@ -586,5 +640,20 @@ export async function getCashFlowInsight(
       dates.length > 0
         ? { from: dates[0].slice(0, 10), to: dates[dates.length - 1].slice(0, 10) }
         : null,
+    present: {
+      windowStart,
+      outflows: summarizeOutflowsByPayee(recent),
+      spendByCategory: summarizeSpendByCategory(
+        recent,
+        vendorCategories,
+        approvedAliases,
+      ),
+    },
+    historicalBacklog: {
+      unidentifiedAmount: olderOutflows.unidentified.amount,
+      unidentifiedCount: olderOutflows.unidentified.count,
+      uncategorizedAmount: olderSpend.uncategorizedSpend,
+      uncategorizedCount: olderSpend.categories.find((c) => c.category === UNCATEGORIZED)?.count ?? 0,
+    },
   }
 }

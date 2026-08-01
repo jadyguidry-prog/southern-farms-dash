@@ -121,6 +121,23 @@ function isMeaningfulToken(token: string): boolean {
 }
 
 /**
+ * Bank abbreviations of one concept, folded to a single spelling.
+ *
+ * Statements shorten the same Square payroll debit inconsistently — `PAYROLL` on
+ * some lines, `PAYR`/`PAYRL` on others — which split one vendor into two rows in
+ * "Where the Money Went" ($39,301 over 54 payments beside $34,018 over 27) and
+ * made the same payroll look like two unrelated obligations.
+ */
+const TOKEN_SYNONYMS = new Map<string, string>([
+  ['PAYR', 'PAYROLL'],
+  ['PAYRL', 'PAYROLL'],
+  ['PAYRO', 'PAYROLL'],
+  ['PYRL', 'PAYROLL'],
+])
+
+const canonicalToken = (token: string) => TOKEN_SYNONYMS.get(token) ?? token
+
+/**
  * Derive the grouping key for a statement line.
  *
  * For generic lines the key is the matching generic prefix, so every `CHECK
@@ -144,7 +161,7 @@ export function payeeKeyOf(normalized: string): string {
   let start = 0
   while (start < tokens.length - 1 && LEAD_NOISE.has(tokens[start])) start += 1
 
-  const rest = tokens.slice(start)
+  const rest = tokens.slice(start).map(canonicalToken)
   const withoutRefs = rest.filter(
     (t) => !/^\d+$/.test(t) && !isReferenceToken(t),
   )
@@ -153,7 +170,9 @@ export function payeeKeyOf(normalized: string): string {
   // survives. When it doesn't, the code was the sole distinguishing content, so
   // we keep the raw tokens rather than collapse unrelated activity together.
   const significant = withoutRefs.some(isMeaningfulToken)
-    ? withoutRefs
+    ? // Company-form words are dropped only once a real name survives, so the key
+      // reads "PAYROLL" rather than "INC PAYROLL".
+      withoutRefs.filter(isMeaningfulToken)
     : rest.filter((t) => !/^\d+$/.test(t))
 
   const key = (significant.length > 0 ? significant : rest).slice(0, 3).join(' ')
@@ -271,9 +290,18 @@ export function buildPayeeGroups(rows: GroupInputRow[]): PayeeGroup[] {
       }
     }
 
+    // Label from the most common description ONLY when it actually recurs. When
+    // every row carries a unique reference code ("SQUARE INC PAYROLL T325C9J1...")
+    // the winner is an arbitrary single row, which named a 54-payment group after
+    // one payment. In that case the derived key is the honest label.
+    const descriptions = list.map((r) => r.normalizedDescription)
+    const label = mostCommon(descriptions)
+    const labelRecurs =
+      descriptions.filter((d) => d === label).length > 1 || list.length === 1
+
     groups.push({
       key,
-      payee: mostCommon(list.map((r) => r.normalizedDescription)) || key,
+      payee: (labelRecurs ? label : '') || key,
       generic: isGenericDescription(list[0].normalizedDescription),
       transactionIds: list.map((r) => r.id),
       count: list.length,
