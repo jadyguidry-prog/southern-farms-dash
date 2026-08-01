@@ -35,12 +35,17 @@ export function AffordabilityBreakdown({
           },
         ]
       : []),
-    ...cash.deductions.map((d) => ({
-      label: d.label,
-      amount: -d.amount,
-      basis: d.basis,
+    {
+      label: 'Sales you typically collect this month',
+      amount: cash.expectedInflow,
+      basis: cash.inflowBasis,
+    },
+    {
+      label: 'Costs you typically pay this month',
+      amount: -cash.expectedOutflow,
+      basis: cash.outflowBasis,
       negative: true,
-    })),
+    },
   ]
 
   return (
@@ -49,7 +54,8 @@ export function AffordabilityBreakdown({
         <CardHeader className="p-6 pb-0">
           <CardTitle>What is actually available</CardTitle>
           <CardDescription className="text-pretty">
-            Every figure below comes from your own records. Nothing is estimated.
+            Cash and invoices are exact. A typical month&apos;s sales and costs are averaged from
+            your own bank history — the same numbers you can trace below.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-0 p-6">
@@ -105,6 +111,31 @@ export function AffordabilityBreakdown({
               {formatCurrency(cash.availableOperatingCash)}
             </p>
           </div>
+
+          {cash.deductions.length > 0 && (
+            <div className="mt-4 flex flex-col gap-2 rounded-lg border border-border bg-muted/40 p-4">
+              <p className="text-sm font-semibold text-foreground text-pretty">
+                The big pieces inside those monthly costs
+              </p>
+              <ul className="flex flex-col gap-1.5">
+                {cash.deductions.map((d) => (
+                  <li
+                    key={d.label}
+                    className="flex items-start justify-between gap-4 text-sm text-foreground"
+                  >
+                    <span className="min-w-0">{d.label}</span>
+                    <span className="shrink-0 font-mono font-semibold">
+                      {formatCurrency(d.amount)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="text-xs leading-relaxed text-muted-foreground text-pretty">
+                These are already part of the typical costs above — shown here so you can see what
+                is on file, not subtracted a second time.
+              </p>
+            </div>
+          )}
 
           {cash.excludedReceivables.length > 0 && (
             <div className="mt-4 flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">

@@ -66,6 +66,20 @@ export type CurrentMarketingSpend = {
   /** Mean monthly spend across the last 3 / 12 calendar months. */
   avg3Month: number
   avg12Month: number
+  /**
+   * The headline "what you typically spend" figure: total marketing divided by
+   * the calendar months from the first charge to the last, gaps included.
+   *
+   * Unlike the trailing-window averages, this is anchored on the data itself, not
+   * on today's date. When the bank feed lags (recent months empty), a trailing
+   * 3-month average collapses toward zero — that is the "$16/month" bug — while
+   * this keeps reporting the real long-run rate.
+   */
+  typicalMonthly: number
+  /** Calendar months from first to last marketing charge, inclusive. */
+  activeMonthsSpanned: number
+  /** Whole calendar months since the most recent marketing charge. */
+  monthsSinceLastSpend: number | null
   /** Total across the trailing 12 calendar months. */
   annualTotal: number
   /** Total across every row ever recorded. */
@@ -385,6 +399,34 @@ export function summarizeCurrentMarketingSpend(
   const annualTotal = windowSum(12)
   const latestWithSpend = [...monthly].reverse().find((m) => m.amount !== 0) ?? null
 
+  // Stale-proof "typical monthly": total spread over the calendar months the
+  // charges actually span, first to last inclusive. Anchored on the data, so a
+  // lagging bank feed cannot drag it toward zero the way trailing windows do.
+  const activeKeys = monthly.filter((m) => m.amount !== 0).map((m) => m.monthKey)
+  const firstActive = activeKeys[0] ?? null
+  const lastActive = activeKeys[activeKeys.length - 1] ?? null
+  let activeMonthsSpanned = 0
+  if (firstActive && lastActive) {
+    let cursor = firstActive
+    activeMonthsSpanned = 1
+    while (cursor < lastActive && activeMonthsSpanned < 600) {
+      cursor = addMonths(cursor, 1)
+      activeMonthsSpanned += 1
+    }
+  }
+  const lifetimeTotal = matched.reduce((s, r) => s + r.amount, 0)
+  const typicalMonthly = activeMonthsSpanned > 0 ? lifetimeTotal / activeMonthsSpanned : 0
+
+  let monthsSinceLastSpend: number | null = null
+  if (lastActive) {
+    let cursor = lastActive
+    monthsSinceLastSpend = 0
+    while (cursor < thisMonthKey && monthsSinceLastSpend < 600) {
+      cursor = addMonths(cursor, 1)
+      monthsSinceLastSpend += 1
+    }
+  }
+
   const channelMap = new Map<string, { amount: number; count: number }>()
   for (const r of matched) {
     const name = marketingChannelName(r.description)
@@ -399,8 +441,11 @@ export function summarizeCurrentMarketingSpend(
     currentMonthKey: latestWithSpend?.monthKey ?? null,
     avg3Month: windowSum(3) / 3,
     avg12Month: annualTotal / 12,
+    typicalMonthly,
+    activeMonthsSpanned,
+    monthsSinceLastSpend,
     annualTotal,
-    lifetimeTotal: matched.reduce((s, r) => s + r.amount, 0),
+    lifetimeTotal,
     rows: matched.sort((a, b) => b.date.localeCompare(a.date)),
     monthly,
     channels: [...channelMap]
@@ -521,9 +566,30 @@ export type AvailableOperatingCash = {
   minCashReserve: number
   /** Receivables genuinely expected to land, placeholders removed. */
   expectedReceivables: number
+  /**
+   * Sales the business typically collects in a month, from complete months of
+   * history. This is the line that was missing entirely: the old projection
+   * subtracted a month of costs while adding none of the money that comes in,
+   * which for a store doing ~$77k/month is nonsensical.
+   */
+  expectedInflow: number
+  inflowBasis: string
+  /**
+   * Everything that typically leaves the bank in a month — payroll, inventory,
+   * rent, loans, all of it — averaged over complete months. Using the true total
+   * outflow (rather than the short list of bills that happen to be on file) is
+   * what keeps this honest: the bills table only ever captured a fraction.
+   */
+  expectedOutflow: number
+  outflowBasis: string
+  /**
+   * Identifiable obligations that make up PART of `expectedOutflow`, listed for
+   * reference so the owner can see the big pieces. These are NOT subtracted
+   * again — they are already inside the outflow total.
+   */
   deductions: CashDeduction[]
   totalDeductions: number
-  /** Cash projected to remain once every known obligation is met. */
+  /** Cash projected to remain at month end: cash + receivables + inflow − outflow. */
   projectedCash: number
   /** Projected cash minus the reserve. Negative means the reserve is breached. */
   availableOperatingCash: number
@@ -582,6 +648,12 @@ export function computeAvailableOperatingCash(input: {
   monthlyDebtService: number
   payrollDue: number
   payrollBasis: string
+  /** Typical monthly money in, from complete months of history. */
+  expectedInflow: number
+  inflowBasis: string
+  /** Typical monthly money out, from complete months of history. */
+  expectedOutflow: number
+  outflowBasis: string
 }): AvailableOperatingCash {
   const excludedReceivables: AvailableOperatingCash['excludedReceivables'] = []
   let expectedReceivables = 0
@@ -629,12 +701,25 @@ export function computeAvailableOperatingCash(input: {
   ].filter((d) => d.amount > 0)
 
   const totalDeductions = deductions.reduce((s, d) => s + d.amount, 0)
-  const projectedCash = input.cashOnHand + expectedReceivables - totalDeductions
+
+  // Project month-end cash the way cash actually moves: start with what's in the
+  // bank, add what you're owed and what you typically collect, subtract what you
+  // typically pay. The previous version omitted `expectedInflow` altogether, so a
+  // profitable business looked like it was bleeding out every month.
+  const projectedCash =
+    input.cashOnHand +
+    expectedReceivables +
+    input.expectedInflow -
+    input.expectedOutflow
 
   return {
     cashOnHand: input.cashOnHand,
     minCashReserve: input.minCashReserve,
     expectedReceivables,
+    expectedInflow: input.expectedInflow,
+    inflowBasis: input.inflowBasis,
+    expectedOutflow: input.expectedOutflow,
+    outflowBasis: input.outflowBasis,
     deductions,
     totalDeductions,
     projectedCash,
@@ -1320,16 +1405,16 @@ export function buildRecommendation(input: {
       : `Payroll is above target at ${input.payrollPct.toFixed(1)}% of revenue.`,
   )
 
-  // Report every recurring bill counted, dated or not. Quoting only the dated
-  // ones read as "$0 of obligations" while $6,211 of rent and utilities were
-  // being subtracted behind the scenes.
+  // Report the recurring bills on file, dated or not, as context. They are part
+  // of the typical monthly costs already reflected in the cash projection — no
+  // longer a separate subtraction, so the wording says "on file", not "counted".
   const totalObligations = input.obligationsDue + (input.unscheduledObligations ?? 0)
   if (totalObligations > 0) {
     const undated = input.unscheduledObligations ?? 0
     reasons.push(
       undated > 0
-        ? `${formatMoney(totalObligations)} of recurring bills are counted, including ${formatMoney(undated)} with no due date recorded.`
-        : `${formatMoney(totalObligations)} of recurring obligations are due.`,
+        ? `${formatMoney(totalObligations)} of recurring bills are on file, including ${formatMoney(undated)} with no due date recorded.`
+        : `${formatMoney(totalObligations)} of recurring bills are on file.`,
     )
   }
 
@@ -1676,6 +1761,30 @@ export async function getMarketingAffordability(
       ? `Average of the last ${payrollMonths.length} month${payrollMonths.length === 1 ? '' : 's'} with payroll activity (${payrollMonths.map(([k]) => monthLabel(k)).join(', ')})`
       : 'No payroll transactions found'
 
+  // ---- Derived cash metrics ----
+  // Computed before the cash position because the projection now depends on
+  // them: a month's expected money-in and money-out are the whole point.
+  const completeMonths = monthly.series.filter((m) => m.complete)
+  const avgMonthlyInflow =
+    completeMonths.length > 0
+      ? completeMonths.reduce((s, m) => s + m.inflow, 0) / completeMonths.length
+      : 0
+  const avgMonthlyOutflow =
+    completeMonths.length > 0
+      ? completeMonths.reduce((s, m) => s + m.outflow, 0) / completeMonths.length
+      : 0
+  const netMonthlyCashFlow =
+    completeMonths.length > 0
+      ? completeMonths.reduce((s, m) => s + m.net, 0) / completeMonths.length
+      : 0
+  const avgDailyOutflow = avgMonthlyOutflow / DAYS_PER_MONTH
+
+  const completeMonthLabels = completeMonths.map((m) => monthLabel(m.monthKey))
+  const cashHistoryBasis =
+    completeMonths.length > 0
+      ? `Averaged over ${completeMonths.length} complete month${completeMonths.length === 1 ? '' : 's'} of bank history`
+      : 'No complete months of bank history yet'
+
   // ---- Cash position ----
   const cashResult = computeAvailableOperatingCash({
     cashOnHand: cash.cashOnHand,
@@ -1688,19 +1797,11 @@ export async function getMarketingAffordability(
     monthlyDebtService: cash.monthlyDebtService,
     payrollDue: payrollMonthly,
     payrollBasis,
+    expectedInflow: avgMonthlyInflow,
+    inflowBasis: `Sales you typically collect in a month. ${cashHistoryBasis}.`,
+    expectedOutflow: avgMonthlyOutflow,
+    outflowBasis: `Everything that typically leaves the bank in a month — payroll, inventory, bills and loans. ${cashHistoryBasis}.`,
   })
-
-  // ---- Derived cash metrics ----
-  const completeMonths = monthly.series.filter((m) => m.complete)
-  const netMonthlyCashFlow =
-    completeMonths.length > 0
-      ? completeMonths.reduce((s, m) => s + m.net, 0) / completeMonths.length
-      : 0
-  const avgMonthlyOutflow =
-    completeMonths.length > 0
-      ? completeMonths.reduce((s, m) => s + m.outflow, 0) / completeMonths.length
-      : 0
-  const avgDailyOutflow = avgMonthlyOutflow / DAYS_PER_MONTH
   const daysCashOnHand =
     avgDailyOutflow > 0 ? Math.max(0, cashResult.projectedCash) / avgDailyOutflow : 0
 
@@ -1763,10 +1864,11 @@ export async function getMarketingAffordability(
   })
 
   // Which figure represents "what we spend today". The committed obligation is
-  // the number the owner signed up for; trailing actuals are what really left
-  // the bank. Use the larger so a recommendation can never quietly imply a cut
-  // the owner has not agreed to.
-  const currentMonthlyMarketing = Math.max(committedMonthly, spend.avg3Month)
+  // the number the owner signed up for; `typicalMonthly` is the real long-run
+  // rate from the bank (stale-proof, unlike the trailing 3-month average that
+  // produced the "$16/month" figure). Use the larger so a recommendation can
+  // never quietly imply a cut the owner has not agreed to.
+  const currentMonthlyMarketing = Math.max(committedMonthly, spend.typicalMonthly)
 
   const recommendation = buildRecommendation({
     band: score.band,
@@ -1810,16 +1912,16 @@ export async function getMarketingAffordability(
   // Surface a disagreement between the committed line and reality rather than
   // silently picking one. Either the budget is not being spent, or marketing is
   // hiding in the uncategorized pile.
-  const mismatchGap = committedMonthly - spend.avg3Month
+  const mismatchGap = committedMonthly - spend.typicalMonthly
   const commitmentMismatch =
     committedMonthly > 0 && Math.abs(mismatchGap) > Math.max(50, committedMonthly * 0.25)
       ? {
           committed: committedMonthly,
-          actual: roundCents(spend.avg3Month),
+          actual: roundCents(spend.typicalMonthly),
           note:
             mismatchGap > 0
-              ? `A ${formatMoney(committedMonthly)}/month marketing obligation is on file, but only ${formatMoney(spend.avg3Month)}/month of marketing has actually left the bank over the last 3 months. Either the budget is not being spent, or some marketing is still sitting in the uncategorized transactions.`
-              : `Actual marketing spend of ${formatMoney(spend.avg3Month)}/month is running above the ${formatMoney(committedMonthly)}/month obligation on file.`,
+              ? `A ${formatMoney(committedMonthly)}/month marketing obligation is on file, but marketing has averaged ${formatMoney(spend.typicalMonthly)}/month in the bank. Either the budget is not being spent, or some marketing is still sitting in the uncategorized transactions.`
+              : `Actual marketing spend of ${formatMoney(spend.typicalMonthly)}/month is running above the ${formatMoney(committedMonthly)}/month obligation on file.`,
         }
       : null
 
