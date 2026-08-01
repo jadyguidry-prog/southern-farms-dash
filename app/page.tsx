@@ -94,6 +94,30 @@ export default async function DashboardPage() {
   const payrollPct = kpi(kpis, 'payrollPct')
   const grossProfitPct = kpi(kpis, 'grossProfitPct')
 
+  // Monthly sales provenance. The Square feed usually lags the calendar by a few
+  // days, so the card names the month and says how far through it the figure
+  // runs — otherwise a part-month total reads as a full month that fell short.
+  const monthlySalesThrough = String(monthlySales.meta.throughDate ?? '')
+  const monthlySalesComplete = Number(monthlySales.meta.monthComplete ?? 0) === 1
+  const monthlySalesMonthLabel = monthlySalesThrough
+    ? new Date(`${monthlySalesThrough}T00:00:00Z`).toLocaleDateString('en-US', {
+        month: 'short',
+        year: '2-digit',
+        timeZone: 'UTC',
+      })
+    : null
+  const monthlySalesHint = monthlySalesThrough
+    ? monthlySalesComplete
+      ? `Full month · ${monthlySales.meta.transactionCount ?? 0} transactions`
+      : `Month to date through ${new Date(
+          `${monthlySalesThrough}T00:00:00Z`,
+        ).toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          timeZone: 'UTC',
+        })} · ${monthlySales.meta.daysCovered ?? 0} days of sales`
+    : undefined
+
   const locTotal = lineOfCredit.value
   const locUsed = Number(lineOfCredit.meta.used ?? 0)
   const locAvailable = Number(lineOfCredit.meta.available ?? Math.max(locTotal - locUsed, 0))
@@ -139,12 +163,19 @@ export default async function DashboardPage() {
           hint={`${pillars.sales.label} · goal ${formatCurrency(settings.preferred_weekly_sales)} · floor ${formatCurrency(settings.minimum_weekly_sales)}`}
         />
         <StatCard
-          label="Monthly Sales"
+          label={
+            monthlySalesMonthLabel
+              ? `Monthly Sales — ${monthlySalesMonthLabel}`
+              : 'Monthly Sales'
+          }
           value={formatCurrency(monthlySales.value)}
           icon={CalendarDays}
           change={monthlySales.change ?? undefined}
           trend={asTrend(monthlySales.trend)}
-          changeLabel="vs prior month"
+          changeLabel={
+            monthlySalesComplete ? 'vs prior month' : 'vs prior month, same period'
+          }
+          hint={monthlySalesHint}
         />
         <StatCard
           label="Accounts Receivable"

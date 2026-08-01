@@ -14,6 +14,7 @@ import {
 import {
   getSquareDailySales,
   computeWeeklySales,
+  computeMonthlySales,
   summarizeDailyRows,
 } from '@/lib/square-sales-service'
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
@@ -792,6 +793,9 @@ export async function getHealthSnapshot() {
   // `weeklySales` KPI was never populated, so without this the sales pillar sat
   // permanently at "unknown".
   const squareWeekly = computeWeeklySales(squareDaily.rows)
+  // Same story for the monthly card: `monthlySales` was never populated either,
+  // so the dashboard showed $0 while the Sales page showed real Square figures.
+  const squareMonthly = computeMonthlySales(squareDaily.rows)
   const squareSummary = summarizeDailyRows(
     squareDaily.rows,
     squareDaily.conflictDays,
@@ -843,6 +847,26 @@ export async function getHealthSnapshot() {
     squareWeekly.netSales != null && squareWeekly.netSales > 0
       ? squareWeekly.netSales
       : storedWeeklySales
+
+  // Monthly sales: prefer the measured Square figure, fall back to the stored
+  // KPI. Gross is used rather than net so the card matches what the Sales page
+  // reports for the month and what the owner sees in Square itself.
+  const storedMonthlySales = kpi(kpis, 'monthlySales').value
+  const monthlySalesValue =
+    squareMonthly.grossSales != null && squareMonthly.grossSales > 0
+      ? squareMonthly.grossSales
+      : storedMonthlySales
+
+  // Percent change against the SAME span of the prior month, so a part-finished
+  // month is not reported as a collapse. Null when there is nothing to compare.
+  const monthlyChange =
+    squareMonthly.priorNetSales != null &&
+    squareMonthly.priorNetSales > 0 &&
+    squareMonthly.netSales != null
+      ? ((squareMonthly.netSales - squareMonthly.priorNetSales) /
+          squareMonthly.priorNetSales) *
+        100
+      : null
 
   const pillars = {
     payroll: payrollHealth(payrollValue, settings, payrollValue > 0),
@@ -1012,6 +1036,28 @@ export async function getHealthSnapshot() {
           : {}),
       },
     },
+    monthlySales: {
+      ...kpi(kpis, 'monthlySales'),
+      value: monthlySalesValue,
+      // Overwrite trend/change rather than inheriting them: the stored row's
+      // figures describe a month this value no longer represents.
+      change: monthlyChange,
+      trend: monthlyChange == null ? null : monthlyChange >= 0 ? 'up' : 'down',
+      meta: {
+        ...kpi(kpis, 'monthlySales').meta,
+        ...(squareMonthly.grossSales != null && squareMonthly.grossSales > 0
+          ? {
+              source: 'Square',
+              monthStart: squareMonthly.monthStart ?? '',
+              throughDate: squareMonthly.latestDate ?? '',
+              daysCovered: squareMonthly.daysCovered,
+              monthComplete: squareMonthly.monthComplete ? 1 : 0,
+              netSales: squareMonthly.netSales ?? 0,
+              transactionCount: squareMonthly.transactionCount,
+            }
+          : {}),
+      },
+    },
   }
 
   return {
@@ -1021,7 +1067,10 @@ export async function getHealthSnapshot() {
     pillars,
     composite,
     insights,
-    square: { weekly: squareWeekly, summary: squareSummary },
+    // `monthly` rides alongside `weekly` so the dashboard card, the advisor, and
+    // reporting all quote the same month-to-date figure and the same caveat
+    // about how far through the month it is.
+    square: { weekly: squareWeekly, monthly: squareMonthly, summary: squareSummary },
     // Exposed so the dashboard and reporting render the same cash-flow figures
     // the advisor reasons about.
     cashFlow: cashFlowInsight,

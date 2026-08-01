@@ -329,6 +329,130 @@ export function computeWeeklySales(rows: SquareDailyRow[]): SquareWeeklySales {
   }
 }
 
+export type SquareMonthlySales = {
+  /** Gross sales for the current month, through `latestDate`. */
+  grossSales: number | null
+  /** Net sales for the same window. */
+  netSales: number | null
+  /**
+   * Prior month over the SAME day range (1st through the same day-of-month), so
+   * a half-finished month is never compared against a complete one.
+   */
+  priorNetSales: number | null
+  /** The prior month in full, for context once the current month closes. */
+  priorFullNetSales: number | null
+  transactionCount: number
+  refunds: number
+  /** First day of the month being reported, e.g. `2026-07-01`. */
+  monthStart: string | null
+  /** Latest day Square has data for, so staleness can be reported honestly. */
+  latestDate: string | null
+  /** Days of actual sales data counted in the month (closed days do not count). */
+  daysCovered: number
+  /** True when `latestDate` is the final calendar day of its month. */
+  monthComplete: boolean
+}
+
+/**
+ * Month-to-date Square sales.
+ *
+ * Anchored on the most recent day that has data rather than on today, for the
+ * same reason as `computeWeeklySales`: a lagging sync must not make sales look
+ * like they collapsed.
+ *
+ * The comparison is deliberately like-for-like. Measuring a month that is 27
+ * days in against a complete prior month would report a double-digit "decline"
+ * that is really just the missing days, so the prior month is truncated to the
+ * same day-of-month before the two are compared.
+ */
+export function computeMonthlySales(rows: SquareDailyRow[]): SquareMonthlySales {
+  if (rows.length === 0) {
+    return {
+      grossSales: null,
+      netSales: null,
+      priorNetSales: null,
+      priorFullNetSales: null,
+      transactionCount: 0,
+      refunds: 0,
+      monthStart: null,
+      latestDate: null,
+      daysCovered: 0,
+      monthComplete: false,
+    }
+  }
+
+  // rows are sorted ascending by resolveDailyRows.
+  const latestDate = rows[rows.length - 1].saleDate
+  const year = Number(latestDate.slice(0, 4))
+  const month = Number(latestDate.slice(5, 7)) // 1-12
+  const dayOfMonth = Number(latestDate.slice(8, 10))
+
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const monthStart = `${year}-${pad(month)}-01`
+
+  // Previous calendar month, rolling the year over at January.
+  const pYear = month === 1 ? year - 1 : year
+  const pMonth = month === 1 ? 12 : month - 1
+  const priorStart = `${pYear}-${pad(pMonth)}-01`
+  // Day 0 of the following month is the last day of the month in question.
+  const priorLastDay = new Date(Date.UTC(pYear, pMonth, 0)).getUTCDate()
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  // Clamp: a comparison through Mar 31 has no Feb 31 to match, so use Feb's end.
+  const priorCutoff = `${pYear}-${pad(pMonth)}-${pad(Math.min(dayOfMonth, priorLastDay))}`
+  const priorEnd = `${pYear}-${pad(pMonth)}-${pad(priorLastDay)}`
+
+  let grossSales = 0
+  let netSales = 0
+  let transactionCount = 0
+  let refunds = 0
+  let daysCovered = 0
+  let priorNetSales = 0
+  let priorDays = 0
+  let priorFullNetSales = 0
+  let priorFullDays = 0
+
+  for (const r of rows) {
+    const d = r.saleDate
+    if (d >= monthStart && d <= latestDate) {
+      grossSales += r.grossSales
+      netSales += r.netSales
+      transactionCount += r.transactionCount
+      refunds += r.refunds
+      daysCovered += 1
+    } else if (d >= priorStart && d <= priorEnd) {
+      priorFullNetSales += r.netSales
+      priorFullDays += 1
+      if (d <= priorCutoff) {
+        priorNetSales += r.netSales
+        priorDays += 1
+      }
+    }
+  }
+
+  const round = (n: number) => Math.round(n * 100) / 100
+
+  return {
+    grossSales: round(grossSales),
+    netSales: round(netSales),
+    // Null rather than 0 when the prior month has no data, so the UI does not
+    // show a misleading "+100%" against a month that was never recorded.
+    priorNetSales: priorDays > 0 ? round(priorNetSales) : null,
+    priorFullNetSales: priorFullDays > 0 ? round(priorFullNetSales) : null,
+    transactionCount,
+    refunds: round(refunds),
+    monthStart,
+    latestDate,
+    daysCovered,
+    monthComplete: dayOfMonth >= daysInMonth,
+  }
+}
+
+/** Month-to-date Square sales read straight from the database. */
+export async function getSquareMonthlySales(): Promise<SquareMonthlySales> {
+  const { rows } = await getSquareDailySales()
+  return computeMonthlySales(rows)
+}
+
 /** Trailing-week Square sales read straight from the database. */
 export async function getSquareWeeklySales(): Promise<SquareWeeklySales> {
   const { rows } = await getSquareDailySales()
