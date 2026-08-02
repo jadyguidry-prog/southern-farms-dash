@@ -162,6 +162,81 @@ export async function recordPayment(input: RecordPaymentInput): Promise<ActionRe
 }
 
 /**
+ * Confirm a suggested Plaid/bank match: clear an outstanding check AND stamp the
+ * bank row that cleared it. Separate from clearPayment because this records the
+ * evidence (cleared_transaction_id) and is only ever reached by explicit owner
+ * confirmation of a suggestion — never automatically.
+ */
+export async function confirmClearWithMatch(
+  paymentId: string,
+  transactionId: string,
+): Promise<ActionResult> {
+  if (!paymentId || !transactionId) {
+    return { ok: false, error: 'A payment and a matching transaction are both required.' }
+  }
+
+  const supabase = await createClient()
+  const actor = await currentActor()
+
+  const { data: existing, error: readErr } = await supabase
+    .from('obligation_payments')
+    .select('id, status')
+    .eq('id', paymentId)
+    .maybeSingle()
+  if (readErr) return { ok: false, error: readErr.message }
+  if (!existing) return { ok: false, error: 'That payment no longer exists.' }
+  if (existing.status !== 'outstanding') {
+    return { ok: false, error: 'Only an outstanding check can be cleared.' }
+  }
+
+  // Confirm the bank row is real and read its date, so cleared_date reflects when
+  // it actually hit the account, not when the owner clicked confirm.
+  const { data: txn, error: txnErr } = await supabase
+    .from('financial_transactions')
+    .select('id, transaction_date')
+    .eq('id', transactionId)
+    .is('deleted_at', null)
+    .maybeSingle()
+  if (txnErr) return { ok: false, error: txnErr.message }
+  if (!txn) {
+    return { ok: false, error: 'That bank transaction no longer exists. Refresh the matches.' }
+  }
+
+  const clearedDate = (txn.transaction_date ?? '').slice(0, 10) || null
+  const { error: updErr } = await supabase
+    .from('obligation_payments')
+    .update({
+      status: 'cleared',
+      cleared_date: clearedDate,
+      cleared_transaction_id: transactionId,
+    })
+    .eq('id', paymentId)
+    // Only clear a still-outstanding row, so two confirmations racing can't both win.
+    .eq('status', 'outstanding')
+  if (updErr) {
+    // The unique index on cleared_transaction_id turns a double-match into an
+    // error rather than a silent double-clear — translate it for the owner.
+    if (updErr.code === '23505') {
+      return {
+        ok: false,
+        error: 'That bank transaction was already used to clear another check.',
+      }
+    }
+    return { ok: false, error: updErr.message }
+  }
+
+  await supabase.from('obligation_payment_audit').insert({
+    payment_id: paymentId,
+    action: 'cleared',
+    detail: { clearedDate, source: 'bank_match', transactionId },
+    created_by: actor,
+  })
+
+  revalidateAll()
+  return { ok: true, paymentId }
+}
+
+/**
  * Void a payment. Soft state change, not a delete: the audit row keeps the record
  * that a check was written and then voided (e.g. lost in the mail, reissued).
  */

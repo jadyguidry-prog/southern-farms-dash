@@ -58,6 +58,7 @@ export default async function DashboardPage() {
     labor,
     checks,
     marketing,
+    billPay,
   } =
     snapshot
   // Generated insights lead, followed by anything entered manually.
@@ -86,6 +87,17 @@ export default async function DashboardPage() {
   const latestComplete = cashFlow.monthly.latestCompleteMonth
 
   const cashOnHand = kpi(kpis, 'cashOnHand')
+  // When checks are written but not yet cleared, the bank balance overstates
+  // what can actually be spent. Surface the spendable figure right on the tile
+  // rather than in a separate card, so the two numbers are never read apart.
+  // Derived from the tile's own cashOnHand value so the subtraction is visibly
+  // consistent with the number shown above it.
+  const cashHint =
+    billPay.outstandingCheckCount > 0
+      ? `${formatCurrency(cashOnHand.value - billPay.outstandingChecks)} spendable after ${
+          billPay.outstandingCheckCount
+        } outstanding ${billPay.outstandingCheckCount === 1 ? 'check' : 'checks'}`
+      : undefined
   const lineOfCredit = kpi(kpis, 'lineOfCredit')
   const accountsReceivable = kpi(kpis, 'accountsReceivable')
   const accountsPayable = kpi(kpis, 'accountsPayable')
@@ -151,6 +163,7 @@ export default async function DashboardPage() {
           change={cashOnHand.change ?? undefined}
           trend={asTrend(cashOnHand.trend)}
           changeLabel="vs last month"
+          hint={cashHint}
         />
         <StatCard
           label="Available Line of Credit"

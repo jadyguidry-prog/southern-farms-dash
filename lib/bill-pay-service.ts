@@ -137,6 +137,153 @@ export async function getOutstandingCheckSummary(cashOnHand: number) {
   }
 }
 
+export type ClearingSuggestion = {
+  paymentId: string
+  transactionId: string
+  /** 'check_number' is a near-certain match; 'amount_date' is a heuristic to confirm. */
+  matchType: 'check_number' | 'amount_date'
+  checkNumber: string | null
+  amount: number
+  paymentDate: string
+  transactionDate: string
+  transactionDescription: string
+}
+
+type TxnRow = {
+  id: string
+  transaction_date: string | null
+  amount: number | string | null
+  description: string | null
+  check_number: string | null
+  account_name: string | null
+  transaction_type: string | null
+}
+
+/**
+ * Suggest which outstanding checks appear to have cleared the bank, WITHOUT
+ * writing anything. The owner confirms each on screen (see confirmClearWithMatch)
+ * — Plaid data is never trusted to silently resolve a payment, the same rule
+ * check-resolution follows.
+ *
+ * Matching, strongest first:
+ *  1. check_number equal — banks record the check number on cleared checks, so
+ *     this is all but certain. 196 of the CSV expense rows already carry one.
+ *  2. exact amount AND the bank date is on/after the check was written, within a
+ *     reasonable clearing window — a heuristic, flagged as such to the owner.
+ *
+ * Direction matters: amounts are stored POSITIVE with direction in
+ * transaction_type, so only outgoing types (expense/payment) can clear a check.
+ * A transaction already used to clear another payment is excluded so one bank row
+ * can never resolve two checks (the DB unique index is the backstop).
+ */
+export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
+  const supabase = await createClient()
+
+  let payments: ObligationPayment[]
+  try {
+    payments = await getObligationPayments()
+  } catch (err) {
+    console.log('[v0] getClearingSuggestions: payments unreadable:', err)
+    return []
+  }
+  const outstanding = payments.filter(
+    (p) => p.status === 'outstanding' && p.paymentMethod === 'check',
+  )
+  if (outstanding.length === 0) return []
+
+  // Transaction ids already consumed by a cleared payment — never re-suggest them.
+  const usedTxnIds = new Set(
+    payments.map((p) => p.clearedTransactionId).filter((x): x is string => Boolean(x)),
+  )
+
+  // Only outgoing bank rows can clear a check. Bounded to a sensible window before
+  // the earliest outstanding check so we don't scan the whole ledger.
+  const earliest = outstanding.map((p) => p.paymentDate).filter(Boolean).sort()[0]
+  let txns: TxnRow[] = []
+  try {
+    txns = await fetchAllPages<TxnRow>(
+      (from, to) =>
+        supabase
+          .from('financial_transactions')
+          .select(
+            'id, transaction_date, amount, description, check_number, account_name, transaction_type',
+          )
+          .is('deleted_at', null)
+          .in('transaction_type', ['expense', 'payment'])
+          .gte('transaction_date', earliest || '1900-01-01')
+          .order('transaction_date', { ascending: true })
+          .range(from, to),
+      'getClearingSuggestions',
+    )
+  } catch (err) {
+    console.log('[v0] getClearingSuggestions: transactions unreadable:', err)
+    return []
+  }
+  const candidates = txns.filter((t) => !usedTxnIds.has(t.id))
+
+  // Longest plausible clearing window for a mailed check.
+  const CLEAR_WINDOW_DAYS = 45
+  const suggestions: ClearingSuggestion[] = []
+  const claimed = new Set<string>() // txn ids claimed within this pass
+
+  // Pass 1: exact check-number match (strongest), so a coincidental
+  // same-amount row can't steal a transaction a numbered match wants.
+  for (const p of outstanding) {
+    if (!p.checkNumber) continue
+    const hit = candidates.find(
+      (t) =>
+        !claimed.has(t.id) &&
+        t.check_number &&
+        t.check_number.trim() === p.checkNumber!.trim(),
+    )
+    if (hit) {
+      claimed.add(hit.id)
+      suggestions.push({
+        paymentId: p.id,
+        transactionId: hit.id,
+        matchType: 'check_number',
+        checkNumber: p.checkNumber,
+        amount: p.amount,
+        paymentDate: p.paymentDate,
+        transactionDate: (hit.transaction_date ?? '').slice(0, 10),
+        transactionDescription: hit.description ?? '',
+      })
+    }
+  }
+
+  // Pass 2: amount + date-window heuristic for checks still unmatched.
+  const matchedPaymentIds = new Set(suggestions.map((s) => s.paymentId))
+  for (const p of outstanding) {
+    if (matchedPaymentIds.has(p.id)) continue
+    const hit = candidates.find((t) => {
+      if (claimed.has(t.id)) return false
+      if (Math.abs((Number(t.amount) || 0) - p.amount) > 0.005) return false
+      const td = (t.transaction_date ?? '').slice(0, 10)
+      if (!td || td < p.paymentDate) return false
+      const days =
+        (new Date(td + 'T00:00:00').getTime() -
+          new Date(p.paymentDate + 'T00:00:00').getTime()) /
+        86_400_000
+      return days <= CLEAR_WINDOW_DAYS
+    })
+    if (hit) {
+      claimed.add(hit.id)
+      suggestions.push({
+        paymentId: p.id,
+        transactionId: hit.id,
+        matchType: 'amount_date',
+        checkNumber: p.checkNumber,
+        amount: p.amount,
+        paymentDate: p.paymentDate,
+        transactionDate: (hit.transaction_date ?? '').slice(0, 10),
+        transactionDescription: hit.description ?? '',
+      })
+    }
+  }
+
+  return suggestions
+}
+
 export type BillPaySnapshot = {
   configured: boolean
   outstandingChecks: number

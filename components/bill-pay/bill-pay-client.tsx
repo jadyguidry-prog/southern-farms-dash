@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from 'react'
 import { toast } from 'sonner'
-import { CalendarClock, Plus, Check, X, Repeat } from 'lucide-react'
+import { CalendarClock, Plus, Check, X, Repeat, Link2 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,8 +24,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { formatCurrency } from '@/lib/data'
-import type { ObligationPayment } from '@/lib/bill-pay-service'
-import { recordPayment, voidPayment, clearPayment } from '@/app/bill-pay/actions'
+import type { ObligationPayment, ClearingSuggestion } from '@/lib/bill-pay-service'
+import {
+  recordPayment,
+  voidPayment,
+  clearPayment,
+  confirmClearWithMatch,
+} from '@/app/bill-pay/actions'
 
 type Obligation = {
   id: string
@@ -44,13 +49,19 @@ export function BillPayClient({
   obligations,
   banks,
   payments,
+  suggestions,
 }: {
   obligations: Obligation[]
   banks: Bank[]
   payments: ObligationPayment[]
+  suggestions: ClearingSuggestion[]
 }) {
   const [activeObligation, setActiveObligation] = useState<Obligation | null>(null)
+  // Locally dismissed suggestions — hidden without a write, so an owner who
+  // knows a match is wrong isn't nagged on every load of this session.
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set())
   const outstanding = payments.filter((p) => p.status === 'outstanding')
+  const visibleSuggestions = suggestions.filter((s) => !dismissed.has(s.paymentId))
 
   return (
     <div className="space-y-8">
@@ -102,6 +113,31 @@ export function BillPayClient({
           </div>
         )}
       </section>
+
+      {/* Suggested bank matches — surfaced for confirmation, never auto-applied */}
+      {visibleSuggestions.length > 0 && (
+        <section>
+          <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            <Link2 className="size-4" aria-hidden="true" />
+            Suggested Bank Matches
+          </h3>
+          <p className="mb-3 text-xs text-muted-foreground">
+            These outstanding checks look like they cleared the bank. Confirm each
+            to mark it cleared — nothing is applied automatically.
+          </p>
+          <div className="space-y-2">
+            {visibleSuggestions.map((s) => (
+              <SuggestionRow
+                key={s.paymentId}
+                suggestion={s}
+                onDismiss={() =>
+                  setDismissed((prev) => new Set(prev).add(s.paymentId))
+                }
+              />
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Outstanding checks — spendable-cash impact lives here */}
       <section>
@@ -186,6 +222,66 @@ function OutstandingRow({ payment }: { payment: ObligationPayment }) {
             onClick={onVoid}
             disabled={pending}
             aria-label="Void payment"
+          >
+            <X className="size-4" aria-hidden="true" />
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function SuggestionRow({
+  suggestion,
+  onDismiss,
+}: {
+  suggestion: ClearingSuggestion
+  onDismiss: () => void
+}) {
+  const [pending, startTransition] = useTransition()
+
+  const onConfirm = () => {
+    startTransition(async () => {
+      const res = await confirmClearWithMatch(suggestion.paymentId, suggestion.transactionId)
+      if (res.ok) toast.success('Check confirmed cleared against the bank record.')
+      else toast.error(res.error ?? 'Could not confirm the match.')
+    })
+  }
+
+  const strong = suggestion.matchType === 'check_number'
+
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+        <div className="min-w-0">
+          <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
+            {suggestion.checkNumber ? `Check #${suggestion.checkNumber}` : 'Payment'}
+            <span className="font-mono text-muted-foreground">
+              {formatCurrency(suggestion.amount)}
+            </span>
+            <Badge variant={strong ? 'default' : 'secondary'} className="text-xs font-normal">
+              {strong ? 'Check # match' : 'Amount + date match'}
+            </Badge>
+          </p>
+          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+            Written {suggestion.paymentDate} · bank {suggestion.transactionDate}
+            {suggestion.transactionDescription
+              ? ` · ${suggestion.transactionDescription}`
+              : ''}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <Button size="sm" className="h-11" onClick={onConfirm} disabled={pending}>
+            <Check className="size-4" aria-hidden="true" />
+            {pending ? 'Confirming…' : 'Confirm cleared'}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-11"
+            onClick={onDismiss}
+            disabled={pending}
+            aria-label="Dismiss this suggestion"
           >
             <X className="size-4" aria-hidden="true" />
           </Button>
