@@ -13,7 +13,9 @@
 //   LOWER than the balance shows. ACH is treated as gone immediately (no float).
 
 import { createClient } from '@/lib/supabase/server'
+import { cache } from 'react'
 import { fetchAllPages } from '@/lib/paginate'
+import { addInterval } from '@/lib/health'
 
 export type PaymentMethod = 'check' | 'ach'
 export type PaymentStatus = 'outstanding' | 'cleared' | 'void'
@@ -71,8 +73,13 @@ function mapPayment(r: PaymentRow): ObligationPayment {
  * Every non-void payment, newest first. Void payments are excluded because a
  * voided check never left the account — including it would double-count against
  * the obligation and inflate the outstanding total.
+ *
+ * Wrapped in React `cache` (the same pattern as getCashDebtSummary and
+ * getLaborDataset) so the several callers that each need the payment list — the
+ * cash summary, the dashboard snapshot, and the match suggestions — share ONE
+ * query per request instead of refetching the table for each.
  */
-export async function getObligationPayments(): Promise<ObligationPayment[]> {
+export const getObligationPayments = cache(async (): Promise<ObligationPayment[]> => {
   const supabase = await createClient()
   const rows = await fetchAllPages<PaymentRow>(
     (from, to) =>
@@ -85,7 +92,7 @@ export async function getObligationPayments(): Promise<ObligationPayment[]> {
     'getObligationPayments',
   )
   return rows.map(mapPayment)
-}
+})
 
 /**
  * The outstanding-check total: written checks not yet seen clearing the bank.
@@ -137,6 +144,20 @@ export async function getOutstandingCheckSummary(cashOnHand: number) {
   }
 }
 
+/**
+ * The next due date for a recurring obligation after the current period is paid.
+ *
+ * Deliberately NOT `resolveNextDueDate` from lib/health: that helper returns an
+ * existing nextDueDate unchanged and only advances up to today, so it cannot
+ * express "advance past the period just paid" — and paying a bill early would
+ * leave the obligation sitting on a date already settled.
+ */
+export function nextDueAfterPayment(currentDue: string, frequency: string): string {
+  return addInterval(new Date(currentDue + 'T00:00:00'), frequency || 'Monthly')
+    .toISOString()
+    .slice(0, 10)
+}
+
 export type ClearingSuggestion = {
   paymentId: string
   transactionId: string
@@ -149,7 +170,7 @@ export type ClearingSuggestion = {
   transactionDescription: string
 }
 
-type TxnRow = {
+export type TxnRow = {
   id: string
   transaction_date: string | null
   amount: number | string | null
@@ -221,13 +242,45 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
   }
   const candidates = txns.filter((t) => !usedTxnIds.has(t.id))
 
-  // Longest plausible clearing window for a mailed check.
-  const CLEAR_WINDOW_DAYS = 45
-  const suggestions: ClearingSuggestion[] = []
-  const claimed = new Set<string>() // txn ids claimed within this pass
+  return buildClearingSuggestions(outstanding, candidates)
+}
 
-  // Pass 1: exact check-number match (strongest), so a coincidental
-  // same-amount row can't steal a transaction a numbered match wants.
+/** Longest plausible clearing window for a mailed check. */
+export const CLEAR_WINDOW_DAYS = 45
+
+/**
+ * The pure matching algorithm behind getClearingSuggestions, split out so the
+ * rules can be regression-tested without a database. Given outstanding checks
+ * and candidate outgoing bank rows, decide which pairs to SUGGEST.
+ *
+ * Ordering matters and is deliberate: check-number matches run first so a
+ * coincidental same-amount row cannot steal a transaction that a numbered match
+ * wants. Each transaction can be claimed only once per pass, so one bank row
+ * never resolves two different checks.
+ */
+export function buildClearingSuggestions(
+  outstanding: ObligationPayment[],
+  candidates: TxnRow[],
+): ClearingSuggestion[] {
+  const suggestions: ClearingSuggestion[] = []
+  const claimed = new Set<string>()
+
+  const build = (
+    p: ObligationPayment,
+    hit: TxnRow,
+    matchType: ClearingSuggestion['matchType'],
+  ): ClearingSuggestion => ({
+    paymentId: p.id,
+    transactionId: hit.id,
+    matchType,
+    checkNumber: p.checkNumber,
+    amount: p.amount,
+    paymentDate: p.paymentDate,
+    transactionDate: (hit.transaction_date ?? '').slice(0, 10),
+    transactionDescription: hit.description ?? '',
+  })
+
+  // Pass 1: exact check-number match (strongest evidence).
   for (const p of outstanding) {
     if (!p.checkNumber) continue
     const hit = candidates.find(
@@ -238,16 +291,7 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
     )
     if (hit) {
       claimed.add(hit.id)
-      suggestions.push({
-        paymentId: p.id,
-        transactionId: hit.id,
-        matchType: 'check_number',
-        checkNumber: p.checkNumber,
-        amount: p.amount,
-        paymentDate: p.paymentDate,
-        transactionDate: (hit.transaction_date ?? '').slice(0, 10),
-        transactionDescription: hit.description ?? '',
-      })
+      suggestions.push(build(p, hit, 'check_number'))
     }
   }
 
@@ -257,8 +301,10 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
     if (matchedPaymentIds.has(p.id)) continue
     const hit = candidates.find((t) => {
       if (claimed.has(t.id)) return false
+      // Tolerance guards float noise without letting a different amount match.
       if (Math.abs((Number(t.amount) || 0) - p.amount) > 0.005) return false
       const td = (t.transaction_date ?? '').slice(0, 10)
+      // A check cannot clear before it was written.
       if (!td || td < p.paymentDate) return false
       const days =
         (new Date(td + 'T00:00:00').getTime() -
@@ -268,16 +314,7 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
     })
     if (hit) {
       claimed.add(hit.id)
-      suggestions.push({
-        paymentId: p.id,
-        transactionId: hit.id,
-        matchType: 'amount_date',
-        checkNumber: p.checkNumber,
-        amount: p.amount,
-        paymentDate: p.paymentDate,
-        transactionDate: (hit.transaction_date ?? '').slice(0, 10),
-        transactionDescription: hit.description ?? '',
-      })
+      suggestions.push(build(p, hit, 'amount_date'))
     }
   }
 

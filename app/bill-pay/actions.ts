@@ -13,7 +13,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
-import { addInterval } from '@/lib/health'
+import { nextDueAfterPayment } from '@/lib/bill-pay-service'
 
 type ActionResult = { ok: boolean; error?: string; paymentId?: string }
 
@@ -127,18 +127,11 @@ export async function recordPayment(input: RecordPaymentInput): Promise<ActionRe
   })
 
   // Roll a recurring obligation forward so it stays in the forecast at its next
-  // due date. `resolveNextDueDate` (used by the cash summary) intentionally
-  // returns nextDueDate UNCHANGED when set and only advances up to today, so it
-  // cannot express "advance PAST the period just paid". So advance explicitly
-  // with the shared `addInterval` — one interval beyond the period that was paid.
+  // due date, using the shared pure helper (regression-tested in
+  // scripts/verify-bill-pay.ts) rather than duplicating the date math here.
   if (input.rollForward && obligation.recurring) {
     const current = obligation.next_due_date || obligation.due_date || input.paymentDate
-    const nextDue = addInterval(
-      new Date(current + 'T00:00:00'),
-      obligation.frequency || 'Monthly',
-    )
-      .toISOString()
-      .slice(0, 10)
+    const nextDue = nextDueAfterPayment(current, obligation.frequency || 'Monthly')
     if (nextDue) {
       const { error: rollErr } = await supabase
         .from('cash_obligations')
