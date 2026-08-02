@@ -7,14 +7,18 @@ import {
   getBankAccounts,
   getVendors,
 } from '@/lib/queries'
-import { getObligationPayments, getClearingSuggestions } from '@/lib/bill-pay-service'
+import {
+  getObligationPayments,
+  getClearingSuggestions,
+  getAchReconcileMatches,
+} from '@/lib/bill-pay-service'
 import { formatCurrency } from '@/lib/data'
 import { BillPayClient } from '@/components/bill-pay/bill-pay-client'
 
 // Bill Payments — Phase 1 (check + ACH). Server component: loads everything the
 // screen needs, then hands plain data to the client island for interaction.
 export default async function BillPayPage() {
-  const [summary, obligations, bankAccounts, payments, suggestions, vendors] =
+  const [summary, obligations, bankAccounts, payments, suggestions, vendors, detected] =
     await Promise.all([
       getCashDebtSummary(),
       getCashObligations(),
@@ -26,6 +30,9 @@ export default async function BillPayPage() {
       // Known vendors, so a one-off check can reuse an existing payee instead of
       // creating a near-duplicate spelling of a name already in the system.
       getVendors(),
+      // Autopay/ACH bills a bank debit already paid. Read-only here — the actual
+      // write happens behind the one-tap Reconcile button, never during this GET.
+      getAchReconcileMatches(),
     ])
 
   // Only active, unpaid obligations are payable targets.
@@ -39,6 +46,8 @@ export default async function BillPayPage() {
       nextDueDate: o.nextDueDate || o.dueDate || '',
       recurring: o.recurring,
       frequency: o.frequency,
+      // Drives the Autopay/Check badge and whether the row shows a manual Pay button.
+      isAutopay: (o.paymentMethod || '').toUpperCase() === 'ACH',
     }))
 
   const banks = bankAccounts.map((b) => ({
@@ -102,6 +111,7 @@ export default async function BillPayPage() {
           payments={payments}
           suggestions={suggestions}
           vendors={vendorOptions}
+          detected={detected}
         />
       </div>
     </div>

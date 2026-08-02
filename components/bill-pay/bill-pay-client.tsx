@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useTransition } from 'react'
 import { toast } from 'sonner'
-import { CalendarClock, Plus, Check, X, Repeat, Link2 } from 'lucide-react'
+import { CalendarClock, Plus, Check, X, Repeat, Link2, Landmark, Zap } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -28,14 +28,15 @@ import { formatCurrency } from '@/lib/data'
 // server-only Supabase client into the browser bundle. A value import from this
 // module would (and did) break the build.
 import type { ObligationPayment, ClearingSuggestion } from '@/lib/bill-pay-service'
-// Pure display helper, kept in a server-free module for the reason noted above.
-import { paymentLabel } from '@/lib/bill-pay-shared'
+// Pure display helper + type, kept in a server-free module for the reason noted above.
+import { paymentLabel, type AchReconcileMatch } from '@/lib/bill-pay-shared'
 import {
   recordPayment,
   recordOneOffPayment,
   voidPayment,
   clearPayment,
   confirmClearWithMatch,
+  reconcileAchFromBank,
 } from '@/app/bill-pay/actions'
 
 type Obligation = {
@@ -46,6 +47,7 @@ type Obligation = {
   nextDueDate: string
   recurring: boolean
   frequency: string
+  isAutopay: boolean
 }
 type Bank = { id: string; label: string }
 type VendorOption = { id: string; name: string }
@@ -58,12 +60,14 @@ export function BillPayClient({
   payments,
   suggestions,
   vendors,
+  detected,
 }: {
   obligations: Obligation[]
   banks: Bank[]
   payments: ObligationPayment[]
   suggestions: ClearingSuggestion[]
   vendors: VendorOption[]
+  detected: AchReconcileMatch[]
 }) {
   const [activeObligation, setActiveObligation] = useState<Obligation | null>(null)
   const [oneOffOpen, setOneOffOpen] = useState(false)
@@ -87,6 +91,11 @@ export function BillPayClient({
 
   return (
     <div className="space-y-8">
+      {/* Autopay bills a bank debit already paid — one tap records them cleared on
+          the real posted date. This is the only place an ACH bill needs the owner,
+          and even then it's confirm-once, not data entry. */}
+      {detected.length > 0 && <ReconcileBanner detected={detected} />}
+
       {/* Scheduled bills — each row can be paid */}
       <section>
         <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">

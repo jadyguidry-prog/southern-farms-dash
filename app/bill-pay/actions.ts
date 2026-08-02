@@ -13,7 +13,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
-import { nextDueAfterPayment } from '@/lib/bill-pay-service'
+import { nextDueAfterPayment, getAchReconcileMatches } from '@/lib/bill-pay-service'
 import { validatePaymentBasics } from '@/lib/bill-pay-shared'
 
 type ActionResult = { ok: boolean; error?: string; paymentId?: string }
@@ -141,6 +141,122 @@ export async function recordPayment(input: RecordPaymentInput): Promise<ActionRe
 
   revalidateAll()
   return { ok: true, paymentId: inserted.id }
+}
+
+export type ReconcileResult = {
+  ok: boolean
+  error?: string
+  count: number
+  lines: string[]
+}
+
+/**
+ * Auto-reconcile autopay/ACH bills against the checking feed: for each bank debit
+ * the matcher identifies (by vendor name + amount), write a CLEARED payment dated
+ * on the ACTUAL posted date and advance the bill's schedule past it.
+ *
+ * Re-runs detection server-side rather than trusting anything from the client, so
+ * a stale or forged match can't create a bogus payment. Idempotent: the DB unique
+ * index on cleared_transaction_id means a transaction already linked to a payment
+ * is skipped (23505) instead of double-counted, so tapping twice is harmless.
+ *
+ * Every payment it writes is an ordinary row — the owner can void any one in a tap
+ * if a match was ever wrong. That reversibility is why one-tap auto-write is safe.
+ */
+export async function reconcileAchFromBank(): Promise<ReconcileResult> {
+  const matches = await getAchReconcileMatches()
+  if (matches.length === 0) return { ok: true, count: 0, lines: [] }
+
+  const supabase = await createClient()
+  const actor = await currentActor()
+
+  // Load the schedule fields once for roll-forward; keyed by obligation id.
+  const obligationIds = [...new Set(matches.map((m) => m.obligationId))]
+  const { data: obligationRows, error: obErr } = await supabase
+    .from('cash_obligations')
+    .select('id, next_due_date, due_date, frequency')
+    .in('id', obligationIds)
+  if (obErr) return { ok: false, error: obErr.message, count: 0, lines: [] }
+  const obligationById = new Map((obligationRows ?? []).map((o) => [o.id, o]))
+
+  const lines: string[] = []
+  let count = 0
+  // Track the latest reconciled date per obligation, to advance the schedule once.
+  const latestPosted = new Map<string, string>()
+
+  for (const m of matches) {
+    const { data: inserted, error: insErr } = await supabase
+      .from('obligation_payments')
+      .insert({
+        obligation_id: m.obligationId,
+        amount: m.amount,
+        payment_date: m.postedDate,
+        payment_method: 'ach',
+        status: 'cleared',
+        cleared_date: m.postedDate,
+        cleared_transaction_id: m.transactionId,
+        memo: null,
+        created_by: actor,
+      })
+      .select('id')
+      .single()
+
+    if (insErr) {
+      // 23505 = unique violation: this bank row was already linked (a concurrent
+      // reconcile or manual clear). That's the guard working — skip, don't fail.
+      if ((insErr as { code?: string }).code === '23505') continue
+      return { ok: false, error: insErr.message, count, lines }
+    }
+
+    await supabase.from('obligation_payment_audit').insert({
+      payment_id: inserted.id,
+      action: 'created',
+      detail: {
+        method: 'ach',
+        amount: m.amount,
+        status: 'cleared',
+        obligation: m.obligationName,
+        // Marks this as a machine match from the bank, distinct from a hand entry.
+        source: 'bank_auto',
+        transaction_id: m.transactionId,
+        posted_date: m.postedDate,
+      },
+      created_by: actor,
+    })
+
+    count++
+    lines.push(`${m.obligationName} — ${m.postedDate}`)
+    const prev = latestPosted.get(m.obligationId)
+    if (!prev || m.postedDate > prev) latestPosted.set(m.obligationId, m.postedDate)
+  }
+
+  // Advance each bill's next due date past the newest debit we just reconciled —
+  // but only forward. Backfilled past periods (next_due already in the future)
+  // leave the schedule untouched, which is correct: the next unpaid period is
+  // still ahead. Non-fatal if it fails; the payments are already saved.
+  for (const [obligationId, posted] of latestPosted) {
+    const ob = obligationById.get(obligationId)
+    if (!ob) continue
+    let due = ob.next_due_date || ob.due_date || ''
+    if (!due) continue
+    let advanced = false
+    // Guard the loop against a bad frequency that never advances the date.
+    for (let i = 0; i < 240 && due <= posted; i++) {
+      const next = nextDueAfterPayment(due, ob.frequency || 'Monthly')
+      if (!next || next <= due) break
+      due = next
+      advanced = true
+    }
+    if (advanced) {
+      await supabase
+        .from('cash_obligations')
+        .update({ next_due_date: due })
+        .eq('id', obligationId)
+    }
+  }
+
+  revalidateAll()
+  return { ok: true, count, lines }
 }
 
 export type RecordOneOffInput = {

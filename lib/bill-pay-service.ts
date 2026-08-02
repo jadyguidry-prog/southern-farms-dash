@@ -16,6 +16,12 @@ import { createClient } from '@/lib/supabase/server'
 import { cache } from 'react'
 import { fetchAllPages } from '@/lib/paginate'
 import { addInterval } from '@/lib/health'
+import {
+  buildAchReconcileMatches,
+  ACH_LOOKBACK_DAYS,
+  type AchObligationInput,
+  type AchReconcileMatch,
+} from '@/lib/bill-pay-shared'
 
 export type PaymentMethod = 'check' | 'ach'
 export type PaymentStatus = 'outstanding' | 'cleared' | 'void'
@@ -261,6 +267,79 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
   const candidates = txns.filter((t) => !usedTxnIds.has(t.id))
 
   return buildClearingSuggestions(outstanding, candidates)
+}
+
+/**
+ * Detect autopay/ACH bills that a bank debit has already paid, WITHOUT writing.
+ * The page shows these for a one-tap reconcile; the write happens in the action
+ * (which re-runs this so it never trusts client-supplied matches). Read-only, and
+ * degrades to [] on any failure so a feed hiccup can never blank the page.
+ */
+export async function getAchReconcileMatches(): Promise<AchReconcileMatch[]> {
+  const supabase = await createClient()
+  const today = new Date().toISOString().slice(0, 10)
+  const since = new Date(Date.now() - ACH_LOOKBACK_DAYS * 86_400_000)
+    .toISOString()
+    .slice(0, 10)
+
+  let obligations: AchObligationInput[]
+  try {
+    const { data } = await supabase
+      .from('cash_obligations')
+      .select(
+        'id, obligation_name, vendor_name, amount, frequency, next_due_date, recurring, active, payment_method',
+      )
+    obligations = (data ?? []).map((o) => ({
+      id: o.id,
+      obligationName: o.obligation_name ?? '',
+      vendorName: o.vendor_name ?? '',
+      amount: Number(o.amount) || 0,
+      frequency: o.frequency ?? 'Monthly',
+      nextDueDate: o.next_due_date ?? '',
+      recurring: Boolean(o.recurring),
+      active: o.active ?? true,
+      paymentMethod: o.payment_method ?? '',
+    }))
+  } catch (err) {
+    console.log('[v0] getAchReconcileMatches: obligations unreadable:', err)
+    return []
+  }
+  // No ACH obligations -> nothing to detect, skip the transaction scan entirely.
+  if (!obligations.some((o) => o.paymentMethod.toUpperCase() === 'ACH')) return []
+
+  let linked: string[]
+  try {
+    const payments = await getObligationPayments()
+    linked = payments
+      .map((p) => p.clearedTransactionId)
+      .filter((x): x is string => Boolean(x))
+  } catch (err) {
+    console.log('[v0] getAchReconcileMatches: payments unreadable:', err)
+    return []
+  }
+
+  let txns: TxnRow[] = []
+  try {
+    txns = await fetchAllPages<TxnRow>(
+      (from, to) =>
+        supabase
+          .from('financial_transactions')
+          .select(
+            'id, transaction_date, amount, description, check_number, account_name, transaction_type',
+          )
+          .is('deleted_at', null)
+          .in('transaction_type', ['expense', 'payment'])
+          .gte('transaction_date', since)
+          .order('transaction_date', { ascending: false })
+          .range(from, to),
+      'getAchReconcileMatches',
+    )
+  } catch (err) {
+    console.log('[v0] getAchReconcileMatches: transactions unreadable:', err)
+    return []
+  }
+
+  return buildAchReconcileMatches(obligations, txns, linked, today)
 }
 
 /** Longest plausible clearing window for a mailed check. */
