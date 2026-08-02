@@ -82,7 +82,19 @@ export function BillPayClient({
               <Card key={o.id}>
                 <CardContent className="flex items-center justify-between gap-3 p-4">
                   <div className="min-w-0">
-                    <p className="truncate font-medium text-foreground">{o.name}</p>
+                    {/* Vendor is shown because obligations can share a name and
+                        differ only by who is paid — there are two $1,500 "Owner
+                        Draw" rows for different people. Without the vendor they
+                        are indistinguishable and the wrong one gets paid. */}
+                    <p className="truncate font-medium text-foreground">
+                      {o.name}
+                      {o.vendorName ? (
+                        <span className="font-normal text-muted-foreground">
+                          {' · '}
+                          {o.vendorName}
+                        </span>
+                      ) : null}
+                    </p>
                     <p className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
                       <span className="font-mono">{formatCurrency(o.amount)}</span>
                       {o.recurring && (
@@ -346,7 +358,11 @@ function RecordPaymentDialog({
         <DialogHeader>
           <DialogTitle>Record Payment</DialogTitle>
           <DialogDescription>
-            {obligation ? obligation.name : ''}
+            {/* Include the vendor for the same reason as the list row: confirming
+                a payment must show WHO is being paid, not just the bill name. */}
+            {obligation
+              ? [obligation.name, obligation.vendorName].filter(Boolean).join(' · ')
+              : ''}
           </DialogDescription>
         </DialogHeader>
 

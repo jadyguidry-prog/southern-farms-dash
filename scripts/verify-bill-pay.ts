@@ -23,6 +23,7 @@ import {
 } from '../lib/bill-pay-service'
 import { generateInsights, payrollHealth } from '../lib/health'
 import { SETTING_DEFAULTS } from '../lib/queries'
+import { fetchAllPages } from '../lib/paginate'
 
 let pass = 0
 let fail = 0
@@ -330,5 +331,71 @@ const pillars = {
   )
 }
 
+// The pagination checks await, and this file compiles to CJS (no top-level
+// await), so the remaining suites and the summary run inside one async main.
+async function main() {
+console.log('\nPagination (PostgREST truncates at 1,000 rows and reports no error)')
+
+{
+  // 2,350 outstanding checks of $10 each. If the payments read ever loses its
+  // pagination, this silently totals $10,000 instead of $23,500 — a plausible
+  // looking number, which is exactly what makes the bug dangerous.
+  const TOTAL = 2350
+  const rows = Array.from({ length: TOTAL }, (_, i) => pay({ id: `p${i}`, amount: 10 }))
+  let requests = 0
+  const fetched = await fetchAllPages<ObligationPayment>(
+    (from, to) => {
+      requests++
+      return Promise.resolve({ data: rows.slice(from, to + 1), error: null })
+    },
+    'verify-pagination',
+  )
+  ok(`every one of ${TOTAL} rows is read, not just the first 1,000`, fetched.length === TOTAL)
+  ok('and it took more than one request', requests > 1)
+  const paged = deriveOutstandingCash(50_000, fetched)
+  check('so the outstanding total is right', paged.outstandingChecks, 23_500)
+  check('and the count is not truncated either', paged.outstandingCheckCount, TOTAL)
+}
+
+{
+  // A truncated financial total that looks plausible is worse than a loud
+  // failure, so a page error must throw rather than return a partial sum.
+  let threw = false
+  try {
+    await fetchAllPages(
+      () => Promise.resolve({ data: null, error: { message: 'connection lost' } }),
+      'verify-error',
+    )
+  } catch {
+    threw = true
+  }
+  ok('a failed page throws instead of returning a partial total', threw)
+}
+
+console.log('\nGraceful degrade (module unused / overlay table absent)')
+
+{
+  // Before the owner records anything — and if the overlay table were missing —
+  // the module must report honest zeros and leave cash untouched, never crash
+  // and never invent a figure.
+  const empty = deriveOutstandingCash(18_846, [])
+  ok('no payments leaves cash on hand unchanged', empty.cashAvailable === 18_846)
+  ok('and reports zero outstanding', empty.outstandingChecks === 0)
+  ok('and zero checks', empty.outstandingCheckCount === 0)
+  ok('matching suggests nothing when there is nothing', buildClearingSuggestions([], []).length === 0)
+  ok(
+    'and the advisor stays silent rather than reporting a confident $0',
+    generateInsights({ settings, pillars, billPay: undefined }).every(
+      (i) => !i.id.startsWith('auto-billpay'),
+    ),
+  )
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`)
 if (fail > 0) process.exit(1)
+}
+
+main().catch((err) => {
+  console.error('\nverify-bill-pay crashed:', err)
+  process.exit(1)
+})
