@@ -20,6 +20,7 @@ import {
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
 import { getLaborHealthSnapshot } from '@/lib/labor-service'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
+import { getOutstandingCheckSummary, getBillPaySnapshot } from '@/lib/bill-pay-service'
 
 // ---------- Types ----------
 export type KpiRow = {
@@ -589,6 +590,15 @@ export const getCashDebtSummary = cache(async () => {
   const creditLimitTotal = creditLines.reduce((s, a) => s + a.creditLimit, 0)
   const creditDrawn = creditLines.reduce((s, a) => s + a.currentBalance, 0)
 
+  // Outstanding checks: money already promised (a check is written) but not yet
+  // gone from the bank, so cashOnHand still includes it. `cashAvailable` is the
+  // spendable figure after subtracting those. Read here — via the bill-pay
+  // service which degrades to zero on failure — so every surface that reads this
+  // summary (Dashboard, Cash Flow, Marketing) shares one definition and a
+  // bill-pay problem can never blank the cash dashboard.
+  const { outstandingChecks, outstandingCheckCount, cashAvailable } =
+    await getOutstandingCheckSummary(cashOnHand)
+
   // Operating Liquidity = cash on hand + available credit.
   const operatingLiquidity = cashOnHand + availableCredit
 
@@ -679,6 +689,11 @@ export const getCashDebtSummary = cache(async () => {
     obligations,
     // Core balances
     cashOnHand,
+    // Spendable cash after subtracting written-but-uncleared checks. Kept
+    // ALONGSIDE cashOnHand, never replacing it, so existing callers are unchanged.
+    cashAvailable,
+    outstandingChecks,
+    outstandingCheckCount,
     availableCredit,
     creditLimitTotal,
     creditDrawn,
@@ -778,6 +793,7 @@ export async function getHealthSnapshot() {
     labor,
     checks,
     marketing,
+    billPay,
   ] = await Promise.all([
     getKpis(),
     getCashDebtSummary(),
@@ -786,6 +802,7 @@ export async function getHealthSnapshot() {
     getLaborHealthSnapshot(),
     getCheckResolutionSnapshot(),
     getMarketingAffordabilitySnapshot(),
+    getBillPaySnapshot(),
   ])
   const settings = summary.settings
 
@@ -999,6 +1016,18 @@ export async function getHealthSnapshot() {
               : null,
         }
       : undefined,
+    // Omit entirely when no checks are outstanding, so a farm not using Bill Pay
+    // gets no bill-pay insight rather than one built on zeros.
+    billPay:
+      billPay.outstandingCheckCount > 0
+        ? {
+            outstandingChecks: billPay.outstandingChecks,
+            outstandingCheckCount: billPay.outstandingCheckCount,
+            oldestOutstandingDays: billPay.oldestOutstandingDays,
+            cashAvailable: summary.cashAvailable,
+            minCashReserve: summary.minCashReserve,
+          }
+        : undefined,
   })
 
   // Surface the weekly figure on the KPI the dashboard already renders, so the
@@ -1085,6 +1114,10 @@ export async function getHealthSnapshot() {
     // insights, and reporting all read this one evaluation, so none of them can
     // quote a budget the others would call unaffordable.
     marketing,
+    // Bill-pay outstanding-check position. Same contract once more: the dashboard
+    // tile, the advisor, and reporting all read this one snapshot so the
+    // spendable-cash figure and the outstanding-check count never drift apart.
+    billPay,
   }
 }
 

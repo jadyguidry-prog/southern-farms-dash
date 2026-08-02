@@ -17,6 +17,7 @@ import {
   Landmark,
   Megaphone,
   Wallet,
+  Send,
   Sparkles,
   Settings,
   ShieldCheck,
@@ -61,6 +62,7 @@ const navSections = [
     items: [
       { label: 'Cash Flow', href: '/cash-flow', icon: Banknote },
       { label: 'Cash & Debt', href: '/cash-debt', icon: Wallet },
+      { label: 'Bill Pay', href: '/bill-pay', icon: Send },
       { label: 'Loans', href: '/loans', icon: Landmark },
       { label: 'Marketing Budget', href: '/marketing', icon: Megaphone },
     ],

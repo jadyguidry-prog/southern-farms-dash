@@ -433,8 +433,25 @@ type InsightInput = {
    * budget is recommended from an empty database.
    */
   marketing?: MarketingInsightInput
+  /**
+   * Outstanding-check position. Omit when no payments have been recorded, so a
+   * farm not yet using Bill Pay gets no bill-pay insights rather than zeros.
+   */
+  billPay?: BillPayInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
+}
+
+export type BillPayInsightInput = {
+  /** Written checks not yet cleared, in dollars. */
+  outstandingChecks: number
+  outstandingCheckCount: number
+  /** Age in days of the oldest uncleared check, or null when none are outstanding. */
+  oldestOutstandingDays: number | null
+  /** Spendable cash after subtracting outstanding checks. */
+  cashAvailable: number
+  /** The owner's minimum cash reserve, for the "would this breach it" check. */
+  minCashReserve: number
 }
 
 /**
@@ -451,8 +468,9 @@ export function generateInsights({
   labor,
   checks,
   marketing,
+  billPay,
   now,
-}: InsightInput): Insight[] {
+  }: InsightInput): Insight[] {
   const out: Insight[] = []
   const { payroll, cash, sales } = pillars
 
@@ -1073,6 +1091,60 @@ export function generateInsights({
         title: 'Committed marketing does not match actual spend',
         detail: marketing.commitmentMismatch.note,
         impact: `${formatCurrency(Math.abs(marketing.commitmentMismatch.committed - marketing.commitmentMismatch.actual))}/mo difference`,
+      })
+    }
+  }
+
+  // --- Bill pay / outstanding checks ---
+  // Only speaks when checks are actually outstanding, so a farm with none gets
+  // no noise. Two distinct concerns: (1) outstanding checks push spendable cash
+  // below the reserve even though the bank balance looks fine, and (2) a check
+  // that has sat uncleared for weeks may be lost and worth reissuing.
+  if (billPay && billPay.outstandingCheckCount > 0) {
+    // The dangerous case: the bank balance clears the reserve, but once the
+    // written checks land, spendable cash does not. This is exactly the gap the
+    // bank balance hides.
+    if (billPay.cashAvailable < billPay.minCashReserve) {
+      out.push({
+        id: 'auto-billpay-reserve-breach',
+        severity: 'warning',
+        category: 'Cash',
+        title: 'Outstanding checks pull spendable cash below your reserve',
+        detail: `${billPay.outstandingCheckCount} written ${
+          billPay.outstandingCheckCount === 1 ? 'check has' : 'checks have'
+        } not cleared yet. Once they do, spendable cash drops to ${formatCurrency(
+          billPay.cashAvailable,
+        )} — below your ${formatCurrency(
+          billPay.minCashReserve,
+        )} reserve. Hold non-essential spending until they clear.`,
+        impact: `${formatCurrency(billPay.outstandingChecks)} committed but not yet withdrawn`,
+      })
+    } else {
+      out.push({
+        id: 'auto-billpay-outstanding',
+        severity: 'opportunity',
+        category: 'Cash',
+        title: 'Written checks are still outstanding',
+        detail: `${billPay.outstandingCheckCount} ${
+          billPay.outstandingCheckCount === 1 ? 'check' : 'checks'
+        } totaling ${formatCurrency(
+          billPay.outstandingChecks,
+        )} have not cleared the bank. Your spendable cash is ${formatCurrency(
+          billPay.cashAvailable,
+        )}, not the full bank balance.`,
+        impact: `${formatCurrency(billPay.outstandingChecks)} committed but not yet withdrawn`,
+      })
+    }
+
+    // A check uncleared for a month is worth chasing — it may be lost.
+    if (billPay.oldestOutstandingDays != null && billPay.oldestOutstandingDays >= 30) {
+      out.push({
+        id: 'auto-billpay-stale-check',
+        severity: 'warning',
+        category: 'Cash',
+        title: 'A written check has been uncleared for weeks',
+        detail: `The oldest outstanding check was written ${billPay.oldestOutstandingDays} days ago and still has not cleared. Confirm the payee received it before it is stale-dated, and reissue if it was lost.`,
+        impact: `Uncleared ${billPay.oldestOutstandingDays} days`,
       })
     }
   }
