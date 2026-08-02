@@ -22,7 +22,13 @@ export type PaymentStatus = 'outstanding' | 'cleared' | 'void'
 
 export type ObligationPayment = {
   id: string
-  obligationId: string
+  /**
+   * Null for a one-off check (a payment with no recurring bill behind it — a
+   * seed supplier, a repair). Such a payment identifies itself via payeeName
+   * instead; a DB check constraint guarantees one of the two is always present,
+   * so a payment can never be anonymous.
+   */
+  obligationId: string | null
   amount: number
   paymentDate: string
   paymentMethod: PaymentMethod
@@ -33,11 +39,17 @@ export type ObligationPayment = {
   clearedTransactionId: string | null
   memo: string
   createdAt: string
+  /** Who the one-off check was written to. Empty for obligation-backed payments. */
+  payeeName: string
+  /** Set when the payee was picked from the known vendor list rather than typed. */
+  payeeVendorId: string | null
+  /** What a one-off check was for, so the ledger stays self-explanatory. */
+  purpose: string
 }
 
 type PaymentRow = {
   id: string
-  obligation_id: string
+  obligation_id: string | null
   amount: number | string | null
   payment_date: string | null
   payment_method: string | null
@@ -48,6 +60,9 @@ type PaymentRow = {
   cleared_transaction_id: string | null
   memo: string | null
   created_at: string | null
+  payee_name?: string | null
+  payee_vendor_id?: string | null
+  purpose?: string | null
 }
 
 function mapPayment(r: PaymentRow): ObligationPayment {
@@ -66,6 +81,9 @@ function mapPayment(r: PaymentRow): ObligationPayment {
     clearedTransactionId: r.cleared_transaction_id,
     memo: r.memo ?? '',
     createdAt: r.created_at ?? '',
+    payeeName: r.payee_name ?? '',
+    payeeVendorId: r.payee_vendor_id ?? null,
+    purpose: r.purpose ?? '',
   }
 }
 

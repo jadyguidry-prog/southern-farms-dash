@@ -21,6 +21,7 @@ import {
   type ObligationPayment,
   type TxnRow,
 } from '../lib/bill-pay-service'
+import { paymentLabel, validatePaymentBasics } from '../lib/bill-pay-shared'
 import { generateInsights, payrollHealth } from '../lib/health'
 import { SETTING_DEFAULTS } from '../lib/queries'
 import { fetchAllPages } from '../lib/paginate'
@@ -65,6 +66,9 @@ const pay = (p: Partial<ObligationPayment> = {}): ObligationPayment => ({
   clearedTransactionId: null,
   memo: '',
   createdAt: '2026-07-01T00:00:00Z',
+  payeeName: '',
+  payeeVendorId: null,
+  purpose: '',
   ...p,
 })
 
@@ -334,6 +338,96 @@ const pillars = {
 // The pagination checks await, and this file compiles to CJS (no top-level
 // await), so the remaining suites and the summary run inside one async main.
 async function main() {
+console.log('\nOne-off payments (a check with no scheduled bill behind it)')
+
+{
+  // The entire reason one-off entry exists: a check to a supplier who is not one
+  // of the recurring obligations must reduce spendable cash exactly like a
+  // scheduled one. If it did not, the float number would read optimistically high.
+  const oneOff = pay({
+    id: 'oo1',
+    obligationId: null,
+    payeeName: 'Coastal Seed Supply',
+    purpose: 'Spring seed order',
+    amount: 1_240,
+    checkNumber: '1402',
+  })
+  const scheduled = pay({ id: 's1', obligationId: 'o1', amount: 760 })
+
+  const mixed = deriveOutstandingCash(10_000, [oneOff, scheduled])
+  check('a one-off check reduces spendable cash', mixed.outstandingChecks, 2_000)
+  check('and both are counted', mixed.outstandingCheckCount, 2)
+  check('so spendable cash is right', mixed.cashAvailable, 8_000)
+
+  const onlyOneOff = deriveOutstandingCash(5_000, [oneOff])
+  check('a one-off alone still floats', onlyOneOff.outstandingChecks, 1_240)
+  check('and reduces cash', onlyOneOff.cashAvailable, 3_760)
+
+  // An ACH one-off never floats, same as a scheduled ACH — status decides, not
+  // whether an obligation is attached.
+  const achOneOff = pay({
+    id: 'oo2',
+    obligationId: null,
+    payeeName: 'Tractor Repair Co',
+    paymentMethod: 'ach',
+    status: 'cleared',
+    amount: 900,
+  })
+  check(
+    'a cleared one-off ACH does not reduce spendable cash',
+    deriveOutstandingCash(5_000, [achOneOff]).cashAvailable,
+    5_000,
+  )
+
+  // Labelling: a row in a cash ledger must never be anonymous.
+  const names = new Map([['o1', 'Rent · 3T XL LLC']])
+  check('a scheduled payment is labelled by its bill', paymentLabel(scheduled, names), 'Rent · 3T XL LLC')
+  check('a one-off is labelled by its payee', paymentLabel(oneOff, names), 'Coastal Seed Supply')
+  check(
+    'an unknown obligation still gets a readable label, never a bare id',
+    paymentLabel(pay({ obligationId: 'gone' }), names),
+    'Scheduled bill',
+  )
+  check(
+    'and a payee-less one-off never renders blank',
+    paymentLabel(pay({ obligationId: null, payeeName: '' }), names),
+    'One-off payment',
+  )
+
+  // A one-off check is matchable to the bank feed on the same terms as any other.
+  const suggested = buildClearingSuggestions(
+    [oneOff],
+    [txn({ id: 't1', check_number: '1402', amount: 1_240, transaction_date: '2026-07-09' })],
+  )
+  check('a one-off check can be matched by check number', suggested.length, 1)
+  check('and is labelled as the strong match type', suggested[0]?.matchType, 'check_number')
+}
+
+console.log('\nShared payment validation (one-off held to the same standard)')
+
+{
+  const base = { amount: 100, paymentDate: '2026-07-01', paymentMethod: 'check', checkNumber: '1001' }
+  ok('a valid check passes', validatePaymentBasics(base) === null)
+  ok(
+    'a check with no number is rejected',
+    validatePaymentBasics({ ...base, checkNumber: '' }) === 'Enter the check number.',
+  )
+  ok(
+    'ACH does not require a check number',
+    validatePaymentBasics({ ...base, paymentMethod: 'ach', checkNumber: '' }) === null,
+  )
+  ok('zero amount is rejected', validatePaymentBasics({ ...base, amount: 0 }) !== null)
+  ok('negative amount is rejected', validatePaymentBasics({ ...base, amount: -50 }) !== null)
+  ok(
+    'a malformed date is rejected',
+    validatePaymentBasics({ ...base, paymentDate: '07/01/2026' }) !== null,
+  )
+  ok(
+    'an unknown method is rejected',
+    validatePaymentBasics({ ...base, paymentMethod: 'cash' }) !== null,
+  )
+}
+
 console.log('\nPagination (PostgREST truncates at 1,000 rows and reports no error)')
 
 {

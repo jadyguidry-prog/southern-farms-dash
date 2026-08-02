@@ -1,7 +1,12 @@
 import { Wallet, CircleDollarSign, FileClock, CheckCircle2 } from 'lucide-react'
 import { PageHeader } from '@/components/page-header'
 import { StatCard } from '@/components/stat-card'
-import { getCashDebtSummary, getCashObligations, getBankAccounts } from '@/lib/queries'
+import {
+  getCashDebtSummary,
+  getCashObligations,
+  getBankAccounts,
+  getVendors,
+} from '@/lib/queries'
 import { getObligationPayments, getClearingSuggestions } from '@/lib/bill-pay-service'
 import { formatCurrency } from '@/lib/data'
 import { BillPayClient } from '@/components/bill-pay/bill-pay-client'
@@ -9,15 +14,19 @@ import { BillPayClient } from '@/components/bill-pay/bill-pay-client'
 // Bill Payments — Phase 1 (check + ACH). Server component: loads everything the
 // screen needs, then hands plain data to the client island for interaction.
 export default async function BillPayPage() {
-  const [summary, obligations, bankAccounts, payments, suggestions] = await Promise.all([
-    getCashDebtSummary(),
-    getCashObligations(),
-    getBankAccounts(),
-    getObligationPayments(),
-    // Suggested bank matches for outstanding checks — surfaced for confirmation,
-    // never auto-applied.
-    getClearingSuggestions(),
-  ])
+  const [summary, obligations, bankAccounts, payments, suggestions, vendors] =
+    await Promise.all([
+      getCashDebtSummary(),
+      getCashObligations(),
+      getBankAccounts(),
+      getObligationPayments(),
+      // Suggested bank matches for outstanding checks — surfaced for confirmation,
+      // never auto-applied.
+      getClearingSuggestions(),
+      // Known vendors, so a one-off check can reuse an existing payee instead of
+      // creating a near-duplicate spelling of a name already in the system.
+      getVendors(),
+    ])
 
   // Only active, unpaid obligations are payable targets.
   const payable = obligations
@@ -36,6 +45,13 @@ export default async function BillPayPage() {
     id: b.id,
     label: b.accountName,
   }))
+
+  // Suggestions only — the payee field stays free-text so a brand-new supplier can
+  // be paid without first being added to the vendor directory.
+  const vendorOptions = vendors
+    .map((v) => ({ id: v.id, name: v.name }))
+    .filter((v) => v.name)
+    .sort((a, b) => a.name.localeCompare(b.name))
 
   const outstanding = payments.filter((p) => p.status === 'outstanding')
 
@@ -85,6 +101,7 @@ export default async function BillPayPage() {
           banks={banks}
           payments={payments}
           suggestions={suggestions}
+          vendors={vendorOptions}
         />
       </div>
     </div>

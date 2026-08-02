@@ -14,6 +14,7 @@
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
 import { nextDueAfterPayment } from '@/lib/bill-pay-service'
+import { validatePaymentBasics } from '@/lib/bill-pay-shared'
 
 type ActionResult = { ok: boolean; error?: string; paymentId?: string }
 
@@ -65,20 +66,8 @@ export async function recordPayment(input: RecordPaymentInput): Promise<ActionRe
 
   // Validate before any write — a payment with no amount or date is not a payment.
   if (!obligationId) return { ok: false, error: 'No obligation was selected.' }
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { ok: false, error: 'Enter a payment amount greater than zero.' }
-  }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.paymentDate ?? '')) {
-    return { ok: false, error: 'Choose a valid payment date.' }
-  }
-  if (method !== 'check' && method !== 'ach') {
-    return { ok: false, error: 'Choose check or ACH.' }
-  }
-  // A check without a number can't be matched to the bank later — require it, the
-  // same way check-resolution refuses a blank payee.
-  if (method === 'check' && !(input.checkNumber ?? '').trim()) {
-    return { ok: false, error: 'Enter the check number.' }
-  }
+  const invalid = validatePaymentBasics(input)
+  if (invalid) return { ok: false, error: invalid }
 
   const supabase = await createClient()
   const actor = await currentActor()
@@ -149,6 +138,93 @@ export async function recordPayment(input: RecordPaymentInput): Promise<ActionRe
       }
     }
   }
+
+  revalidateAll()
+  return { ok: true, paymentId: inserted.id }
+}
+
+export type RecordOneOffInput = {
+  /** Free-typed payee, or the name of the picked vendor. Always required. */
+  payeeName: string
+  /** Set when the payee came from the known vendor list, for future reporting. */
+  payeeVendorId?: string | null
+  amount: number
+  paymentDate: string
+  paymentMethod: 'check' | 'ach'
+  checkNumber?: string
+  bankAccountId?: string | null
+  purpose?: string
+  memo?: string
+}
+
+/**
+ * Record a payment that has NO scheduled bill behind it — a seed supplier, an
+ * equipment repair, a one-time contractor.
+ *
+ * This exists because most checks the owner writes are not against the nine
+ * recurring obligations, and without it those checks never reduce spendable cash,
+ * which quietly makes the float number wrong in the optimistic direction.
+ *
+ * Deliberately separate from recordPayment rather than folded into it: there is no
+ * obligation to verify and nothing to roll forward, so sharing one function would
+ * mean a pile of conditional branches around every obligation step. The rules that
+ * MUST agree (amount, date, method, check number) are shared via
+ * validatePaymentBasics instead, so the two paths cannot drift.
+ */
+export async function recordOneOffPayment(
+  input: RecordOneOffInput,
+): Promise<ActionResult> {
+  const payeeName = (input.payeeName ?? '').trim()
+  const amount = Number(input.amount)
+  const method = input.paymentMethod
+
+  // A payment with no payee is unauditable — you cannot tell later who was paid,
+  // and the DB check constraint would reject it anyway. Fail with a clear message
+  // rather than surfacing a raw constraint violation.
+  if (!payeeName) return { ok: false, error: 'Enter who the payment was made out to.' }
+  const invalid = validatePaymentBasics(input)
+  if (invalid) return { ok: false, error: invalid }
+
+  const supabase = await createClient()
+  const actor = await currentActor()
+
+  const isCleared = method === 'ach'
+  const { data: inserted, error: insErr } = await supabase
+    .from('obligation_payments')
+    .insert({
+      // Null obligation is what marks this as a one-off; the DB check constraint
+      // requires payee_name to be present in exactly this case.
+      obligation_id: null,
+      payee_name: payeeName,
+      payee_vendor_id: input.payeeVendorId || null,
+      purpose: (input.purpose ?? '').trim() || null,
+      amount,
+      payment_date: input.paymentDate,
+      payment_method: method,
+      check_number: method === 'check' ? (input.checkNumber ?? '').trim() : null,
+      bank_account_id: input.bankAccountId || null,
+      status: isCleared ? 'cleared' : 'outstanding',
+      cleared_date: isCleared ? input.paymentDate : null,
+      memo: (input.memo ?? '').trim() || null,
+      created_by: actor,
+    })
+    .select('id')
+    .single()
+  if (insErr) return { ok: false, error: insErr.message }
+
+  await supabase.from('obligation_payment_audit').insert({
+    payment_id: inserted.id,
+    action: 'created',
+    detail: {
+      method,
+      amount,
+      status: isCleared ? 'cleared' : 'outstanding',
+      payee: payeeName,
+      purpose: (input.purpose ?? '').trim() || null,
+      one_off: true,
+    },
+    created_by: actor,
+  })
 
   revalidateAll()
   return { ok: true, paymentId: inserted.id }
