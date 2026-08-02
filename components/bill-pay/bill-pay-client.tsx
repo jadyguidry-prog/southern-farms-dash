@@ -117,14 +117,17 @@ export function BillPayClient({
                         differ only by who is paid — there are two $1,500 "Owner
                         Draw" rows for different people. Without the vendor they
                         are indistinguishable and the wrong one gets paid. */}
-                    <p className="truncate font-medium text-foreground">
-                      {o.name}
-                      {o.vendorName ? (
-                        <span className="font-normal text-muted-foreground">
-                          {' · '}
-                          {o.vendorName}
-                        </span>
-                      ) : null}
+                    <p className="flex items-center gap-2 truncate font-medium text-foreground">
+                      <span className="truncate">
+                        {o.name}
+                        {o.vendorName ? (
+                          <span className="font-normal text-muted-foreground">
+                            {' · '}
+                            {o.vendorName}
+                          </span>
+                        ) : null}
+                      </span>
+                      <MethodBadge isAutopay={o.isAutopay} />
                     </p>
                     <p className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
                       <span className="font-mono">{formatCurrency(o.amount)}</span>
@@ -142,14 +145,21 @@ export function BillPayClient({
                       )}
                     </p>
                   </div>
-                  <Button
-                    size="sm"
-                    className="h-11 shrink-0"
-                    onClick={() => setActiveObligation(o)}
-                  >
-                    <Plus className="size-4" aria-hidden="true" />
-                    Pay
-                  </Button>
+                  {/* Autopay bills are cleared by the bank feed, not by hand — so
+                      the row shows no Pay button, avoiding a double-recorded payment.
+                      Checks still get the manual Pay dialog. */}
+                  {o.isAutopay ? (
+                    <span className="shrink-0 text-xs text-muted-foreground">Auto</span>
+                  ) : (
+                    <Button
+                      size="sm"
+                      className="h-11 shrink-0"
+                      onClick={() => setActiveObligation(o)}
+                    >
+                      <Plus className="size-4" aria-hidden="true" />
+                      Pay
+                    </Button>
+                  )}
                 </CardContent>
               </Card>
             ))}
@@ -250,6 +260,81 @@ export function BillPayClient({
         onClose={() => setOneOffOpen(false)}
       />
     </div>
+  )
+}
+
+/** Small marker so a glance tells whether a bill clears itself or needs a check. */
+function MethodBadge({ isAutopay }: { isAutopay: boolean }) {
+  return isAutopay ? (
+    <Badge
+      variant="secondary"
+      className="shrink-0 gap-1 text-[10px] font-normal uppercase tracking-wide"
+    >
+      <Zap className="size-3" aria-hidden="true" />
+      Autopay
+    </Badge>
+  ) : (
+    <Badge
+      variant="outline"
+      className="shrink-0 gap-1 text-[10px] font-normal uppercase tracking-wide"
+    >
+      <Landmark className="size-3" aria-hidden="true" />
+      Check
+    </Badge>
+  )
+}
+
+/**
+ * The one-tap reconcile prompt. Autopay bills are cleared by the bank, not by hand,
+ * so the only thing the owner does is confirm the machine's matches once — the
+ * dates come straight from the bank, no data entry. Kept a distinct, calm callout
+ * rather than an alarming alert, since a matched autopay is good news, not a problem.
+ */
+function ReconcileBanner({ detected }: { detected: AchReconcileMatch[] }) {
+  const [pending, startTransition] = useTransition()
+  const total = detected.reduce((sum, m) => sum + m.amount, 0)
+
+  const onReconcile = () => {
+    startTransition(async () => {
+      const res = await reconcileAchFromBank()
+      if (res.ok) {
+        toast.success(
+          res.count === 1
+            ? '1 autopay bill marked paid from the bank.'
+            : `${res.count} autopay bills marked paid from the bank.`,
+        )
+      } else {
+        toast.error(res.error ?? 'Could not reconcile from the bank.')
+      }
+    })
+  }
+
+  return (
+    <Card className="border-primary/40 bg-primary/5">
+      <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-sm font-medium text-foreground">
+            <Zap className="size-4 text-primary" aria-hidden="true" />
+            {detected.length === 1
+              ? '1 autopay bill was paid by the bank'
+              : `${detected.length} autopay bills were paid by the bank`}
+            <span className="font-mono text-muted-foreground">{formatCurrency(total)}</span>
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {detected
+              .slice(0, 3)
+              .map((m) => `${m.vendorName} (${m.postedDate})`)
+              .join(', ')}
+            {detected.length > 3 ? `, +${detected.length - 3} more` : ''}. Recorded on
+            the actual posted date — you can void any one later if it&apos;s wrong.
+          </p>
+        </div>
+        <Button className="h-11 shrink-0" onClick={onReconcile} disabled={pending}>
+          <Check className="size-4" aria-hidden="true" />
+          {pending ? 'Reconciling…' : `Reconcile ${detected.length} from bank`}
+        </Button>
+      </CardContent>
+    </Card>
   )
 }
 

@@ -21,7 +21,16 @@ import {
   type ObligationPayment,
   type TxnRow,
 } from '../lib/bill-pay-service'
-import { paymentLabel, validatePaymentBasics } from '../lib/bill-pay-shared'
+import {
+  paymentLabel,
+  validatePaymentBasics,
+  buildAchReconcileMatches,
+  descriptionMatchesVendor,
+  amountWithinAchTolerance,
+  vendorTokens,
+  type AchObligationInput,
+  type AchTxnInput,
+} from '../lib/bill-pay-shared'
 import { generateInsights, payrollHealth } from '../lib/health'
 import { SETTING_DEFAULTS } from '../lib/queries'
 import { fetchAllPages } from '../lib/paginate'
@@ -483,6 +492,134 @@ console.log('\nGraceful degrade (module unused / overlay table absent)')
       (i) => !i.id.startsWith('auto-billpay'),
     ),
   )
+}
+
+console.log('\nAutopay/ACH auto-reconcile from the bank feed')
+
+{
+  // Fixtures mirror the real farm data: distinct ACH vendors, plus the check-side
+  // amount collisions ($200/$500 vs loans, twin $1,500 draws) that MUST be ignored.
+  const ach = (over: Partial<AchObligationInput>): AchObligationInput => ({
+    id: 'a1',
+    obligationName: 'Bill',
+    vendorName: 'Vendor',
+    amount: 100,
+    frequency: 'Monthly',
+    nextDueDate: '2026-08-15',
+    recurring: true,
+    active: true,
+    paymentMethod: 'ACH',
+    ...over,
+  })
+  const bank = (over: Partial<AchTxnInput>): AchTxnInput => ({
+    id: 't1',
+    transaction_date: '2026-07-20',
+    amount: 100,
+    description: 'SOME DEBIT',
+    transaction_type: 'expense',
+    ...over,
+  })
+  const TODAY = '2026-08-02'
+
+  const entergy = ach({ id: 'ent', obligationName: 'Electric', vendorName: 'Entergy', amount: 2200 })
+  const gas = ach({ id: 'gas', obligationName: 'Gas', vendorName: 'South Coast Gas', amount: 135 })
+  const ally = ach({ id: 'ally', obligationName: 'Van Note', vendorName: 'Ally', amount: 646.32 })
+  const pelican = ach({ id: 'pel', obligationName: 'Trash', vendorName: 'Pelican Waste', amount: 265 })
+
+  // --- Tokenization + description matching (the strong key) ---
+  check('vendor name reduces to distinctive tokens', vendorTokens('South Coast Gas'), ['SOUTH', 'COAST', 'GAS'])
+  // "of" and "AT&T" (after stripping punctuation, "AT" and "T") fall below the
+  // 3-char floor, so only "LA" would remain — but it too is under 3, leaving none.
+  check('short filler tokens are dropped', vendorTokens('AT&T of LA'), [])
+  ok('a bank line containing the vendor matches', descriptionMatchesVendor('Entergy', 'ENTERGY LOUISIAN BANK DRAFT'))
+  ok('multi-word vendors need every token present', descriptionMatchesVendor('Pelican Waste', 'Pelican Waste An SIGONFILE'))
+  ok('a partial vendor match is rejected', !descriptionMatchesVendor('South Coast Gas', 'COAST HARDWARE STORE'))
+  ok('an empty vendor never matches (no amount-only auto-pay)', !descriptionMatchesVendor('', 'ANYTHING 200.00'))
+
+  // --- Amount tolerance calibrated to real seasonal swings ---
+  ok('electric drafted low still matches (1,926 vs 2,200)', amountWithinAchTolerance(2200, 1926.03))
+  ok('electric drafted high still matches (2,470 vs 2,200)', amountWithinAchTolerance(2200, 2470.18))
+  ok('gas small-dollar swing matches (139.85 vs 135)', amountWithinAchTolerance(135, 139.85))
+  ok('a wildly wrong amount is rejected', !amountWithinAchTolerance(2200, 400))
+
+  // --- Whole-matcher behavior ---
+  {
+    const m = buildAchReconcileMatches(
+      [entergy, gas, ally, pelican],
+      [
+        bank({ id: 'be', description: 'ENTERGY LOUISIAN BANK DRAFT', amount: 2193.23, transaction_date: '2026-07-28' }),
+        bank({ id: 'bg', description: 'SOUTH COAST GAS BILL PAY', amount: 139.85, transaction_date: '2026-07-22' }),
+        bank({ id: 'ba', description: 'ALLY ALLY PAYMT 12345', amount: 646.32, transaction_date: '2026-07-15' }),
+        bank({ id: 'bp', description: 'Pelican Waste An SIGONFILE', amount: 265, transaction_date: '2026-07-10' }),
+      ],
+      [],
+      TODAY,
+    )
+    check('all four distinct ACH bills match their debit', m.length, 4)
+    check('the payment is dated on the actual posted date, not the due date', m.find((x) => x.obligationId === 'ent')?.postedDate, '2026-07-28')
+    check('and records the actual drafted amount, not the scheduled one', m.find((x) => x.obligationId === 'ent')?.amount, 2193.23)
+  }
+
+  // The dangerous case: a $500 loan debit must NOT clear a $500 check-paid bill.
+  {
+    const billboard = ach({ id: 'bb', obligationName: 'Billboard', vendorName: 'MediaRite', amount: 500, paymentMethod: 'Check' })
+    const m = buildAchReconcileMatches(
+      [billboard],
+      [bank({ id: 'loan', description: 'Loan Payment 998877', amount: 500 })],
+      [],
+      TODAY,
+    )
+    ok('a check-paid bill is never auto-reconciled, even on an exact amount', m.length === 0)
+  }
+
+  // An ACH bill whose vendor name is absent from every description stays unmatched.
+  {
+    const m = buildAchReconcileMatches(
+      [ach({ id: 'x', vendorName: 'Hidden Vendor', amount: 200 })],
+      [bank({ description: 'ACH DEBIT 200.00', amount: 200 })],
+      [],
+      TODAY,
+    )
+    ok('amount alone never triggers a match without the vendor name', m.length === 0)
+  }
+
+  // Idempotency: a transaction already linked to a payment is not matched again.
+  {
+    const m = buildAchReconcileMatches(
+      [entergy],
+      [bank({ id: 'used', description: 'ENTERGY DRAFT', amount: 2200 })],
+      ['used'],
+      TODAY,
+    )
+    ok('an already-reconciled bank row is skipped (tap-twice safe)', m.length === 0)
+  }
+
+  // One transaction is claimed once, even if two bills could plausibly want it.
+  {
+    const twinA = ach({ id: 'ta', vendorName: 'Acme', amount: 300 })
+    const twinB = ach({ id: 'tb', vendorName: 'Acme', amount: 300 })
+    const m = buildAchReconcileMatches(
+      [twinA, twinB],
+      [bank({ id: 'one', description: 'ACME DEBIT', amount: 300 })],
+      [],
+      TODAY,
+    )
+    check('a single debit is claimed by exactly one bill', m.length, 1)
+  }
+
+  // A future-dated row and an ancient row are both out of scope.
+  {
+    const m = buildAchReconcileMatches(
+      [entergy],
+      [
+        bank({ id: 'fut', description: 'ENTERGY DRAFT', amount: 2200, transaction_date: '2026-09-01' }),
+        bank({ id: 'old', description: 'ENTERGY DRAFT', amount: 2200, transaction_date: '2026-01-01' }),
+      ],
+      [],
+      TODAY,
+    )
+    ok('a future-dated or long-past debit is not reconciled', m.length === 0)
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`)
