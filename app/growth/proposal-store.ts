@@ -19,6 +19,7 @@ import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
 import { analyzeProposalFromSnapshot } from '@/lib/growth-planner-service'
 import { getSavedProposalReviews } from '@/lib/growth-proposal-review'
+import type { Attribution } from '@/lib/growth-outcomes'
 import { draftToProposal, num } from '@/app/growth/proposal-draft'
 import type { Proposal, ProposalDecision } from '@/lib/growth-proposals'
 import type {
@@ -173,6 +174,128 @@ export async function listSavedProposals(): Promise<SavedProposalSummary[]> {
     worsened: r.worsened,
     approvedAt: r.approvedAt,
   }))
+}
+
+/**
+ * Record that an approved commitment actually went live (M5).
+ *
+ * Upserted on `proposal_id`, so correcting the start date or upfront cost revises
+ * the record instead of creating a second conflicting activation.
+ */
+export async function activateProposal(input: {
+  proposalId: string
+  actualStartDate: string
+  actualUpfrontCost: number
+  notes?: string | null
+}): Promise<{ ok: boolean; error?: string }> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.actualStartDate)) {
+    return { ok: false, error: 'Enter the start date as a real calendar date.' }
+  }
+  if (!Number.isFinite(input.actualUpfrontCost) || input.actualUpfrontCost < 0) {
+    return { ok: false, error: 'Upfront cost cannot be negative.' }
+  }
+
+  const supabase = await createClient()
+  const { error } = await supabase.from('growth_proposal_activations').upsert(
+    {
+      proposal_id: input.proposalId,
+      actual_start_date: input.actualStartDate,
+      actual_upfront_cost: input.actualUpfrontCost,
+      notes: input.notes?.trim() || null,
+    },
+    { onConflict: 'proposal_id' },
+  )
+  if (error) return { ok: false, error: error.message }
+
+  revalidateProposalViews(input.proposalId)
+  return { ok: true }
+}
+
+/**
+ * Record what a commitment actually cost and earned in one month.
+ *
+ * `actualCost` and `revenueImpact` stay null when not supplied — an unrecorded month
+ * must never be stored as $0, because that would read as a free month. Revenue is
+ * rejected without a defensible attribution rather than silently downgraded, so an
+ * unexplained number can never end up presented as a return (the database enforces
+ * the same rule, this is the friendly version of that error).
+ */
+export async function recordProposalOutcome(input: {
+  proposalId: string
+  monthKey: string
+  actualCost: number | null
+  revenueImpact: number | null
+  attribution: Attribution
+  notes?: string | null
+}): Promise<{ ok: boolean; error?: string }> {
+  if (!/^\d{4}-\d{2}$/.test(input.monthKey)) {
+    return { ok: false, error: 'Pick a month.' }
+  }
+  if (input.actualCost != null && (!Number.isFinite(input.actualCost) || input.actualCost < 0)) {
+    return { ok: false, error: 'Actual cost cannot be negative.' }
+  }
+  if (
+    input.revenueImpact != null &&
+    (!Number.isFinite(input.revenueImpact) || input.revenueImpact < 0)
+  ) {
+    return { ok: false, error: 'Added sales cannot be negative.' }
+  }
+  if (input.revenueImpact != null && input.attribution === 'not_measurable') {
+    return {
+      ok: false,
+      error:
+        'You entered added sales but marked them not measurable. Either say how much of it you can attribute to this commitment, or leave the sales figure blank.',
+    }
+  }
+  if (input.actualCost == null && input.revenueImpact == null) {
+    return { ok: false, error: 'Enter what it cost, what it earned, or both.' }
+  }
+
+  const supabase = await createClient()
+  const { error } = await supabase.from('growth_proposal_outcomes').upsert(
+    {
+      proposal_id: input.proposalId,
+      month_key: input.monthKey,
+      actual_cost: input.actualCost,
+      revenue_impact: input.revenueImpact,
+      attribution: input.attribution,
+      notes: input.notes?.trim() || null,
+    },
+    // Re-entering a month CORRECTS it. Without this, logging the same month twice
+    // would double-count its revenue.
+    { onConflict: 'proposal_id,month_key' },
+  )
+  if (error) return { ok: false, error: error.message }
+
+  revalidateProposalViews(input.proposalId)
+  return { ok: true }
+}
+
+/** Remove one month's record, for when it was entered against the wrong month. */
+export async function deleteProposalOutcome(
+  proposalId: string,
+  monthKey: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const supabase = await createClient()
+  const { error } = await supabase
+    .from('growth_proposal_outcomes')
+    .delete()
+    .eq('proposal_id', proposalId)
+    .eq('month_key', monthKey)
+  if (error) return { ok: false, error: error.message }
+
+  revalidateProposalViews(proposalId)
+  return { ok: true }
+}
+
+/** Every surface that reads a proposal's figures, refreshed together. */
+function revalidateProposalViews(proposalId: string) {
+  revalidatePath('/')
+  revalidatePath('/admin')
+  revalidatePath('/ai-advisor')
+  revalidatePath('/growth')
+  revalidatePath('/growth/proposals')
+  revalidatePath(`/growth/proposals/${proposalId}`)
 }
 
 /** Mark a proposal as one the owner actually went ahead with, or undo that. Kept

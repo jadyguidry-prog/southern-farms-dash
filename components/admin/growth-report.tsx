@@ -4,10 +4,12 @@
 // dashboard card and the AI Advisor read, so the recommended commitment and the
 // per-proposal verdicts cannot differ between the three surfaces.
 //
-// On "forecast vs actual": this reports the FORECAST only. Matching an approved
-// proposal to real transactions is not implemented, so actual spend is labelled
-// "not yet tracked" rather than shown as $0 — a literal zero here would read as
-// "this commitment cost nothing", which is the opposite of the truth.
+// On "forecast vs actual": actuals are now REAL, from owner-recorded activation and
+// monthly outcomes (M5), shared via `getSavedProposalReviews` so this card and the
+// proposal detail page cannot disagree. The original rule still holds, though —
+// an unrecorded commitment shows "not recorded yet", never $0, because a literal
+// zero would read as "this cost nothing", the opposite of the truth. Actuals are
+// still owner-entered rather than matched to bank transactions.
 
 import type { GrowthPlannerSnapshot } from '@/lib/growth-planner-service'
 import type { ProposalReview } from '@/lib/growth-proposal-review'
@@ -44,6 +46,33 @@ export function GrowthReport({
     0,
   )
   const committedOneTime = approved.reduce((sum, r) => sum + r.live.upfrontCost, 0)
+
+  // Actuals, from the SAME shared summaries the detail page renders.
+  //
+  // Two rules keep this honest. First, only commitments with at least one recorded
+  // month contribute — so `actualRecorded` stays null (not $0) until something real
+  // has been entered. Second, the forecast side of the comparison is each
+  // commitment's `forecastCostOverRecorded`, covering only its recorded months;
+  // comparing full-term forecasts against a partial history would make every
+  // commitment look dramatically under budget.
+  const tracked = approved.filter((r) => r.outcomes.actualCostOverRecorded != null)
+  const actualRecorded =
+    tracked.length > 0
+      ? tracked.reduce((sum, r) => sum + (r.outcomes.actualCostOverRecorded ?? 0), 0)
+      : null
+  const forecastOverTracked = tracked.reduce(
+    (sum, r) => sum + r.outcomes.forecastCostOverRecorded,
+    0,
+  )
+  const trackedVariance =
+    actualRecorded == null ? null : Math.round((actualRecorded - forecastOverTracked) * 100) / 100
+  const trackedMonths = tracked.reduce((sum, r) => sum + r.outcomes.monthsRecorded, 0)
+  const untrackedApproved = approved.length - tracked.length
+  const notCovering = approved.filter(
+    (r) =>
+      r.outcomes.verdict === 'not_covering' ||
+      r.outcomes.verdict === 'covering_at_optimistic_margins',
+  )
 
   return (
     <section
@@ -112,17 +141,57 @@ export function GrowthReport({
             ) : null}
             <div className="flex gap-1.5">
               <dt className="text-muted-foreground">Actual spend:</dt>
-              {/* Deliberately not a number. Approved proposals are not matched to
-                  transactions yet, and showing $0 would understate real spend to
-                  nothing. */}
-              <dd className="font-medium text-muted-foreground">not yet tracked</dd>
+              {/* A real figure now that outcomes are recorded — but still only ever a
+                  number when something was actually entered. `null` means unrecorded,
+                  and rendering that as $0 would read as "cost nothing". */}
+              <dd
+                className={`font-medium ${actualRecorded == null ? 'text-muted-foreground' : ''}`}
+              >
+                {actualRecorded == null ? 'not recorded yet' : formatCurrency(actualRecorded)}
+              </dd>
             </div>
+            {actualRecorded != null ? (
+              <div className="flex gap-1.5">
+                <dt className="text-muted-foreground">vs forecast:</dt>
+                <dd
+                  className={`font-medium ${
+                    trackedVariance == null
+                      ? ''
+                      : trackedVariance > 0
+                        ? 'text-amber-700'
+                        : trackedVariance < 0
+                          ? 'text-emerald-700'
+                          : ''
+                  }`}
+                >
+                  {trackedVariance == null
+                    ? '—'
+                    : `${trackedVariance > 0 ? '+' : ''}${formatCurrency(trackedVariance)}`}
+                </dd>
+              </div>
+            ) : null}
           </dl>
           <p className="mt-1 text-pretty text-xs text-muted-foreground">
-            Forecast figures come from each proposal re-run against today&apos;s cash.
-            Actual spend is not matched to bank transactions yet, so the two cannot be
-            compared here.
+            Forecast figures come from each proposal re-run against today&apos;s cash.{' '}
+            {actualRecorded == null
+              ? 'No actual costs have been recorded against these commitments yet, so there is nothing to compare.'
+              : `Actuals cover the ${trackedMonths} ${trackedMonths === 1 ? 'month' : 'months'} recorded so far, compared against the forecast for those same months.${untrackedApproved > 0 ? ` ${untrackedApproved} approved ${untrackedApproved === 1 ? 'commitment has' : 'commitments have'} nothing recorded.` : ''}`}
           </p>
+          {/* Commitments whose recorded sales cannot justify them are the single most
+              report-worthy fact here, so they are named rather than averaged away. */}
+          {notCovering.length > 0 ? (
+            <div className="mt-3">
+              <h3 className="text-xs font-medium">Not covering their cost</h3>
+              <ul className="mt-1 flex flex-col gap-1">
+                {notCovering.map((r) => (
+                  <li key={r.id} className="text-pretty text-xs text-muted-foreground">
+                    <span className="font-medium text-foreground">{r.name}</span> —{' '}
+                    {r.outcomes.headline}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

@@ -21,6 +21,13 @@ import { createClient } from '@/lib/supabase/server'
 import { analyzeProposalFromSnapshot } from '@/lib/growth-planner-service'
 import { CLASSIFICATION_ORDER, type Classification } from '@/lib/growth-planner'
 import type { Proposal, ProposalDecision } from '@/lib/growth-proposals'
+import {
+  type ActivationRecord,
+  type OutcomeRecord,
+  type OutcomeSummary,
+  summarizeOutcomes,
+} from '@/lib/growth-outcomes'
+import { monthKeyOf } from '@/lib/month-key'
 
 export type ProposalReview = {
   id: string
@@ -41,6 +48,12 @@ export type ProposalReview = {
   changed: boolean
   /** True when it changed for the WORSE (was more affordable when saved). */
   worsened: boolean
+  /**
+   * What it ACTUALLY cost and earned once activated, compared against the forecast.
+   * Always present; `activated: false` when the commitment has not been started, so
+   * callers never have to distinguish "no data" from "not tracked".
+   */
+  outcomes: OutcomeSummary
 }
 
 /** Position of a classification on the worst → best scale, for comparisons. */
@@ -78,6 +91,49 @@ export const getSavedProposalReviews = cache(async (): Promise<ProposalReview[]>
       proposals.map((p) => p.id),
     )
     .order('created_at', { ascending: true })
+
+  const proposalIds = proposals.map((p) => p.id)
+
+  // Activation facts and month-by-month actuals, fetched once for all proposals so
+  // the report and the detail page share a single pair of queries.
+  const [{ data: activationRows }, { data: outcomeRows }] = await Promise.all([
+    supabase
+      .from('growth_proposal_activations')
+      .select('proposal_id, actual_start_date, actual_upfront_cost, notes')
+      .in('proposal_id', proposalIds),
+    supabase
+      .from('growth_proposal_outcomes')
+      .select('proposal_id, month_key, actual_cost, revenue_impact, attribution, notes')
+      .in('proposal_id', proposalIds)
+      .order('month_key', { ascending: true }),
+  ])
+
+  const activationByProposal = new Map<string, ActivationRecord>()
+  for (const a of activationRows ?? []) {
+    activationByProposal.set(a.proposal_id, {
+      actualStartDate: a.actual_start_date as string,
+      actualUpfrontCost: Number(a.actual_upfront_cost ?? 0),
+      notes: (a.notes as string | null) ?? null,
+    })
+  }
+
+  const outcomesByProposal = new Map<string, OutcomeRecord[]>()
+  for (const o of outcomeRows ?? []) {
+    const list = outcomesByProposal.get(o.proposal_id) ?? []
+    list.push({
+      monthKey: o.month_key as string,
+      // Preserved as null when unrecorded: an unlogged month is not a $0 month.
+      actualCost: o.actual_cost == null ? null : Number(o.actual_cost),
+      revenueImpact: o.revenue_impact == null ? null : Number(o.revenue_impact),
+      attribution: o.attribution as OutcomeRecord['attribution'],
+      notes: (o.notes as string | null) ?? null,
+    })
+    outcomesByProposal.set(o.proposal_id, list)
+  }
+
+  // One clock read for the whole batch, so every proposal is compared against the
+  // same "today" and two rows cannot straddle a month boundary mid-request.
+  const todayMonthKey = monthKeyOf(new Date().toISOString().slice(0, 10))
 
   const firstByProposal = new Map<string, { classification: string; created_at: string }>()
   for (const a of analyses ?? []) {
@@ -128,6 +184,18 @@ export const getSavedProposalReviews = cache(async (): Promise<ProposalReview[]>
       liveConfidencePct: res.confidencePct,
       changed,
       worsened: changed && rank(liveClassification) < rank(originalClassification),
+      // Forecast figures come from the LIVE decision so the comparison always uses
+      // the same cost basis the rest of the page is showing. Margin sensitivity is
+      // the proposal's own, so recorded sales are never judged against an invented
+      // margin — or against the gross-profit break-even.
+      outcomes: summarizeOutcomes({
+        activation: activationByProposal.get(p.id) ?? null,
+        outcomes: outcomesByProposal.get(p.id) ?? [],
+        forecastMonthlyCost: res.decision.monthlyCost,
+        forecastUpfrontCost: res.decision.upfrontCost,
+        sensitivity: res.decision.roi.sensitivity,
+        todayMonthKey,
+      }),
     })
   }
 
