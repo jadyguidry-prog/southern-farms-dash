@@ -20,11 +20,13 @@ import { getBankAccounts, getBusinessSettings } from '@/lib/queries'
 import {
   assessCardSafety,
   CARD_ACCOUNT_TYPE,
+  HIGH_UTILIZATION_THRESHOLD,
   type CardSafetySummary,
 } from '@/lib/card-safety'
 import {
   summarizeCardActivity,
   checkCardBalance,
+  typicalMonthlyCharges,
   type CardActivity,
   type CardBalanceCheck,
   type CardLedgerRow,
@@ -121,6 +123,21 @@ export type CardExposure = {
   cardCount: number
   /** Cards whose recorded spending stops before the current month. */
   behindCount: number
+  /**
+   * Whole calendar months the WORST-lagging card is behind. 0 means every card has
+   * activity recorded in the current month.
+   */
+  monthsBehind: number
+  /**
+   * Median monthly charge volume pooled across cards, for sizing how much spending a
+   * stale feed is hiding. Null when there is no usable month.
+   */
+  typicalMonthlyCharges: number | null
+  /**
+   * Cards at or above the shared high-utilisation threshold. Cards with no recorded
+   * credit limit are absent, never treated as having free headroom.
+   */
+  highUtilization: { accountName: string; utilizationPct: number }[]
   /** Most recent recorded card transaction across all cards. */
   lastActivityDate: string | null
   /** True when at least one card account exists. */
@@ -259,12 +276,37 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
     )
   }
 
+  // Worst case across cards, not an average: if any one card's spending is two months
+  // behind, the exposure is two months stale regardless of how current the others are.
+  const monthsBehind = cards.reduce(
+    (worst, c) => Math.max(worst, c.activity?.monthsBehind ?? 0),
+    0,
+  )
+
+  // Pooled across cards so the estimate reflects total card spending, which is what
+  // the owner is actually missing when a feed stalls.
+  const allMonths = cards.flatMap((c) => c.activity?.months ?? [])
+  const typical = typicalMonthlyCharges(allMonths)
+
+  // Only cards whose limit is genuinely known can have a utilization. Cards with no
+  // recorded limit are left out entirely rather than assumed to have room.
+  const highUtilization = cards
+    .filter((c) => c.utilization !== null && c.utilization >= HIGH_UTILIZATION_THRESHOLD)
+    .map((c) => ({
+      accountName: c.accountName,
+      // Stored as a fraction upstream; the advisor renders a percentage.
+      utilizationPct: (c.utilization as number) * 100,
+    }))
+
   return {
     cards,
     totalOwed,
     confirmedCount: confirmed.length,
     cardCount: cardAccounts.length,
     behindCount: activity.behindCount,
+    monthsBehind,
+    typicalMonthlyCharges: typical,
+    highUtilization,
     lastActivityDate,
     hasCards: cardAccounts.length > 0,
     hasActivity: activity.hasData,

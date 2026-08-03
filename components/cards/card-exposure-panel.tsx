@@ -26,12 +26,14 @@ import {
 } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { formatCurrency } from '@/lib/data'
+import { formatOwedAmount } from '@/lib/card-activity'
 import type { CardExposure } from '@/lib/card-exposure-service'
 
-/** The one place "no value recorded" is turned into words. */
-function money(value: number | null | undefined): string {
-  return value === null || value === undefined ? 'Not recorded' : formatCurrency(value)
-}
+/**
+ * "No value recorded" becomes words in exactly one place, shared with every other
+ * surface, so no page can drift back to rendering $0 for an unknown balance.
+ */
+const money = formatOwedAmount
 
 function monthLabel(monthKey: string): string {
   const [y, m] = monthKey.split('-').map(Number)
@@ -58,16 +60,18 @@ function friendlyDate(iso: string | null): string {
 export function CardExposurePanel({
   exposure,
   monthsShown = 6,
+  className,
 }: {
   exposure: CardExposure
   /** How many recent months of activity to list per card. */
   monthsShown?: number
+  className?: string
 }) {
   // No card accounts at all is a setup gap, not a zero. Say that plainly instead of
   // rendering an empty panel full of dashes.
   if (!exposure.hasCards) {
     return (
-      <Card>
+      <Card className={className}>
         <CardHeader>
           <CardTitle className="text-base">Credit Card Exposure</CardTitle>
           <CardDescription>
@@ -79,7 +83,7 @@ export function CardExposurePanel({
   }
 
   return (
-    <Card>
+    <Card className={className}>
       <CardHeader>
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>

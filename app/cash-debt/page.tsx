@@ -15,6 +15,9 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { EntityManager, type Column } from '@/components/cash-debt/entity-manager'
 import { getCashDebtSummary, getRawTable } from '@/lib/queries'
+import { getCardExposure } from '@/lib/card-exposure-service'
+import { formatOwedAmount as money } from '@/lib/card-activity'
+import { CardExposurePanel } from '@/components/cards/card-exposure-panel'
 import { getTableDef } from '@/lib/admin-config'
 import { formatCurrency } from '@/lib/data'
 
@@ -68,8 +71,9 @@ const obligationColumns: Column[] = [
 ]
 
 export default async function CashDebtPage() {
-  const [summary, bankRows, loanRows, receivableRows, obligationRows] = await Promise.all([
+  const [summary, cardExposure, bankRows, loanRows, receivableRows, obligationRows] = await Promise.all([
     getCashDebtSummary(),
+    getCardExposure(),
     getRawTable('bank_accounts', bankDef.orderBy ?? { column: 'created_at', ascending: true }),
     getRawTable('loans', loanDef.orderBy ?? { column: 'created_at', ascending: true }),
     getRawTable('receivables', receivableDef.orderBy ?? { column: 'created_at', ascending: true }),
@@ -164,6 +168,25 @@ export default async function CashDebtPage() {
           icon={Landmark}
           hint="Outstanding loan balances"
         />
+        {/* Card debt was missing from this page entirely: totalDebt above counts
+            loans only, and card balances sat in creditDrawn, which was never
+            rendered. Deliberately NOT folded into Total Debt — that figure is
+            described as loan balances, and silently changing its meaning would
+            break the reconciliation the owner does against lender statements.
+            `money()` renders an unconfirmed balance as "Not recorded" rather than
+            $0, because $0 reads as "paid off" on a card that runs thousands. */}
+        <StatCard
+          label="Credit Cards Owed"
+          value={money(cardExposure.totalOwed)}
+          icon={CreditCard}
+          hint={
+            cardExposure.totalOwed === null
+              ? 'No card balance confirmed yet'
+              : `${cardExposure.confirmedCount} of ${cardExposure.cardCount} ${
+                  cardExposure.cardCount === 1 ? 'card' : 'cards'
+                } confirmed`
+          }
+        />
         <StatCard
           label="Upcoming Obligations"
           value={formatCurrency(summary.obligations30)}
@@ -197,6 +220,8 @@ export default async function CashDebtPage() {
           hint={`vs ${formatCurrency(summary.minCashReserve)} minimum cash reserve`}
         />
       </div>
+
+      <CardExposurePanel exposure={cardExposure} className="mt-4" />
 
       <div className="mt-6">
         <Tabs defaultValue="bank">

@@ -15,6 +15,20 @@
  *     always reported and confidence is reduced instead.
  */
 
+/**
+ * Utilisation at or above which a card is called "highly used", as a FRACTION (0-1),
+ * not a percentage.
+ *
+ * Exported so the advisor and any other surface reuse this exact number instead of
+ * declaring a second, slightly different threshold. Two competing definitions of
+ * "high utilisation" would let one surface warn while another stayed calm about the
+ * same card.
+ *
+ * This was already the value used inline here before it was given a name; it is not a
+ * new threshold invented for this business.
+ */
+export const HIGH_UTILIZATION_THRESHOLD = 0.8
+
 // Account shape this module needs. Deliberately a structural subset of the row
 // returned by `getBankAccounts()`, so callers pass their rows straight in.
 export type CreditAccountInput = {
@@ -246,7 +260,7 @@ export function assessCardSafety(
 
     // Utilisation above 80% is a real constraint: it limits further borrowing and
     // pressures the next statement, so it is surfaced rather than left implicit.
-    if (utilization !== null && utilization >= 0.8) {
+    if (utilization !== null && utilization >= HIGH_UTILIZATION_THRESHOLD) {
       warnings.push(
         `${a.accountName}: ${Math.round(utilization * 100)}% of its limit is already used.`,
       )

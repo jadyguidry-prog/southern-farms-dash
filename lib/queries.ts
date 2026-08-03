@@ -20,6 +20,7 @@ import {
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
 import { getGrowthPlannerSnapshot } from '@/lib/growth-planner-service'
 import { getSavedProposalReviews } from '@/lib/growth-proposal-review'
+import { getCardExposure } from '@/lib/card-exposure-service'
 import { getLaborHealthSnapshot } from '@/lib/labor-service'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
 import { getOutstandingCheckSummary, getBillPaySnapshot } from '@/lib/bill-pay-service'
@@ -793,6 +794,7 @@ export async function getHealthSnapshot() {
   spendingCapacity,
   growthPlanner,
   proposalReviews,
+  cardExposure,
   ] = await Promise.all([
   getKpis(),
   getCashDebtSummary(),
@@ -807,6 +809,9 @@ export async function getHealthSnapshot() {
   // dashboard, the advisor and the Growth Planner page all see identical figures.
   getGrowthPlannerSnapshot(),
   getSavedProposalReviews(),
+  // Also `cache`-wrapped, and the same loader the dashboard, Cash & Debt and the
+  // report call, so a card figure in an advisor warning always matches the panel.
+  getCardExposure(),
   ])
   const settings = summary.settings
 
@@ -930,6 +935,24 @@ export async function getHealthSnapshot() {
               worsened: r.worsened,
             })),
           approvedCount: proposalReviews.filter((r) => r.approvedAt != null).length,
+        }
+      : undefined,
+    // Card exposure, read from the SAME shared loader the dashboard, Cash & Debt and
+    // the report use, so the advisor can never warn about a different number than the
+    // one on screen. Omitted when no card accounts exist.
+    //
+    // `totalOwed` is passed through as-is, including null. Coercing it to 0 here would
+    // silently convert "nobody has entered a balance" into "you owe nothing" and
+    // suppress the very warning this block exists to raise.
+    cards: cardExposure.hasCards
+      ? {
+          totalOwed: cardExposure.totalOwed,
+          cardCount: cardExposure.cardCount,
+          confirmedCount: cardExposure.confirmedCount,
+          monthsBehind: cardExposure.monthsBehind,
+          lastActivityDate: cardExposure.lastActivityDate,
+          typicalMonthlyCharges: cardExposure.typicalMonthlyCharges,
+          highUtilization: cardExposure.highUtilization,
         }
       : undefined,
     // Same guard as cash flow: with no timecards there is nothing to advise on,

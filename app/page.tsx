@@ -33,6 +33,8 @@ import {
   getHealthSnapshot,
 } from '@/lib/queries'
 import { getSpendingCapacity } from '@/lib/spending-capacity-data'
+import { getCardExposure } from '@/lib/card-exposure-service'
+import { CardExposurePanel } from '@/components/cards/card-exposure-panel'
 import { HEALTH_COLOR, HEALTH_TEXT } from '@/lib/health'
 
 const severityStyles: Record<string, string> = {
@@ -42,11 +44,12 @@ const severityStyles: Record<string, string> = {
 }
 
 export default async function DashboardPage() {
-  const [snapshot, capacity, cashFlowMonthly, saved] = await Promise.all([
+  const [snapshot, capacity, cashFlowMonthly, saved, cardExposure] = await Promise.all([
     getHealthSnapshot(),
     getSpendingCapacity(),
     getCashFlowMonthly(),
     getRecommendations(),
+    getCardExposure(),
   ])
 
   const {
@@ -278,6 +281,13 @@ export default async function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Credit card exposure sits directly under the line-of-credit card because
+          both are borrowed money. It was previously invisible on every surface:
+          totalDebt counts loans only, and card balances lived in creditDrawn,
+          which this page never displayed. Card spend running $3.3k-$11.2k/month
+          was therefore absent from the dashboard entirely. */}
+      <CardExposurePanel exposure={cardExposure} className="mt-4" />
 
       {/* Health / ratios */}
       <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">

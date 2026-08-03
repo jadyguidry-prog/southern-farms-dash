@@ -24,6 +24,20 @@
  */
 
 import { monthKeyOf, monthsBetween } from './month-key'
+import { formatCurrency } from './data'
+
+/**
+ * The ONE place a possibly-unrecorded card amount becomes display text.
+ *
+ * Shared by every surface on purpose. Amex runs thousands a month here, so a literal
+ * "$0.00" for an amount nobody has entered reads as "paid off" and understates real
+ * exposure to nothing. Null means "not recorded" and must always say so in words.
+ * Keeping this in one exported function stops a future surface from quietly
+ * reintroducing `?? 0`.
+ */
+export function formatOwedAmount(value: number | null | undefined): string {
+  return value === null || value === undefined ? 'Not recorded' : formatCurrency(value)
+}
 
 /**
  * One ledger row. A structural subset of `financial_transactions` so callers can
@@ -65,6 +79,37 @@ export type CardMonth = {
   payments: number
   refunds: number
   txnCount: number
+}
+
+/**
+ * Typical monthly charge volume across recorded months, used to size how much money a
+ * stale feed is hiding. Null when there is no usable month.
+ *
+ * MEDIAN, not mean: one unusually large equipment month would otherwise inflate the
+ * "untracked" estimate and turn an honest warning into an alarming one.
+ *
+ * THE NEWEST MONTH IS EXCLUDED when three or more months exist. Card history arrives
+ * as statement imports, so the most recent recorded month is routinely a partial one —
+ * here the last month on file holds only the 1st to the 3rd. Including a 3-day month
+ * alongside full months would drag the typical figure far below reality and understate
+ * the gap, which is the exact failure this warning exists to prevent. With fewer than
+ * three months there is nothing to spare, so every month is used and the caller treats
+ * the result as rough.
+ */
+export function typicalMonthlyCharges(months: CardMonth[]): number | null {
+  if (months.length === 0) return null
+
+  // `months` is newest-first by contract; sort defensively so a caller passing a
+  // differently ordered array cannot silently drop the wrong month.
+  const ordered = [...months].sort((a, b) => (a.monthKey < b.monthKey ? 1 : -1))
+  const usable = ordered.length >= 3 ? ordered.slice(1) : ordered
+  if (usable.length === 0) return null
+
+  const charges = usable.map((m) => m.charges).sort((a, b) => a - b)
+  const mid = Math.floor(charges.length / 2)
+  return charges.length % 2 === 1
+    ? charges[mid]
+    : (charges[mid - 1] + charges[mid]) / 2
 }
 
 export type CardActivity = {

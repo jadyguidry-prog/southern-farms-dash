@@ -449,6 +449,11 @@ type InsightInput = {
    * database.
    */
   growth?: GrowthInsightInput
+  /**
+   * Credit-card exposure. Omit when no card accounts exist, so an empty setup
+   * produces no card advice.
+   */
+  cards?: CardInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
 }
@@ -500,6 +505,33 @@ export type GrowthInsightInput = {
   approvedCount: number
 }
 
+/**
+ * Credit-card exposure, for advisor insights about borrowed money on cards.
+ *
+ * Omitted entirely when no card accounts exist, so an empty setup produces no card
+ * advice rather than advice built on zeros.
+ *
+ * `totalOwed` is DELIBERATELY nullable and must never be coerced to 0. Null means
+ * "nobody has entered a balance", which on a card running thousands a month is a very
+ * different statement from "you owe nothing". The insights below branch on null and
+ * say which case it is.
+ */
+export type CardInsightInput = {
+  /** Confirmed amount owed across cards; null when no card balance is recorded. */
+  totalOwed: number | null
+  cardCount: number
+  /** How many cards have an owner-confirmed balance. */
+  confirmedCount: number
+  /** Whole calendar months between the newest card transaction and today. */
+  monthsBehind: number
+  /** Newest recorded card transaction date, null when there is no history. */
+  lastActivityDate: string | null
+  /** Typical monthly charge volume, for sizing the untracked gap. */
+  typicalMonthlyCharges: number | null
+  /** Cards whose utilization is known and above the safe threshold. */
+  highUtilization: { accountName: string; utilizationPct: number }[]
+}
+
 export type BillPayInsightInput = {
   /** Written checks not yet cleared, in dollars. */
   outstandingChecks: number
@@ -529,8 +561,9 @@ export function generateInsights({
   billPay,
   spending,
   growth,
+  cards,
   now,
-  }: InsightInput): Insight[] {
+}: InsightInput): Insight[] {
   const out: Insight[] = []
   const { payroll, cash, sales } = pillars
 
@@ -1323,6 +1356,92 @@ export function generateInsights({
             ? `Re-open it before committing — the version you remember is out of date.`
             : `If you still want it, this is a better moment than when you first checked.`),
         impact: `${p.fromClassification} → ${p.toClassification}`,
+      })
+    }
+  }
+
+  // --- Credit cards -------------------------------------------------------
+  // This whole block exists because a large real expense was invisible: card spend
+  // ran $3.3k-$11.2k a month, stopped being imported, and nothing said so. The
+  // advisor's job here is to make BOTH kinds of silence loud — a balance nobody has
+  // entered, and a feed that has stopped.
+  if (cards) {
+    // 1. A stale feed is the highest-value warning: it is the failure that hid the
+    //    expense in the first place, and it is silent by nature. Sized in dollars
+    //    using typical monthly charges so it reads as money, not as a data chore.
+    if (cards.monthsBehind >= 1 && cards.lastActivityDate) {
+      const monthWord = cards.monthsBehind === 1 ? 'month' : 'months'
+      const estimate =
+        cards.typicalMonthlyCharges === null
+          ? null
+          : cards.typicalMonthlyCharges * cards.monthsBehind
+      out.push({
+        id: 'auto-cards-feed-stale',
+        severity: cards.monthsBehind >= 2 ? 'critical' : 'warning',
+        category: 'Cards',
+        title: `Card spending is ${cards.monthsBehind} ${monthWord} behind`,
+        detail:
+          `The newest card transaction on file is ${cards.lastActivityDate}. ` +
+          (estimate === null
+            ? `Any spending since then is missing from every figure on this dashboard.`
+            : `At your typical ${formatCurrency(cards.typicalMonthlyCharges ?? 0)} a month, ` +
+              `roughly ${formatCurrency(estimate)} of spending is missing from every ` +
+              `figure on this dashboard.`) +
+          ` Import the latest card statement to close the gap.`,
+        impact:
+          estimate === null
+            ? `${cards.monthsBehind} ${monthWord} not imported`
+            : `~${formatCurrency(estimate)} untracked`,
+      })
+    }
+
+    // 2. No confirmed balance at all. Reported separately from staleness because the
+    //    fix is different — this one is a number to look up, not a file to import.
+    if (cards.totalOwed === null) {
+      out.push({
+        id: 'auto-cards-balance-unknown',
+        severity: 'warning',
+        category: 'Cards',
+        title:
+          cards.cardCount === 1
+            ? 'No balance recorded for your credit card'
+            : 'No balance recorded for any credit card',
+        detail:
+          `Nothing is on file for what is currently owed, so card debt is missing from ` +
+          `your total obligations. This is not the same as owing nothing — it means the ` +
+          `figure has never been entered. Add the current balance in Cash & Debt.`,
+        impact: 'Card debt not counted',
+      })
+    } else if (cards.confirmedCount < cards.cardCount) {
+      // A partial total is worse than none if it is read as complete, so name the gap.
+      const missing = cards.cardCount - cards.confirmedCount
+      out.push({
+        id: 'auto-cards-balance-partial',
+        severity: 'warning',
+        category: 'Cards',
+        title: `${missing} of ${cards.cardCount} cards have no balance recorded`,
+        detail:
+          `The ${formatCurrency(cards.totalOwed)} shown as owed covers only the ` +
+          `${cards.confirmedCount} card${cards.confirmedCount === 1 ? '' : 's'} with a ` +
+          `recorded balance. Real card debt is higher by an unknown amount until the ` +
+          `${missing === 1 ? 'other card' : 'other cards'} ${missing === 1 ? 'is' : 'are'} filled in.`,
+        impact: `Understates card debt`,
+      })
+    }
+
+    // 3. Utilization, only where the limit is actually known. Cards with no recorded
+    //    limit are excluded upstream rather than assumed unlimited.
+    for (const c of cards.highUtilization) {
+      out.push({
+        id: `auto-cards-utilization-${c.accountName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        severity: 'warning',
+        category: 'Cards',
+        title: `${c.accountName} is ${Math.round(c.utilizationPct)}% used`,
+        detail:
+          `Running a card near its limit removes the headroom you would need in a bad ` +
+          `month, and high utilization can affect borrowing terms. Paying this down ` +
+          `restores flexibility.`,
+        impact: `${Math.round(c.utilizationPct)}% of limit used`,
       })
     }
   }
