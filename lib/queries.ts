@@ -70,6 +70,11 @@ export const SETTING_DEFAULTS = {
   marketing_baseline_pct: 1.5,
   marketing_ceiling_pct: 3,
   days_cash_target: 30,
+  // How many days a hand-entered account balance stays trustworthy. Past this, the
+  // Growth Planner still answers but reports the age and lowers its confidence.
+  // Seeded as a real row by migration `card_staleness_setting`; this mirror exists
+  // only so a fresh database returns a number instead of `undefined`.
+  account_data_stale_days: 14,
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS
@@ -441,6 +446,17 @@ export async function getBankAccounts() {
     currentBalance: Number(a.current_balance),
     availableCredit: Number(a.available_credit),
     creditLimit: Number(a.credit_limit),
+    // Null is preserved as null, NOT coerced to 0. An untracked statement must stay
+    // distinguishable from a card genuinely paid down to zero, otherwise a card
+    // nobody has entered yet looks settled and the planner silently trusts it.
+    statementBalance:
+      a.statement_balance === null || a.statement_balance === undefined
+        ? null
+        : Number(a.statement_balance),
+    statementDueDate: a.statement_due_date ?? null,
+    // Empty string means never recorded. Staleness is judged from this, so it is
+    // left falsy rather than defaulted to today — defaulting would make an
+    // unmaintained figure look freshly confirmed.
     lastUpdated: a.last_updated ?? '',
     notes: a.notes ?? '',
   }))
@@ -561,9 +577,23 @@ export const getCashDebtSummary = cache(async () => {
   // Operating Liquidity = cash on hand + available credit.
   const operatingLiquidity = cashOnHand + availableCredit
 
-  // Sum of every account balance (kept for the legacy "cash position" label).
-  const totalCash = accounts.reduce((s, a) => s + a.currentBalance, 0)
-  const totalAvailableCredit = accounts.reduce((s, a) => s + a.availableCredit, 0)
+  // Legacy "cash position" label. Must count DEPOSIT balances only.
+  //
+  // This previously summed EVERY account, which silently counted a drawn credit
+  // balance as cash: with $15,000 drawn on the line of credit, "total cash" read
+  // $15,000 too high, and money owed on a credit card would have added to it as
+  // well. `currentBalance` on a credit account is debt, not cash.
+  //
+  // Now derived from the same cash figure used everywhere else, so the two can
+  // never disagree. Cash Flow already filtered credit out of its own total
+  // (`app/cash-flow/page.tsx`), so this brings the summary in line with it.
+  const totalCash = cashOnHand
+
+  // Undrawn credit across borrowing accounts only. Previously unfiltered, which
+  // would have swept in any stray `available_credit` sitting on a deposit row —
+  // exactly how a Square Capital loan OFFER parked on the savings account could
+  // have been read as spendable headroom. Same basis as `availableCredit`.
+  const totalAvailableCredit = availableCredit
 
   // ---- Debt ----
   const totalDebt = loans.reduce((s, l) => s + l.balance, 0)
@@ -682,7 +712,12 @@ export const getCashDebtSummary = cache(async () => {
     unscheduledObligations,
     overdueObligationsCount: overdueObligations.length,
     overdueReceivablesCount: overdueReceivables.length,
-    netWorth: totalCash + totalReceivable - totalDebt - totalObligations,
+    // Cash + money owed to us − everything we owe. `creditDrawn` is included
+    // because a drawn line of credit and a carried card balance are real debts that
+    // `totalDebt` (term loans only) does not cover. Before this, drawn credit was
+    // ADDED here as cash; leaving it merely absent would still overstate net worth.
+    netWorth:
+      totalCash + totalReceivable - totalDebt - creditDrawn - totalObligations,
   }
 })
 

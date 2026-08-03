@@ -212,7 +212,10 @@ export const ADMIN_TABLES: TableDef[] = [
     key: 'bank_accounts',
     table: 'bank_accounts',
     label: 'Bank Accounts',
-    description: 'Operating, savings, and credit line balances.',
+    description:
+      'Operating, savings, credit line, and credit card balances. For a credit card, ' +
+      'Current Balance is what you OWE. Keep Last Updated current — the Growth ' +
+      'Planner lowers its confidence when a figure has gone stale.',
     fields: [
       { name: 'account_name', label: 'Account Name', type: 'text', required: true },
       { name: 'account_nickname', label: 'Account Nickname', type: 'text' },
@@ -227,6 +230,18 @@ export const ADMIN_TABLES: TableDef[] = [
       { name: 'current_balance', label: 'Current Balance', type: 'number', required: true },
       { name: 'available_credit', label: 'Available Credit', type: 'number' },
       { name: 'credit_limit', label: 'Credit Limit', type: 'number' },
+      // Card-only, and intentionally optional: left blank they stay NULL, which the
+      // planner reports as "not tracked" rather than treating as a paid-off card.
+      {
+        name: 'statement_balance',
+        label: 'Statement Balance (cards)',
+        type: 'number',
+      },
+      {
+        name: 'statement_due_date',
+        label: 'Statement Due Date (cards)',
+        type: 'date',
+      },
       { name: 'last_updated', label: 'Last Updated', type: 'date' },
       { name: 'notes', label: 'Notes', type: 'text' },
     ],
@@ -234,6 +249,8 @@ export const ADMIN_TABLES: TableDef[] = [
       { name: 'account_name', label: 'Account' },
       { name: 'account_type', label: 'Type' },
       { name: 'current_balance', label: 'Balance', format: 'currency' },
+      // Surfaced in the list so a stale row is visible without opening it.
+      { name: 'last_updated', label: 'Updated' },
     ],
     orderBy: { column: 'current_balance', ascending: false },
   },
