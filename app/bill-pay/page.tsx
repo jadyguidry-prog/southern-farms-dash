@@ -12,6 +12,7 @@ import {
   getClearingSuggestions,
   getAchReconcileMatches,
 } from '@/lib/bill-pay-service'
+import { sumPaidInMonth } from '@/lib/bill-pay-shared'
 import { formatCurrency } from '@/lib/data'
 import { BillPayClient } from '@/components/bill-pay/bill-pay-client'
 
@@ -64,6 +65,9 @@ export default async function BillPayPage() {
 
   const outstanding = payments.filter((p) => p.status === 'outstanding')
 
+  // Computed once so the tile can't straddle a month boundary mid-render.
+  const currentMonth = new Date().toISOString().slice(0, 7)
+
   return (
     <div>
       <PageHeader
@@ -97,11 +101,11 @@ export default async function BillPayPage() {
         />
         <StatCard
           label="Paid This Month"
-          value={formatCurrency(
-            payments
-              .filter((p) => p.paymentDate.startsWith(new Date().toISOString().slice(0, 7)))
-              .reduce((s, p) => s + p.amount, 0),
-          )}
+          // Shared with the regression tests so the two cannot drift. Excludes void
+          // payments and anything still awaiting its money — without that, a bill
+          // logged as pay-by-check-later counted as paid the moment it was entered,
+          // double-reporting the same dollars shown under Outstanding.
+          value={formatCurrency(sumPaidInMonth(payments, currentMonth))}
           icon={CheckCircle2}
           hint={`${outstanding.length} awaiting clear`}
         />

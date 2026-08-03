@@ -105,6 +105,38 @@ export function isAwaitingPayment(p: {
   return p.checkWritten === false
 }
 
+/**
+ * Total actually PAID OUT in the given month (`YYYY-MM`).
+ *
+ * Exported and shared with the page rather than computed inline, so a test cannot
+ * quietly drift from what the owner sees on screen.
+ *
+ * Excludes:
+ *   - void payments — they never happened, and
+ *   - anything still awaiting its money (ACH not yet drafted, check not yet
+ *     written), whose payment date is an intention rather than a fact.
+ *
+ * Cleared and outstanding-but-written payments both count: the money has left, or
+ * the instrument exists and is in flight.
+ */
+export function sumPaidInMonth(
+  payments: Array<{
+    amount: number
+    paymentDate: string
+    status: string
+    paymentMethod: string
+    checkWritten?: boolean
+  }>,
+  month: string,
+): number {
+  return payments
+    .filter(
+      (p) =>
+        p.status !== 'void' && !isAwaitingPayment(p) && p.paymentDate.startsWith(month),
+    )
+    .reduce((s, p) => s + p.amount, 0)
+}
+
 // ---------------------------------------------------------------------------
 // Automatic reconciliation of autopay/ACH bills from the checking feed.
 //

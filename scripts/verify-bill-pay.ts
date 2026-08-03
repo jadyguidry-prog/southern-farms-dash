@@ -29,6 +29,7 @@ import {
   descriptionMatchesVendor,
   amountWithinAchTolerance,
   vendorTokens,
+  sumPaidInMonth,
   type AchObligationInput,
   type AchTxnInput,
 } from '../lib/bill-pay-shared'
@@ -338,6 +339,47 @@ console.log('\nUnwritten checks (a bill logged before the check is written)')
     'writing the check makes amount+date matching available',
     !before.some((s) => s.matchType === 'amount_date') &&
       after.some((s) => s.matchType === 'amount_date'),
+  )
+}
+
+console.log('\n"Paid This Month" counts only money that actually left')
+{
+  const m = '2026-08'
+  // The exact bug found on screen: two bills logged as pay-by-check-later showed as
+  // $757 "Paid This Month" while simultaneously showing as $757 Outstanding.
+  const unwritten = [
+    pay({ amount: 375, paymentDate: '2026-08-15', checkNumber: null, checkWritten: false }),
+    pay({ amount: 382, paymentDate: '2026-08-15', checkNumber: null, checkWritten: false }),
+  ]
+  check('unwritten checks are not counted as paid', sumPaidInMonth(unwritten, m), 0)
+
+  check(
+    'a written outstanding check IS counted as paid',
+    sumPaidInMonth([pay({ amount: 500, paymentDate: '2026-08-04' })], m),
+    500,
+  )
+  check(
+    'a cleared payment is counted as paid',
+    sumPaidInMonth([pay({ amount: 265, paymentDate: '2026-08-03', status: 'cleared' })], m),
+    265,
+  )
+  check(
+    'a void payment is never counted as paid',
+    sumPaidInMonth([pay({ amount: 900, paymentDate: '2026-08-02', status: 'void' })], m),
+    0,
+  )
+  check(
+    'an ACH draft that has not pulled yet is not counted as paid',
+    sumPaidInMonth(
+      [pay({ amount: 1200, paymentDate: '2026-08-20', paymentMethod: 'ach', checkNumber: null })],
+      m,
+    ),
+    0,
+  )
+  check(
+    'other months are excluded',
+    sumPaidInMonth([pay({ amount: 646, paymentDate: '2026-07-24', status: 'cleared' })], m),
+    0,
   )
 }
 
