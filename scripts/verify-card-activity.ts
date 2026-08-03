@@ -15,6 +15,8 @@
 import {
   summarizeCardActivity,
   checkCardBalance,
+  typicalMonthlyCharges,
+  formatOwedAmount,
   type CardLedgerRow,
 } from '../lib/card-activity'
 
@@ -280,6 +282,81 @@ console.log('— A confirmed balance with balanceConfirmed=false is not trusted 
   const c = checkCardBalance(s.accounts[0], 9999, { balanceConfirmed: false })
   check('ignored', c.enteredOwed, null)
   check('status', c.status, 'no_balance_entered')
+}
+
+// ---------------------------------------------------------------------------
+console.log('— typicalMonthlyCharges: median, not mean —')
+{
+  const months = [
+    { monthKey: '2026-06', charges: 4000, payments: 0, refunds: 0, net: 4000, txnCount: 1 },
+    { monthKey: '2026-05', charges: 5000, payments: 0, refunds: 0, net: 5000, txnCount: 1 },
+    { monthKey: '2026-04', charges: 60000, payments: 0, refunds: 0, net: 60000, txnCount: 1 },
+    { monthKey: '2026-03', charges: 4500, payments: 0, refunds: 0, net: 4500, txnCount: 1 },
+  ]
+  // Newest (06) dropped as partial -> [5000, 60000, 4500] -> median 5000.
+  // The mean would be ~23,167: one big equipment month would nearly 5x the estimate
+  // and turn an honest warning into an alarming one.
+  check('median resists the outlier', typicalMonthlyCharges(months), 5000)
+}
+
+// ---------------------------------------------------------------------------
+console.log('— typicalMonthlyCharges: the partial newest month is excluded —')
+{
+  // This is the real shape of the owner's data: the last month on file holds only
+  // 2026-07-01..07-03 ($255) against a $3.3k-$11.2k norm. Including that 3-day month
+  // would drag "typical" toward $255 and UNDERSTATE how much the stale feed is hiding,
+  // which is the exact failure the staleness warning exists to prevent.
+  const months = [
+    { monthKey: '2026-07', charges: 255, payments: 0, refunds: 0, net: 255, txnCount: 2 },
+    { monthKey: '2026-06', charges: 8000, payments: 0, refunds: 0, net: 8000, txnCount: 9 },
+    { monthKey: '2026-05', charges: 6000, payments: 0, refunds: 0, net: 6000, txnCount: 9 },
+  ]
+  check('ignores the 3-day month', typicalMonthlyCharges(months), 7000)
+  ok(
+    'and is far above the partial month',
+    (typicalMonthlyCharges(months) ?? 0) > 255 * 10,
+  )
+}
+
+// ---------------------------------------------------------------------------
+console.log('— typicalMonthlyCharges: honest with thin history —')
+{
+  // Under 3 months there is nothing to spare, so every month is used rather than
+  // returning null and losing the only signal available.
+  const two = [
+    { monthKey: '2026-06', charges: 1000, payments: 0, refunds: 0, net: 1000, txnCount: 1 },
+    { monthKey: '2026-05', charges: 3000, payments: 0, refunds: 0, net: 3000, txnCount: 1 },
+  ]
+  check('averages the two', typicalMonthlyCharges(two), 2000)
+  check('no months -> null, never 0', typicalMonthlyCharges([]), null)
+}
+
+// ---------------------------------------------------------------------------
+console.log('— typicalMonthlyCharges: order-independent —')
+{
+  // A caller passing oldest-first must not cause the WRONG month to be dropped.
+  const newestFirst = [
+    { monthKey: '2026-07', charges: 200, payments: 0, refunds: 0, net: 200, txnCount: 1 },
+    { monthKey: '2026-06', charges: 9000, payments: 0, refunds: 0, net: 9000, txnCount: 1 },
+    { monthKey: '2026-05', charges: 7000, payments: 0, refunds: 0, net: 7000, txnCount: 1 },
+  ]
+  const oldestFirst = [...newestFirst].reverse()
+  check(
+    'same answer either way',
+    typicalMonthlyCharges(oldestFirst),
+    typicalMonthlyCharges(newestFirst),
+  )
+}
+
+// ---------------------------------------------------------------------------
+console.log('— formatOwedAmount never renders unknown as $0 —')
+{
+  // On a card that runs thousands a month, "$0.00" reads as "paid off" and understates
+  // real exposure to nothing. Unknown must say so in words.
+  check('null', formatOwedAmount(null), 'Not recorded')
+  check('undefined', formatOwedAmount(undefined), 'Not recorded')
+  ok('a real zero still shows as money', formatOwedAmount(0).includes('0'))
+  ok('and is not the words', formatOwedAmount(0) !== 'Not recorded')
 }
 
 // ---------------------------------------------------------------------------

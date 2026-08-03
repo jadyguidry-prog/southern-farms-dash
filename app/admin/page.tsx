@@ -6,6 +6,8 @@ import { LaborReport } from '@/components/admin/labor-report'
 import { CogsReport } from '@/components/admin/cogs-report'
 import { BillPayReport } from '@/components/admin/bill-pay-report'
 import { GrowthReport } from '@/components/admin/growth-report'
+import { CardExposurePanel } from '@/components/cards/card-exposure-panel'
+import { getCardExposure } from '@/lib/card-exposure-service'
 import { getGrowthPlannerSnapshot } from '@/lib/growth-planner-service'
 import { getSavedProposalReviews } from '@/lib/growth-proposal-review'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
@@ -52,6 +54,7 @@ export default async function AdminPage() {
     spendingCapacity,
     growthPlanner,
     proposalReviews,
+    cardExposure,
   ] =
     await Promise.all([
       getCsvImportBatches(),
@@ -74,6 +77,10 @@ export default async function AdminPage() {
       // Growth Planner page would disagree with.
       getGrowthPlannerSnapshot(),
       getSavedProposalReviews(),
+      // Same card loader the dashboard, Cash & Debt and the advisor read. Reporting is
+      // where the owner reconciles against the actual Amex statement, so it must not
+      // be able to show a different amount owed than the dashboard does.
+      getCardExposure(),
     ])
   const laborSummary = summarizeLabor(laborDataset.shifts, laborDataset.coverage)
   const laborMonthly = deriveMonthlyLabor(
@@ -97,6 +104,11 @@ export default async function AdminPage() {
         <BillPayReport snapshot={billPaySnapshot} />
 
         <GrowthReport snapshot={growthPlanner} reviews={proposalReviews} />
+
+        {/* Reporting gets a longer window than the dashboard: this is the section the
+            owner reconciles against the real Amex statement, so it shows every month
+            on file rather than a recent slice. */}
+        <CardExposurePanel exposure={cardExposure} monthsShown={24} />
 
         <SquareCsvImport
           onPreflight={preflightDailyImport}
