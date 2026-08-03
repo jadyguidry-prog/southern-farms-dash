@@ -26,6 +26,7 @@ import {
   Beef,
   Bell,
   LogOut,
+  TrendingUp,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -65,6 +66,7 @@ const navSections = [
       { label: 'Bill Pay', href: '/bill-pay', icon: Send },
       { label: 'Loans', href: '/loans', icon: Landmark },
       { label: 'Marketing Budget', href: '/marketing', icon: Megaphone },
+      { label: 'Growth Planner', href: '/growth', icon: TrendingUp },
     ],
   },
   {
