@@ -88,6 +88,8 @@ export default async function GrowthPage({
       <GrowthVerdict
         maxRecurring={data.maxRecurring}
         maxOneTime={data.maxOneTime}
+        edgeRecurring={data.edgeRecurring}
+        edgeOneTime={data.edgeOneTime}
         mode={data.activeMode}
         baseline={data.baselineEvaluation}
         minCashReserve={data.meta.minCashReserve}

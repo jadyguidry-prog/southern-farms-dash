@@ -38,6 +38,12 @@ export type RiskMode = {
   minPayrollCoverageMonths: number
   minVendorCoverageMonths: number
   minDebtCoverageMonths: number
+  /**
+   * Sales decline the HEADLINE recommendation must still clear every gate under.
+   * The unstressed edge amount stays visible in the ladder, but the number
+   * presented as the recommendation has to survive this much of a downturn.
+   */
+  headlineStressSalesDeclinePct: number
 }
 
 /* ------------------------------------------------------------------ */
@@ -403,7 +409,17 @@ export function maxSupported(
   mode: RiskMode,
   cov: CoverageInputs,
   kind: 'recurring' | 'one-time',
-  opts?: { ceiling?: number; tolerance?: number },
+  opts?: {
+    ceiling?: number
+    tolerance?: number
+    /**
+     * Stress the projection while searching, so the result is the largest amount
+     * that still clears every gate IN A DOWNTURN. Without this the search returns
+     * the largest merely-tolerable amount — the exact edge of 'Not Supported' —
+     * which is a poor basis for a recommendation even though it is correct.
+     */
+    stress?: { inflowMultiplier?: number; outflowMultiplier?: number }
+  },
 ): number {
   const tolerance = opts?.tolerance ?? 1
   const build = (amount: number): Commitment =>
@@ -411,8 +427,18 @@ export function maxSupported(
       ? { recurringMonthly: amount, oneTime: 0 }
       : { recurringMonthly: 0, oneTime: amount }
 
+  const stressed: ProjectionAssumptions = opts?.stress
+    ? {
+        ...assumptions,
+        inflowMultiplier:
+          (assumptions.inflowMultiplier ?? 1) * (opts.stress.inflowMultiplier ?? 1),
+        outflowMultiplier:
+          (assumptions.outflowMultiplier ?? 1) * (opts.stress.outflowMultiplier ?? 1),
+      }
+    : assumptions
+
   const supported = (amount: number): boolean =>
-    evaluateRung(assumptions, build(amount), mode, cov).classification !== 'Not Supported'
+    evaluateRung(stressed, build(amount), mode, cov).classification !== 'Not Supported'
 
   if (!supported(tolerance)) return 0
 

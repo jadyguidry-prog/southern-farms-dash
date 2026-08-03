@@ -13,6 +13,8 @@ import type { RiskMode, RungEvaluation } from '@/lib/growth-planner'
 export function GrowthVerdict({
   maxRecurring,
   maxOneTime,
+  edgeRecurring,
+  edgeOneTime,
   mode,
   baseline,
   minCashReserve,
@@ -21,12 +23,19 @@ export function GrowthVerdict({
 }: {
   maxRecurring: number
   maxOneTime: number
+  /** The unstressed ceiling, shown for context but never as the recommendation. */
+  edgeRecurring: number
+  edgeOneTime: number
   mode: RiskMode
   baseline: RungEvaluation
   minCashReserve: number
   horizonMonths: number
   startMonthLabel: string
 }) {
+  const declinePct = mode.headlineStressSalesDeclinePct
+  // Only worth showing the ceiling when it is meaningfully above the recommendation;
+  // otherwise it is noise.
+  const showCeiling = edgeRecurring > maxRecurring * 1.05 && edgeRecurring > 0
   const nothingAffordable = maxRecurring <= 0 && maxOneTime <= 0
 
   // The baseline is "commit to nothing". If that already fails, no amount of
@@ -62,6 +71,23 @@ export function GrowthVerdict({
                 <p className="mt-1 text-xs text-muted-foreground">One-time purchase</p>
               </div>
             </div>
+
+            {/* State the standard the headline was held to. Without this the number
+                looks like a raw maximum, and the owner has no way to know it was
+                chosen to survive a downturn rather than to sit at the limit. */}
+            {maxRecurring > 0 || maxOneTime > 0 ? (
+              <p className="text-xs leading-relaxed text-muted-foreground text-pretty">
+                Holds up even if sales fall {declinePct}% below your recent average.
+                {showCeiling ? (
+                  <>
+                    {' '}
+                    Your limits would technically stretch to{' '}
+                    <span className="font-mono">{formatCurrency(edgeRecurring)}</span>/mo,
+                    but that leaves nothing spare if sales dip.
+                  </>
+                ) : null}
+              </p>
+            ) : null}
           </div>
 
           <div className="flex shrink-0 flex-col gap-2 sm:items-end">
@@ -102,13 +128,28 @@ export function GrowthVerdict({
           <div className="flex flex-col gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
             <p className="flex items-center gap-2 text-sm font-semibold text-foreground">
               <AlertTriangle className="size-4 shrink-0 text-amber-600" aria-hidden="true" />
-              No new commitment fits right now
+              {showCeiling
+                ? 'Nothing new fits with room to spare'
+                : 'No new commitment fits right now'}
             </p>
-            <p className="text-sm leading-relaxed text-foreground text-pretty">
-              Your current position covers itself, but there is no room left for
-              anything new without crossing a limit you set. The panels below show
-              exactly which limit binds first and what would have to change.
-            </p>
+            {/* Two genuinely different situations. If the unstressed ceiling is above
+                zero, something DOES fit on the expected path -- it just cannot absorb
+                a downturn. Saying "nothing fits" there would be wrong and would hide
+                a real option the owner may still want to weigh. */}
+            {showCeiling ? (
+              <p className="text-sm leading-relaxed text-foreground text-pretty">
+                On your expected numbers your limits would stretch to{' '}
+                <span className="font-mono">{formatCurrency(edgeRecurring)}</span>/mo — but
+                none of that survives sales falling {declinePct}%, so none of it is
+                recommended. The panels below show which limit binds first.
+              </p>
+            ) : (
+              <p className="text-sm leading-relaxed text-foreground text-pretty">
+                Your current position covers itself, but there is no room left for
+                anything new without crossing a limit you set. The panels below show
+                exactly which limit binds first and what would have to change.
+              </p>
+            )}
           </div>
         ) : null}
 

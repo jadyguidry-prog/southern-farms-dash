@@ -75,6 +75,7 @@ export const getRiskModes = cache(async (): Promise<RiskMode[]> => {
     minPayrollCoverageMonths: Number(r.min_payroll_coverage_months),
     minVendorCoverageMonths: Number(r.min_vendor_coverage_months),
     minDebtCoverageMonths: Number(r.min_debt_coverage_months),
+    headlineStressSalesDeclinePct: Number(r.headline_stress_sales_decline_pct),
   }))
 })
 
@@ -96,9 +97,22 @@ export type GrowthPlannerSnapshot = {
   baselineEvaluation: RungEvaluation
 
   ladder: LadderRung[]
-  /** Largest recurring / one-time amount that clears every gate exactly. */
+
+  /**
+   * The RECOMMENDED amounts: largest that still clear every gate through a sales
+   * decline of `activeMode.headlineStressSalesDeclinePct`. Use these for the
+   * headline.
+   */
   maxRecurring: number
   maxOneTime: number
+
+  /**
+   * The largest amounts the limits tolerate on the EXPECTED path, with no downturn
+   * applied. Higher than the recommended figures and much closer to failure — shown
+   * as the ceiling, never as the recommendation.
+   */
+  edgeRecurring: number
+  edgeOneTime: number
 
   /**
    * The commitment the scenario matrix was actually run against — the headline
@@ -281,8 +295,27 @@ export const getGrowthPlannerSnapshot = cache(
     if (cards.confidence === 'missing') confidencePct = Math.min(confidencePct, 60)
     else if (cards.confidence === 'reduced') confidencePct = Math.min(confidencePct, 80)
 
-    const maxRecurring = maxSupported(assumptions, activeMode, coverage, 'recurring')
-    const maxOneTime = maxSupported(assumptions, activeMode, coverage, 'one-time')
+    // Two different questions, deliberately both answered.
+    //
+    // The EDGE is the largest amount the limits tolerate on the expected path. It is
+    // the mathematically correct maximum, and it is what the ladder shows -- but it
+    // sits at the boundary of failure. Observed Aug 2026: the edge was $3,029/mo,
+    // which left a $1 cushion and broke on a 5% sales dip.
+    //
+    // The HEADLINE is the largest amount that still clears every gate through the
+    // mode's required downturn. That is the number the owner acts on, so resilience
+    // has to be built into it rather than bolted on as a warning underneath.
+    const edgeRecurring = maxSupported(assumptions, activeMode, coverage, 'recurring')
+    const edgeOneTime = maxSupported(assumptions, activeMode, coverage, 'one-time')
+
+    const declinePct = activeMode.headlineStressSalesDeclinePct
+    const headlineStress = { inflowMultiplier: 1 - declinePct / 100 }
+    const maxRecurring = maxSupported(assumptions, activeMode, coverage, 'recurring', {
+      stress: headlineStress,
+    })
+    const maxOneTime = maxSupported(assumptions, activeMode, coverage, 'one-time', {
+      stress: headlineStress,
+    })
 
     // ---- Stress test the headline number, not a hypothetical ------------
     // The number the owner will act on is the headline recommendation, so that is
@@ -317,6 +350,8 @@ export const getGrowthPlannerSnapshot = cache(
       scenarios,
       maxRecurring,
       maxOneTime,
+      edgeRecurring,
+      edgeOneTime,
       strategy,
       cards,
       nearTerm: {

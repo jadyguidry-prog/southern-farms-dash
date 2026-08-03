@@ -87,9 +87,13 @@ const balanced: RiskMode = {
   minDaysCash: 7,
   locAllowed: false,
   maxLocUtilizationPct: 0,
-  minPayrollCoverageMonths: 1.5,
+  // Mirrors the CALIBRATED values in growth_risk_modes, not the generic ones first
+  // seeded. A 1.5-month payroll gate here demanded $18,030 against a $15,000 reserve,
+  // silently overrode the owner's own floor and failed even the do-nothing baseline.
+  minPayrollCoverageMonths: 1,
   minVendorCoverageMonths: 1.5,
   minDebtCoverageMonths: 1.5,
+  headlineStressSalesDeclinePct: 10,
 }
 
 const conservative: RiskMode = {
@@ -98,9 +102,10 @@ const conservative: RiskMode = {
   label: 'Conservative',
   isDefault: false,
   minDaysCash: 10,
-  minPayrollCoverageMonths: 2,
+  minPayrollCoverageMonths: 1.5,
   minVendorCoverageMonths: 2,
   minDebtCoverageMonths: 2,
+  headlineStressSalesDeclinePct: 15,
 }
 
 const aggressive: RiskMode = {
@@ -112,9 +117,10 @@ const aggressive: RiskMode = {
   minDaysCash: 5,
   locAllowed: true,
   maxLocUtilizationPct: 50,
-  minPayrollCoverageMonths: 1,
+  minPayrollCoverageMonths: 0.75,
   minVendorCoverageMonths: 1,
   minDebtCoverageMonths: 1,
+  headlineStressSalesDeclinePct: 5,
 }
 
 const recurring = (n: number) => ({ recurringMonthly: n, oneTime: 0 })
@@ -366,11 +372,21 @@ console.log('\nCoverage gates skip costs that are not on file')
   )
   check('payroll coverage is a real number', typeof r.payrollCoverageMonths, 'number')
 
-  // With payroll on file and a huge commitment, the payroll gate must bite.
-  const tight = evaluateRung(BASE, oneTime(15000), aggressive, COV)
+  // With payroll on file and a huge commitment, the payroll gate must still bite.
+  //
+  // Aggressive's payroll floor was deliberately lowered to 0.75 months during
+  // calibration, so it takes a larger commitment to reach than it used to. The gate
+  // must remain reachable -- a coverage gate that can never fire is not protecting
+  // anything -- so this asserts it still fires rather than lowering the bar.
+  const payrollFloor = COV.monthlyPayroll * aggressive.minPayrollCoverageMonths
+  const tight = evaluateRung(BASE, oneTime(24000), aggressive, COV)
   checkTrue(
     'payroll coverage failure is raised when cash gets thin',
     tight.failures.some((f) => /payroll/i.test(f)),
+  )
+  checkTrue(
+    'and that floor is genuinely below the reserve, so it is a backstop not the binding limit',
+    payrollFloor < COV.minCashReserve,
   )
 }
 
@@ -553,6 +569,72 @@ console.log('\nA planner that fails its own baseline is useless')
     'the do-nothing baseline passes when cash stays above the floor',
     r.classification !== 'Not Supported',
   )
+}
+
+console.log('\nThe headline recommendation must survive a downturn')
+{
+  // REGRESSION. The headline was the largest amount that merely was not
+  // 'Not Supported' -- $3,029/mo on real Aug 2026 data. That left a $1 cushion and
+  // broke on a 5% sales dip. Correct arithmetic, indefensible recommendation: the
+  // big number is the one the owner acts on, so resilience belongs INSIDE it.
+  const declinePct = balanced.headlineStressSalesDeclinePct
+  const stress = { inflowMultiplier: 1 - declinePct / 100 }
+
+  const edge = maxSupported(BASE, balanced, COV, 'recurring')
+  const headline = maxSupported(BASE, balanced, COV, 'recurring', { stress })
+
+  checkTrue('the stressed headline is no larger than the unstressed edge', headline <= edge)
+
+  // The point of the whole change: the headline has to hold under the downturn.
+  const stressed: ProjectionAssumptions = {
+    ...BASE,
+    inflowMultiplier: 1 - declinePct / 100,
+  }
+  if (headline > 0) {
+    const r = evaluateRung(stressed, recurring(headline), balanced, COV)
+    checkTrue(
+      `the headline still clears every gate with sales down ${declinePct}%`,
+      r.classification !== 'Not Supported',
+    )
+  } else {
+    checkTrue('a $0 headline is reported when nothing survives the downturn', true)
+  }
+
+  // And the edge must genuinely be the weaker number, or the distinction is fake.
+  if (edge > headline) {
+    const r = evaluateRung(stressed, recurring(edge), balanced, COV)
+    checkTrue(
+      'the unstressed edge amount does NOT survive the same downturn',
+      r.classification === 'Not Supported',
+    )
+  }
+
+  // A stricter mode must demand more resilience, so its headline cannot be larger.
+  const consHeadline = maxSupported(BASE, conservative, COV, 'recurring', {
+    stress: { inflowMultiplier: 1 - conservative.headlineStressSalesDeclinePct / 100 },
+  })
+  checkTrue(
+    'Conservative never recommends more than Balanced',
+    consHeadline <= headline,
+  )
+}
+
+console.log('\nStress multipliers compose rather than overwrite')
+{
+  // `maxSupported` must MULTIPLY its stress into any multiplier already on the
+  // assumptions. Overwriting would silently discard a scenario already applied by
+  // the caller and quietly overstate capacity.
+  const already: ProjectionAssumptions = { ...BASE, inflowMultiplier: 0.9 }
+  const composed = maxSupported(already, balanced, COV, 'recurring', {
+    stress: { inflowMultiplier: 0.9 },
+  })
+  const equivalent = maxSupported(
+    { ...BASE, inflowMultiplier: 0.81 },
+    balanced,
+    COV,
+    'recurring',
+  )
+  checkNear('0.9 stress on a 0.9 projection equals 0.81', composed, equivalent, 2)
 }
 
 /* ------------------------------------------------------------------ */

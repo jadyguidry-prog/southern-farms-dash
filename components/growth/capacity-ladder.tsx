@@ -79,8 +79,17 @@ export function CapacityLadder({ ladder }: { ladder: LadderRung[] }) {
       <CardHeader className="p-6 pb-0">
         <CardTitle className="text-base">What each amount would mean</CardTitle>
         <p className="mt-1 text-sm leading-relaxed text-muted-foreground text-pretty">
-          Every rung is tested against your own limits. Where it fails, the reason is
-          the constraint that binds first — that is the thing to change.
+          Every rung is tested against your own limits on your expected numbers. Where
+          it fails, the reason is the constraint that binds first — that is the thing to
+          change.
+        </p>
+        {/* The ladder and the headline answer two different questions, and saying so
+            prevents 'Supported' here from being read as 'safe in a downturn'. The
+            headline is deliberately stricter; without this note the two look
+            contradictory. */}
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground text-pretty">
+          These do not allow for a downturn. See the bad-year panel for what a drop in
+          sales does to them.
         </p>
       </CardHeader>
       <CardContent className="flex flex-col gap-6 p-6">
