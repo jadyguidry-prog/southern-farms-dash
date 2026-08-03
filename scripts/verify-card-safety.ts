@@ -210,6 +210,37 @@ console.log('\nOverdue statements are reported')
   )
 }
 
+console.log('\nUtilisation is a 0-1 ratio, not a percentage')
+{
+  // REGRESSION. The constraints panel rendered `Math.round(utilization)`, so 65%
+  // exposure displayed as "1%" -- an understatement on the very figure meant to warn
+  // about being maxed out. Pinning the unit here so the contract is explicit rather
+  // than something each caller has to infer.
+  const summary = assessCardSafety(
+    [card({ creditLimit: 20000, currentBalance: 13000, availableCredit: 7000 })],
+    TODAY,
+    STALE,
+  )
+  check('utilisation is expressed as a ratio', summary.utilization, 0.65)
+  ok(
+    'and is never returned pre-scaled as a percentage',
+    summary.utilization !== null && summary.utilization <= 1,
+    String(summary.utilization),
+  )
+  check('per-card utilisation uses the same unit', summary.cards[0].utilization, 0.65)
+
+  // The warning text is the one place that scales it, and must still read as percent.
+  ok(
+    'the 80% warning still reports whole percent',
+    assessCardSafety(
+      [card({ creditLimit: 10000, currentBalance: 9000, availableCredit: 1000 })],
+      TODAY,
+      STALE,
+    ).cards[0].warnings.some((w) => w.includes('90%')),
+    'expected a 90% warning',
+  )
+}
+
 console.log('\nTiming a commitment against statement due dates')
 {
   const summary = assessCardSafety(

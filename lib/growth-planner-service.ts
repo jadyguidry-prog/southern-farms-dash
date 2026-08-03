@@ -17,7 +17,9 @@ import {
 import {
   assessCardSafety,
   CARD_ACCOUNT_TYPE,
+  findDueDateConflicts,
   type CardSafetySummary,
+  type DueDateConflict,
 } from '@/lib/card-safety'
 import {
   assessStrategicTiming,
@@ -123,6 +125,14 @@ export type GrowthPlannerSnapshot = {
   stressCommitment: Commitment
   scenarios: ScenarioResult[]
 
+  /**
+   * Card statements falling due within `cardDueWindowDays` of today. The monthly
+   * projection cannot see these — a commitment can clear every month-level gate and
+   * still leave a statement short days later.
+   */
+  dueDateConflicts: DueDateConflict[]
+  cardDueWindowDays: number
+
   strategy: StrategicTiming
   cards: CardSafetySummary
 
@@ -181,6 +191,20 @@ function requireSetting(
   return row.value
 }
 
+/**
+ * Local calendar date as YYYY-MM-DD.
+ *
+ * Deliberately NOT `toISOString().slice(0, 10)`, which converts to UTC first and so
+ * reports tomorrow's date for any evening local time. `findDueDateConflicts` parses
+ * dates as local midnight, so a UTC-shifted "today" would offset every gap by a day
+ * and could hide or invent a statement collision.
+ */
+function toISODate(d: Date): string {
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${m}-${day}`
+}
+
 export const getGrowthPlannerSnapshot = cache(
   async (opts?: {
     modeKey?: string
@@ -233,6 +257,18 @@ export const getGrowthPlannerSnapshot = cache(
       today,
       { staleAfterDays },
     )
+
+    // ---- Does a commitment now collide with a statement coming due? ------
+    // Ordinary trap: a purchase made days before a large statement can leave the
+    // statement short even though each looked affordable on its own. The planner
+    // works in whole months, so this is the one check operating in days -- without
+    // it a commitment can clear every monthly gate and still bounce a card.
+    //
+    // Uses today's date because that is when an approved commitment would be made.
+    const cardDueWindowDays = requireSetting(settings, 'card_due_window_days')
+    const dueDateConflicts = findDueDateConflicts(cards, toISODate(today), {
+      windowDays: cardDueWindowDays,
+    })
 
     // ---- Line of credit, excluding cards -------------------------------
     // Cards are assessed separately by `assessCardSafety`; only the revolving
@@ -352,6 +388,8 @@ export const getGrowthPlannerSnapshot = cache(
       maxOneTime,
       edgeRecurring,
       edgeOneTime,
+      dueDateConflicts,
+      cardDueWindowDays,
       strategy,
       cards,
       nearTerm: {

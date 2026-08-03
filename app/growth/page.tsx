@@ -119,6 +119,8 @@ export default async function GrowthPage({
           <ConstraintsPanel
             strategy={data.strategy}
             cards={data.cards}
+            dueDateConflicts={data.dueDateConflicts}
+            cardDueWindowDays={data.cardDueWindowDays}
             confidencePct={data.meta.confidencePct}
             confidenceGaps={data.meta.confidenceGaps}
           />

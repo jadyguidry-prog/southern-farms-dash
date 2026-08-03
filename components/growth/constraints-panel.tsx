@@ -2,7 +2,7 @@ import { CalendarClock, CreditCard, Info } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { formatCurrency } from '@/lib/data'
-import type { CardSafetySummary } from '@/lib/card-safety'
+import type { CardSafetySummary, DueDateConflict } from '@/lib/card-safety'
 import type { StrategicTiming } from '@/lib/growth-planner'
 
 /**
@@ -15,11 +15,15 @@ import type { StrategicTiming } from '@/lib/growth-planner'
 export function ConstraintsPanel({
   strategy,
   cards,
+  dueDateConflicts,
+  cardDueWindowDays,
   confidencePct,
   confidenceGaps,
 }: {
   strategy: StrategicTiming
   cards: CardSafetySummary
+  dueDateConflicts: DueDateConflict[]
+  cardDueWindowDays: number
   confidencePct: number
   confidenceGaps: string[]
 }) {
@@ -51,6 +55,31 @@ export function ConstraintsPanel({
             This affects whether it is a good moment, not whether you can afford it —
             those are judged separately on purpose.
           </p>
+
+          {/* Day-level check. Everything else on this page works in whole months, so
+              without this a commitment can clear every monthly gate and still leave a
+              card statement short a few days later. */}
+          {dueDateConflicts.length > 0 && (
+            <div className="mt-1 flex flex-col gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+              <p className="text-sm font-medium text-foreground">
+                Card statements due within {cardDueWindowDays} days
+              </p>
+              <ul className="flex flex-col gap-1">
+                {dueDateConflicts.map((c) => (
+                  <li
+                    key={`${c.accountName}-${c.statementDueDate}`}
+                    className="flex gap-2 text-sm leading-relaxed text-muted-foreground text-pretty"
+                  >
+                    <span aria-hidden="true">-</span>
+                    <span>{c.message}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="text-xs leading-relaxed text-muted-foreground text-pretty">
+                Spending just before these lands means both come out of the same cash.
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col gap-2 border-t border-border pt-5">
@@ -96,9 +125,13 @@ export function ConstraintsPanel({
                     Utilisation
                   </dt>
                   <dd className="mt-0.5 font-mono text-sm font-semibold text-foreground">
+                    {/* `utilization` is a 0-1 RATIO, so it must be scaled. Rounding it
+                        directly rendered 65% exposure as "1%" -- an understatement in
+                        the one direction that matters, on the figure meant to warn
+                        about being maxed out. */}
                     {cards.utilization === null
                       ? 'Not known'
-                      : `${Math.round(cards.utilization)}%`}
+                      : `${Math.round(cards.utilization * 100)}%`}
                   </dd>
                 </div>
               </dl>
