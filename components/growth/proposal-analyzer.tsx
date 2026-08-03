@@ -18,6 +18,7 @@ import {
   type EquipmentFinancing,
 } from '@/lib/growth-proposals'
 import { runProposalAnalysis } from '@/app/growth/actions'
+import { saveProposal } from '@/app/growth/proposal-store'
 import type { AnalysisResult, ProposalDraft } from '@/app/growth/proposal-types'
 import { ProposalDecisionView } from '@/components/growth/proposal-decision'
 import { Label } from '@/components/ui/label'
@@ -27,7 +28,7 @@ import { Button } from '@/components/ui/button'
 const PROPOSAL_TYPES = Object.keys(PROPOSAL_TYPE_LABELS) as ProposalType[]
 const FINANCING_TYPES = Object.keys(EQUIPMENT_FINANCING_LABELS) as EquipmentFinancing[]
 
-type FormState = { result: AnalysisResult | null }
+type FormState = { result: AnalysisResult | null; draft: ProposalDraft | null }
 
 export function ProposalAnalyzer({ activeModeKey }: { activeModeKey: string }) {
   const [type, setTypeState] = useStickyType()
@@ -36,9 +37,11 @@ export function ProposalAnalyzer({ activeModeKey }: { activeModeKey: string }) {
     async (_prev: FormState, formData: FormData): Promise<FormState> => {
       const draft = formDataToDraft(formData, type, activeModeKey)
       const result = await runProposalAnalysis(draft)
-      return { result }
+      // Keep the exact draft that produced this verdict so "Save" persists the same
+      // input the owner just saw analysed — not a re-read of fields they may edit next.
+      return { result, draft }
     },
-    { result: null },
+    { result: null, draft: null },
   )
 
   return (
@@ -46,15 +49,23 @@ export function ProposalAnalyzer({ activeModeKey }: { activeModeKey: string }) {
       aria-labelledby="proposal-analyzer-heading"
       className="rounded-xl border border-border bg-card p-5 sm:p-6"
     >
-      <header className="mb-4">
-        <h2 id="proposal-analyzer-heading" className="text-lg font-semibold text-foreground">
-          Test a specific investment
-        </h2>
-        <p className="mt-1 text-sm leading-relaxed text-muted-foreground text-pretty">
-          Describe something you are actually considering. You will get a straight
-          answer — judged against the same limits and the same cash as everything
-          above, plus what would have to change if it does not fit.
-        </p>
+      <header className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 id="proposal-analyzer-heading" className="text-lg font-semibold text-foreground">
+            Test a specific investment
+          </h2>
+          <p className="mt-1 text-sm leading-relaxed text-muted-foreground text-pretty">
+            Describe something you are actually considering. You will get a straight
+            answer — judged against the same limits and the same cash as everything
+            above, plus what would have to change if it does not fit.
+          </p>
+        </div>
+        <a
+          href="/growth/proposals"
+          className="shrink-0 text-sm font-medium text-primary underline underline-offset-2"
+        >
+          Saved proposals
+        </a>
       </header>
 
       <form action={formAction} className="flex flex-col gap-4">
@@ -125,15 +136,60 @@ export function ProposalAnalyzer({ activeModeKey }: { activeModeKey: string }) {
       ) : null}
 
       {state.result && state.result.ok ? (
-        <div className="mt-6">
+        <div className="mt-6 flex flex-col gap-4">
           <ProposalDecisionView
             decision={state.result.decision}
             modeLabel={state.result.modeLabel}
             confidencePct={state.result.confidencePct}
           />
+          {state.draft ? <SaveProposalControl draft={state.draft} /> : null}
         </div>
       ) : null}
     </section>
+  )
+}
+
+/** Save the just-analysed proposal. Kept OUTSIDE the analyze form so submitting it
+ *  never re-triggers the analysis, and it persists the exact draft that was scored. */
+function SaveProposalControl({ draft }: { draft: ProposalDraft }) {
+  const [state, setState] = useState<
+    { status: 'idle' } | { status: 'saving' } | { status: 'saved' } | { status: 'error'; msg: string }
+  >({ status: 'idle' })
+
+  async function onSave() {
+    setState({ status: 'saving' })
+    const res = await saveProposal(draft)
+    if (res.ok) setState({ status: 'saved' })
+    else setState({ status: 'error', msg: res.error })
+  }
+
+  if (state.status === 'saved') {
+    return (
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-muted/40 p-3">
+        <p className="text-sm text-foreground">
+          Saved. It will re-check itself against your cash whenever you open it.
+        </p>
+        <a href="/growth/proposals" className="text-sm font-medium text-primary underline">
+          See saved proposals
+        </a>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
+      <Button type="button" variant="outline" onClick={onSave} disabled={state.status === 'saving'}>
+        {state.status === 'saving' ? 'Saving…' : 'Save this proposal'}
+      </Button>
+      <p className="text-sm text-muted-foreground text-pretty">
+        Save it to track how the answer changes as your cash moves.
+      </p>
+      {state.status === 'error' ? (
+        <p role="alert" className="text-sm text-destructive">
+          {state.msg}
+        </p>
+      ) : null}
+    </div>
   )
 }
 

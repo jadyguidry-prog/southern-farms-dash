@@ -9,7 +9,8 @@
  * pure types file lets both sides share the contract with nothing to bundle.
  */
 
-import type { ProposalDecision, ProposalType } from '@/lib/growth-proposals'
+import type { Classification } from '@/lib/growth-planner'
+import type { ProposalDecision, ProposalType, Verdict } from '@/lib/growth-proposals'
 
 export type ProposalDraft = {
   type: ProposalType
@@ -22,4 +23,56 @@ export type ProposalDraft = {
 
 export type AnalysisResult =
   | { ok: true; decision: ProposalDecision; modeLabel: string; confidencePct: number }
+  | { ok: false; error: string }
+
+/* --------------------- Saved proposals (M3) --------------------- */
+
+/** One immutable analysis snapshot, flattened for lists and the before/after view. */
+export type AnalysisSummary = {
+  id: string
+  createdAt: string
+  modeKey: string
+  assumedMarginPct: number | null
+  confidencePct: number | null
+  classification: Classification
+  verdict: Verdict
+  lowestProjectedCash: number | null
+  lowestMonthKey: string | null
+}
+
+/** A saved proposal as shown in the list: its first verdict and its current one,
+ *  so the owner sees how the answer moved as cash changed. `changed` is true when
+ *  the current classification differs from the original. */
+export type SavedProposalSummary = {
+  id: string
+  name: string
+  proposalType: ProposalType
+  createdAt: string
+  modeKey: string
+  original: AnalysisSummary
+  current: AnalysisSummary
+  changed: boolean
+}
+
+/** Full detail: the live re-run decision (never stale), the original snapshot for
+ *  comparison, and the complete history of verdict changes. */
+export type SavedProposalDetail = {
+  id: string
+  name: string
+  proposalType: ProposalType
+  createdAt: string
+  modeKey: string
+  assumedMarginPct: number | null
+  /** Re-run against TODAY's cash — this is what the owner acts on. */
+  current: ProposalDecision
+  currentModeLabel: string
+  currentConfidencePct: number
+  /** The very first analysis, frozen, for the before/after story. */
+  original: AnalysisSummary
+  /** Every stored analysis, newest first (each a real change in verdict). */
+  history: AnalysisSummary[]
+}
+
+export type SaveProposalResult =
+  | { ok: true; id: string }
   | { ok: false; error: string }

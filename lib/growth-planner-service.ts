@@ -461,6 +461,9 @@ export async function analyzeProposalFromSnapshot(
   evaluation: RungEvaluation
   scenarios: ScenarioResult[]
   activeModeLabel: string
+  /** The mode actually used — a blank `modeKey` resolves to the active default, and
+   *  callers that persist a proposal need the concrete key to reproduce this lens. */
+  resolvedModeKey: string
   confidencePct: number
 }> {
   const [snap, settings] = await Promise.all([
@@ -489,6 +492,7 @@ export async function analyzeProposalFromSnapshot(
     evaluation,
     scenarios,
     activeModeLabel: snap.activeMode.label,
+    resolvedModeKey: snap.activeMode.modeKey,
     confidencePct: snap.meta.confidencePct,
   }
 }

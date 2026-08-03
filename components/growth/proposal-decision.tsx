@@ -8,7 +8,32 @@
  */
 
 import type { ProposalDecision, Verdict } from '@/lib/growth-proposals'
+import type { Classification } from '@/lib/growth-planner'
 import { CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
+
+/** Small color-coded classification chip, shared by the saved-proposal list and the
+ *  before/after history so the same word never looks different in two places. */
+const CLASSIFICATION_STYLES: Record<Classification, string> = {
+  'Very Safe': 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700',
+  Comfortable: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700',
+  Supported: 'border-sky-500/30 bg-sky-500/10 text-sky-700',
+  Tight: 'border-amber-500/30 bg-amber-500/10 text-amber-700',
+  'Not Supported': 'border-destructive/30 bg-destructive/10 text-destructive',
+}
+
+export function ClassificationBadge({
+  classification,
+  muted,
+}: {
+  classification: Classification
+  muted?: boolean
+}) {
+  const base = 'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium'
+  const style = muted
+    ? 'border-border bg-muted text-muted-foreground'
+    : CLASSIFICATION_STYLES[classification]
+  return <span className={`${base} ${style}`}>{classification}</span>
+}
 
 function money(n: number): string {
   return `$${Math.round(n).toLocaleString('en-US')}`
