@@ -267,10 +267,19 @@ async function main() {
     (shares[6] ?? 0) + (shares[7] ?? 0) < 0.02,
   )
 
-  // ---- the actual number the owner will act on ----
-  // The page uses a cookie-scoped Supabase client that cannot run here, so this
-  // reproduces the same engine call with real settings and real obligations. If
-  // these two ever disagree, the difference is in the loader, not the maths.
+  // ---- engine invariants (NOT the page's exact figures) ----
+  // Scope note, learned the hard way: this script cannot reproduce the numbers
+  // the page shows. Scheduled obligations and uncleared checks come from
+  // cookie-scoped queries that need a request context, and without them both the
+  // dated outflows and the baseline `excludeMatchers` differ. An earlier version
+  // of this script pretended otherwise and printed a safe-to-spend of $1,185
+  // while the page showed $1,437 — a fake precision that is worse than silence.
+  //
+  // So this section asserts only invariants that hold for ANY set of dated bills.
+  // Cross-surface agreement is guaranteed structurally instead: the page, the
+  // advisor, and the admin report all call `assembleCapacity`, so they cannot
+  // disagree with each other. Read exact figures from the app, not from here.
+  //
   // business_settings is a KEY-VALUE table (setting_key / value), not one column
   // per setting. Selecting `min_cash_reserve` as a column fails, and a `?? 0`
   // fallback then silently reports "no reserve set" for a farm that has $15,000
@@ -311,17 +320,17 @@ async function main() {
     baselineWeeklyOutflow: est.typicalOutflow,
   })
 
-  console.log('\nSpending capacity as the owner will see it')
+  // Direction of the difference, verified against the live app: with no dated
+  // bills loaded, nothing is excluded from the estimated baseline, so the
+  // baseline outflow is HIGHER here than on the page ($14,381 vs $14,185) and the
+  // resulting figure is therefore LOWER ($1,185 vs $1,437). It is a conservative
+  // floor, not a ceiling. Erring low is the safe direction for a spending number.
+  console.log('\nEngine invariants — NO dated bills loaded, so this is a')
+  console.log('conservative floor, not the figure the app shows:')
   console.log(`  cash on hand (all cash accts): ${money(cashOnHand)}`)
   console.log(`  minimum reserve (settings)   : ${money(minCashReserve)}`)
-  console.log(`  safe to spend today          : ${money(result.safeToSpendToday)}`)
-  console.log(`  per-day allowance (7 days)   : ${money(result.perDayAllowance)}`)
-  console.log(
-    `  projected low point          : ${money(result.lowestBalance)} on ${result.lowestBalanceDate}`,
-  )
-  if (result.breachesReserve) {
-    console.log(`  reserve shortfall            : ${money(result.reserveShortfall)}`)
-  }
+  console.log(`  floor under safe-to-spend    : ${money(result.safeToSpendToday)}`)
+  console.log(`  weeks of history observed    : ${est.weeksObserved}`)
 
   ok('the safe-to-spend figure is never negative', result.safeToSpendToday >= 0)
   ok(

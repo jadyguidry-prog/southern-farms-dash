@@ -510,9 +510,11 @@ console.log('\nThe advisor insight built from the weekly position')
       .map((i) => i.id)
       .sort()
 
-  // The farm's REAL position, confirmed against the live ledger by
-  // scripts/verify-cash-reconciliation.ts: $13,095/wk in, $14,381/wk out, and
-  // only $1,185 sitting above the $15,000 reserve.
+  // Deficit-shaped figures in the farm's ballpark. Deliberately NOT labelled as
+  // the live numbers: the app currently shows $13,603 in / $14,185 out with
+  // $1,437 spare, because dated bills are excluded from the baseline there.
+  // These are fixed inputs chosen to exercise the branch, so the assertions stay
+  // stable as the real ledger moves. Read live figures off the app.
   const real = {
     typicalWeeklyInflow: 13_095,
     typicalWeeklyOutflow: 14_381,

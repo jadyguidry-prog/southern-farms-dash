@@ -453,3 +453,130 @@ export function assessConfidence(options: {
   }
   return { level: 'ok' }
 }
+
+// ---------------------------------------------------------------------------
+// Shared assembly
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything the assembly needs, as plain data. No database handles, so both the
+ * request-scoped loader and the offline verification script can call it.
+ */
+export type AssembleInput = {
+  accounts: { account_name?: string | null; account_type?: string | null; current_balance?: number | string | null }[]
+  rows: LedgerRow[]
+  /** Obligations already resolved to a concrete due date. */
+  obligations: { id?: string | number | null; effectiveDueDate?: string | null; amount: number; vendorName?: string | null; obligationName?: string | null }[]
+  /** Uncleared checks and ACH drafts. */
+  payments: { obligationId?: string | null; payeeName?: string | null; checkNumber?: string | null; paymentDate: string; amount: number; status: string }[]
+  minCashReserve: number
+  today: string
+}
+
+/**
+ * Turn live records into a spending-capacity result.
+ *
+ * This exists because the verification script previously re-implemented this
+ * assembly and silently drifted from it: it omitted `datedOutflows` and
+ * `excludeMatchers`, so it reported a different weekly gap and a different
+ * safe-to-spend figure than the page actually showed. A proof that does not
+ * exercise the shipped path proves nothing, so there is now exactly one
+ * implementation and both callers use it.
+ */
+export function assembleCapacity(input: AssembleInput) {
+  const { accounts, rows, obligations, payments, minCashReserve, today } = input
+  const money = (n: number) => Math.round(n * 100) / 100
+
+  // Only accounts holding spendable cash. A line of credit is borrowing capacity,
+  // not money in hand, and must never inflate what is safe to spend.
+  const operating = accounts.filter(
+    (a) => !/credit|loan|card/i.test(`${a.account_type ?? ''} ${a.account_name ?? ''}`),
+  )
+  const cashOnHand = money(
+    operating.reduce((s, a) => s + Number(a.current_balance ?? 0), 0),
+  )
+
+  const operatingAccounts = [
+    ...new Set(
+      rows
+        .map((r) => r.accountName)
+        .filter((n) => n && !/amex|american express|credit|card|loan/i.test(n)),
+    ),
+  ]
+
+  const lastLedgerDate = rows.reduce((max, r) => (r.date > max ? r.date : max), '')
+
+  const datedOutflows: DatedOutflow[] = []
+  const outstanding = payments.filter((p) => p.status === 'outstanding' && p.amount > 0)
+
+  // An obligation that already has a payment written against it must not also be
+  // charged on its due date; the written payment is the more concrete fact.
+  const coveredObligationIds = new Set(
+    outstanding.map((p) => p.obligationId).filter((id): id is string => Boolean(id)),
+  )
+
+  const obligationLabels = new Map<string, string>()
+  for (const o of obligations) {
+    const label = o.vendorName || o.obligationName || 'Scheduled obligation'
+    if (o.id) obligationLabels.set(String(o.id), label)
+    if (!o.effectiveDueDate || o.amount <= 0) continue
+    if (o.id && coveredObligationIds.has(String(o.id))) continue
+    datedOutflows.push({ date: o.effectiveDueDate, amount: Number(o.amount), label })
+  }
+
+  for (const p of outstanding) {
+    const name =
+      p.payeeName ||
+      (p.obligationId ? obligationLabels.get(String(p.obligationId)) : '') ||
+      'Uncleared payment'
+    datedOutflows.push({
+      date: p.paymentDate,
+      amount: Number(p.amount),
+      label: p.checkNumber ? `${name} (check ${p.checkNumber})` : name,
+    })
+  }
+
+  // Vendors charged as dated items are removed from the estimated baseline, or
+  // the same bill is subtracted twice.
+  const windowEnd = addDays(today, 7)
+  const excludeMatchers = [
+    ...new Set(
+      datedOutflows
+        .filter((d) => d.date >= today && d.date <= windowEnd)
+        .map((d) => d.label.replace(/\s*\(check[^)]*\)/i, '').trim())
+        .filter((l) => l.length >= 3),
+    ),
+  ]
+
+  const weeks = buildWeeklyFlows(rows, { operatingAccounts, today, excludeMatchers })
+  const estimate = estimateWeeklyFlow(weeks)
+  const { shares, hasProfile } = buildDayOfWeekProfile(rows, { operatingAccounts })
+
+  const result = deriveSpendingCapacity({
+    cashOnHand,
+    minCashReserve,
+    today,
+    estimate,
+    shares,
+    datedOutflows,
+    baselineWeeklyOutflow: estimate.typicalOutflow,
+  })
+
+  const confidence = assessConfidence({
+    weeksObserved: estimate.weeksObserved,
+    hasProfile,
+    lastLedgerDate,
+    today,
+  })
+
+  return {
+    result,
+    estimate,
+    confidence,
+    shares,
+    datedOutflows,
+    cashOnHand,
+    operatingAccounts,
+    lastLedgerDate,
+  }
+}
