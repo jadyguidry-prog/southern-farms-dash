@@ -20,6 +20,7 @@ import {
   buildAchReconcileMatches,
   descriptionMatchesVendor,
   isAwaitingPayment,
+  sumPaidInMonth,
   ACH_LOOKBACK_DAYS,
   type AchObligationInput,
   type AchReconcileMatch,
@@ -581,14 +582,21 @@ export async function getBillPaySnapshot(): Promise<BillPaySnapshot> {
       )
     : null
 
-  const thisMonth = payments.filter((p) => p.paymentDate.startsWith(monthPrefix))
+  // Money actually PAID OUT this month. Excludes void payments and anything still
+  // awaiting its money (ACH not yet drafted, check not yet written), so this can no
+  // longer report the very same dollars shown as Outstanding right beside it.
+  // Shares `sumPaidInMonth` with the Bill Pay page so the two always agree.
+  const paidThisMonth = payments.filter(
+    (p) =>
+      p.status !== 'void' && !isAwaitingPayment(p) && p.paymentDate.startsWith(monthPrefix),
+  )
 
   return {
     configured: payments.length > 0,
     outstandingChecks: outstanding.reduce((s, p) => s + p.amount, 0),
     outstandingCheckCount: outstanding.length,
     oldestOutstandingDays,
-    paymentsThisMonth: thisMonth.length,
-    paymentsThisMonthAmount: thisMonth.reduce((s, p) => s + p.amount, 0),
+    paymentsThisMonth: paidThisMonth.length,
+    paymentsThisMonthAmount: sumPaidInMonth(payments, monthPrefix),
   }
 }

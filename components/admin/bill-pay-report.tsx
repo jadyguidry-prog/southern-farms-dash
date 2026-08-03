@@ -31,8 +31,11 @@ export function BillPayReport({ snapshot }: { snapshot: BillPaySnapshot }) {
           Bill Payments
         </h2>
         <p className="text-xs text-muted-foreground">
+          {/* "paid", not "logged": the figure now counts only money that actually
+              left, so a bill entered as pay-by-check-later no longer appears here
+              while it is still sitting in Outstanding. */}
           {paymentsThisMonth.toLocaleString()}{' '}
-          {paymentsThisMonth === 1 ? 'payment' : 'payments'} this month ·{' '}
+          {paymentsThisMonth === 1 ? 'payment' : 'payments'} paid this month ·{' '}
           {formatCurrency(paymentsThisMonthAmount)}
         </p>
       </div>
