@@ -2,7 +2,17 @@
 
 import { useMemo, useState, useTransition } from 'react'
 import { toast } from 'sonner'
-import { CalendarClock, Plus, Check, X, Repeat, Link2, Landmark, Zap } from 'lucide-react'
+import {
+  CalendarClock,
+  Plus,
+  Check,
+  X,
+  Repeat,
+  Link2,
+  Landmark,
+  Zap,
+  FileText,
+} from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -54,6 +64,10 @@ type VendorOption = { id: string; name: string }
 
 const todayStr = () => new Date().toISOString().slice(0, 10)
 
+/** A date n days out, for seeding an expected ACH draft date. */
+const daysFromToday = (n: number) =>
+  new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10)
+
 export function BillPayClient({
   obligations,
   banks,
@@ -70,7 +84,9 @@ export function BillPayClient({
   detected: AchReconcileMatch[]
 }) {
   const [activeObligation, setActiveObligation] = useState<Obligation | null>(null)
-  const [oneOffOpen, setOneOffOpen] = useState(false)
+  // Which flavour of one-off entry is open. 'check' is a check being written now;
+  // 'invoice' logs a COGS invoice whose ACH draft will pull in a few days.
+  const [oneOffMode, setOneOffMode] = useState<'check' | 'invoice' | null>(null)
   // Locally dismissed suggestions — hidden without a write, so an owner who
   // knows a match is wrong isn't nagged on every load of this session.
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
@@ -175,8 +191,8 @@ export function BillPayClient({
             Suggested Bank Matches
           </h3>
           <p className="mb-3 text-xs text-muted-foreground">
-            These outstanding checks look like they cleared the bank. Confirm each
-            to mark it cleared — nothing is applied automatically.
+            These outstanding checks and pending drafts look like they cleared the
+            bank. Confirm each to mark it cleared — nothing is applied automatically.
           </p>
           <div className="space-y-2">
             {visibleSuggestions.map((s) => (
@@ -200,21 +216,40 @@ export function BillPayClient({
           <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
             One-Off Payment
           </h3>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-11"
-            onClick={() => setOneOffOpen(true)}
-          >
-            <Plus className="size-4" aria-hidden="true" />
-            Write a check
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-11"
+              onClick={() => setOneOffMode('check')}
+            >
+              <Plus className="size-4" aria-hidden="true" />
+              Write a check
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-11"
+              onClick={() => setOneOffMode('invoice')}
+            >
+              <FileText className="size-4" aria-hidden="true" />
+              Log an invoice
+            </Button>
+          </div>
         </div>
         <Card>
           <CardContent className="p-4 text-sm text-muted-foreground">
-            For a check that isn&apos;t one of the bills above — a seed supplier, a
-            repair, a one-time contractor. It reduces your spendable cash the same
-            way, and stays outstanding until it clears.
+            <p>
+              <span className="font-medium text-foreground">Write a check</span> for a
+              payment that isn&apos;t one of the bills above — a seed supplier, a
+              repair, a one-time contractor.
+            </p>
+            <p className="mt-2">
+              <span className="font-medium text-foreground">Log an invoice</span> when a
+              bill arrives that will be drafted by ACH in a few days (Sysco, Quirch).
+              Enter the amount and the date you expect it to pull — it reduces your
+              spendable cash right away, then clears itself when the draft posts.
+            </p>
           </CardContent>
         </Card>
       </section>
@@ -222,7 +257,7 @@ export function BillPayClient({
       {/* Outstanding checks — spendable-cash impact lives here */}
       <section>
         <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-          Outstanding Checks
+          Outstanding
           {outstanding.length > 0 && (
             <Badge variant="secondary" className="font-mono">
               {formatCurrency(outstanding.reduce((s, p) => s + p.amount, 0))}
@@ -232,7 +267,8 @@ export function BillPayClient({
         {outstanding.length === 0 ? (
           <Card>
             <CardContent className="p-6 text-sm text-muted-foreground">
-              No outstanding checks. Written checks appear here until they clear the bank.
+              Nothing outstanding. Written checks and pending ACH drafts appear here
+              until they clear the bank.
             </CardContent>
           </Card>
         ) : (
@@ -253,11 +289,12 @@ export function BillPayClient({
 
       {/* Remounted per open so a previous entry never bleeds into the next check. */}
       <OneOffPaymentDialog
-        key={oneOffOpen ? 'one-off-open' : 'one-off-closed'}
-        open={oneOffOpen}
+        key={oneOffMode ?? 'one-off-closed'}
+        open={oneOffMode !== null}
+        mode={oneOffMode ?? 'check'}
         banks={banks}
         vendors={vendors}
-        onClose={() => setOneOffOpen(false)}
+        onClose={() => setOneOffMode(null)}
       />
     </div>
   )
@@ -347,11 +384,14 @@ function OutstandingRow({
 }) {
   const [pending, startTransition] = useTransition()
 
+  // An outstanding ACH is a pending draft (a logged invoice), never a written check.
+  const isDraft = payment.paymentMethod === 'ach'
+
   const onClear = () => {
     startTransition(async () => {
       const res = await clearPayment(payment.id, todayStr())
-      if (res.ok) toast.success('Check marked cleared.')
-      else toast.error(res.error ?? 'Could not clear the check.')
+      if (res.ok) toast.success(isDraft ? 'Draft marked cleared.' : 'Check marked cleared.')
+      else toast.error(res.error ?? 'Could not clear the payment.')
     })
   }
   const onVoid = () => {
@@ -374,11 +414,20 @@ function OutstandingRow({
               {formatCurrency(payment.amount)}
             </span>
           </p>
-          <p className="mt-0.5 truncate text-xs text-muted-foreground">
-            {payment.checkNumber ? `Check #${payment.checkNumber} · ` : ''}
-            Written {payment.paymentDate}
-            {payment.purpose ? ` · ${payment.purpose}` : ''}
-          </p>
+            <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              {/* An ACH here is a logged invoice awaiting its draft, not a written
+                  check — saying "Written" would misdescribe it. */}
+              {isDraft && (
+                <Badge variant="outline" className="text-xs font-normal">
+                  ACH · pending draft
+                </Badge>
+              )}
+              <p className="min-w-0 truncate text-xs text-muted-foreground">
+                {payment.checkNumber ? `Check #${payment.checkNumber} · ` : ''}
+                {isDraft ? 'Expected' : 'Written'} {payment.paymentDate}
+                {payment.purpose ? ` · ${payment.purpose}` : ''}
+              </p>
+            </div>
         </div>
         <div className="flex shrink-0 gap-2">
           <Button
@@ -419,28 +468,40 @@ function SuggestionRow({
   const onConfirm = () => {
     startTransition(async () => {
       const res = await confirmClearWithMatch(suggestion.paymentId, suggestion.transactionId)
-      if (res.ok) toast.success('Check confirmed cleared against the bank record.')
+      if (res.ok) toast.success('Payment confirmed cleared against the bank record.')
       else toast.error(res.error ?? 'Could not confirm the match.')
     })
   }
 
-  const strong = suggestion.matchType === 'check_number'
+  const isDraft = suggestion.matchType === 'vendor_amount'
+  // A check number and a payee-name hit are both near-certain; a bare amount+date
+  // pairing is the only genuine guess, so only it is styled as the weaker match.
+  const strong = suggestion.matchType !== 'amount_date'
+  const matchLabel =
+    suggestion.matchType === 'check_number'
+      ? 'Check # match'
+      : isDraft
+        ? 'Vendor + amount match'
+        : 'Amount + date match'
 
   return (
     <Card>
       <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
         <div className="min-w-0">
           <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
-            {suggestion.checkNumber ? `Check #${suggestion.checkNumber}` : 'Payment'}
+            {suggestion.checkNumber
+              ? `Check #${suggestion.checkNumber}`
+              : suggestion.payeeName || 'Payment'}
             <span className="font-mono text-muted-foreground">
               {formatCurrency(suggestion.amount)}
             </span>
             <Badge variant={strong ? 'default' : 'secondary'} className="text-xs font-normal">
-              {strong ? 'Check # match' : 'Amount + date match'}
+              {matchLabel}
             </Badge>
           </p>
           <p className="mt-0.5 truncate text-xs text-muted-foreground">
-            Written {suggestion.paymentDate} · bank {suggestion.transactionDate}
+            {isDraft ? 'Expected' : 'Written'} {suggestion.paymentDate} · bank{' '}
+            {suggestion.transactionDate}
             {suggestion.transactionDescription
               ? ` · ${suggestion.transactionDescription}`
               : ''}
@@ -646,21 +707,33 @@ function RecordPaymentDialog({
  */
 function OneOffPaymentDialog({
   open,
+  mode,
   banks,
   vendors,
   onClose,
 }: {
   open: boolean
+  /**
+   * 'invoice' logs a bill that will be drafted by ACH in a few days: the payment is
+   * recorded as PENDING so it floats against spendable cash, and the date entered is
+   * the expected draft date rather than a settled payment date.
+   */
+  mode: 'check' | 'invoice'
   banks: Bank[]
   vendors: VendorOption[]
   onClose: () => void
 }) {
+  const isInvoice = mode === 'invoice'
   const [pending, startTransition] = useTransition()
-  const [method, setMethod] = useState<'check' | 'ach'>('check')
+  // An invoice is drafted by ACH by definition, so the method is fixed rather than
+  // offered — a check has no "expected draft" to wait for.
+  const [method, setMethod] = useState<'check' | 'ach'>(isInvoice ? 'ach' : 'check')
   const [payeeName, setPayeeName] = useState('')
   const [payeeVendorId, setPayeeVendorId] = useState<string | null>(null)
   const [amount, setAmount] = useState('')
-  const [paymentDate, setPaymentDate] = useState(todayStr())
+  // Seeded a few days out for an invoice, matching the real gap between a COGS
+  // invoice arriving and the draft pulling. Editable — it is only a starting point.
+  const [paymentDate, setPaymentDate] = useState(isInvoice ? daysFromToday(3) : todayStr())
   const [checkNumber, setCheckNumber] = useState('')
   const [bankAccountId, setBankAccountId] = useState('')
   const [purpose, setPurpose] = useState('')
@@ -688,12 +761,17 @@ function OneOffPaymentDialog({
         bankAccountId: bankAccountId || null,
         purpose,
         memo,
+        // Invoice mode records a draft that has not pulled yet, so it must float
+        // rather than be marked settled on entry.
+        pending: isInvoice,
       })
       if (res.ok) {
         toast.success(
-          method === 'ach'
-            ? 'ACH payment recorded and cleared.'
-            : 'Check recorded. It stays outstanding until it clears.',
+          isInvoice
+            ? 'Invoice logged. It reduces spendable cash until the draft posts.'
+            : method === 'ach'
+              ? 'ACH payment recorded and cleared.'
+              : 'Check recorded. It stays outstanding until it clears.',
         )
         onClose()
       } else {
@@ -706,9 +784,11 @@ function OneOffPaymentDialog({
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>One-Off Payment</DialogTitle>
+          <DialogTitle>{isInvoice ? 'Log an Invoice' : 'One-Off Payment'}</DialogTitle>
           <DialogDescription>
-            A payment with no scheduled bill behind it.
+            {isInvoice
+              ? 'A bill that will be drafted by ACH. Enter the amount and when you expect it to pull.'
+              : 'A payment with no scheduled bill behind it.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -724,7 +804,7 @@ function OneOffPaymentDialog({
                 // Typed name no longer matches the picked vendor — drop the link.
                 setPayeeVendorId(null)
               }}
-              placeholder="e.g. Coastal Seed Supply"
+              placeholder={isInvoice ? 'e.g. Sysco' : 'e.g. Coastal Seed Supply'}
             />
             {vendors.length > 0 && (
               <div className="mt-2">
@@ -744,21 +824,25 @@ function OneOffPaymentDialog({
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className={isInvoice ? undefined : 'grid grid-cols-2 gap-3'}>
+            {!isInvoice && (
+              <div>
+                <Label htmlFor="oo-method">Method</Label>
+                <Select value={method} onValueChange={(v) => setMethod(v as 'check' | 'ach')}>
+                  <SelectTrigger id="oo-method" className="mt-1 h-11">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="check">Check</SelectItem>
+                    <SelectItem value="ach">ACH / Transfer</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div>
-              <Label htmlFor="oo-method">Method</Label>
-              <Select value={method} onValueChange={(v) => setMethod(v as 'check' | 'ach')}>
-                <SelectTrigger id="oo-method" className="mt-1 h-11">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="check">Check</SelectItem>
-                  <SelectItem value="ach">ACH / Transfer</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label htmlFor="oo-amount">Amount</Label>
+              <Label htmlFor="oo-amount">
+                {isInvoice ? 'Amount on the invoice' : 'Amount'}
+              </Label>
               <Input
                 id="oo-amount"
                 inputMode="decimal"
@@ -770,9 +854,11 @@ function OneOffPaymentDialog({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className={method === 'check' ? 'grid grid-cols-2 gap-3' : undefined}>
             <div>
-              <Label htmlFor="oo-date">Payment date</Label>
+              <Label htmlFor="oo-date">
+                {isInvoice ? 'Expected draft date' : 'Payment date'}
+              </Label>
               <Input
                 id="oo-date"
                 type="date"
@@ -780,6 +866,12 @@ function OneOffPaymentDialog({
                 value={paymentDate}
                 onChange={(e) => setPaymentDate(e.target.value)}
               />
+              {isInvoice && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Roughly when the ACH will pull. A few days off is fine — the bank
+                  match uses the vendor and amount.
+                </p>
+              )}
             </div>
             {method === 'check' && (
               <div>
@@ -803,7 +895,9 @@ function OneOffPaymentDialog({
               className="mt-1 h-11 text-base"
               value={purpose}
               onChange={(e) => setPurpose(e.target.value)}
-              placeholder="e.g. Tractor hydraulic repair"
+              placeholder={
+                isInvoice ? 'e.g. Weekly produce order' : 'e.g. Tractor hydraulic repair'
+              }
             />
           </div>
 
@@ -840,7 +934,7 @@ function OneOffPaymentDialog({
             Cancel
           </Button>
           <Button className="h-11" onClick={submit} disabled={pending}>
-            {pending ? 'Saving…' : 'Record Payment'}
+            {pending ? 'Saving…' : isInvoice ? 'Log Invoice' : 'Record Payment'}
           </Button>
         </DialogFooter>
       </DialogContent>

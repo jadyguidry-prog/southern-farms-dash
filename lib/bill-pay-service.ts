@@ -18,6 +18,7 @@ import { fetchAllPages } from '@/lib/paginate'
 import { addInterval } from '@/lib/health'
 import {
   buildAchReconcileMatches,
+  descriptionMatchesVendor,
   ACH_LOOKBACK_DAYS,
   type AchObligationInput,
   type AchReconcileMatch,
@@ -185,9 +186,15 @@ export function nextDueAfterPayment(currentDue: string, frequency: string): stri
 export type ClearingSuggestion = {
   paymentId: string
   transactionId: string
-  /** 'check_number' is a near-certain match; 'amount_date' is a heuristic to confirm. */
-  matchType: 'check_number' | 'amount_date'
+  /**
+   * 'check_number' is a near-certain match; 'amount_date' is a heuristic to confirm.
+   * 'vendor_amount' pairs a pending ACH draft (a logged Sysco/Quirch invoice) to its
+   * bank debit by payee name + amount — there is no check number on an ACH.
+   */
+  matchType: 'check_number' | 'amount_date' | 'vendor_amount'
   checkNumber: string | null
+  /** Who the payment was to, so a numberless ACH draft is still identifiable on screen. */
+  payeeName: string
   amount: number
   paymentDate: string
   transactionDate: string
@@ -231,8 +238,14 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
     console.log('[v0] getClearingSuggestions: payments unreadable:', err)
     return []
   }
+  // Outstanding checks, plus pending ACH drafts (a logged COGS invoice whose draft
+  // hasn't pulled yet). A pending ACH is identified by its payee, since there is no
+  // check number to key on — without a payee it could never be matched, so it is
+  // excluded rather than left to match on amount alone.
   const outstanding = payments.filter(
-    (p) => p.status === 'outstanding' && p.paymentMethod === 'check',
+    (p) =>
+      p.status === 'outstanding' &&
+      (p.paymentMethod === 'check' || (p.paymentMethod === 'ach' && p.payeeName.trim() !== '')),
   )
   if (outstanding.length === 0) return []
 
@@ -243,7 +256,18 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
 
   // Only outgoing bank rows can clear a check. Bounded to a sensible window before
   // the earliest outstanding check so we don't scan the whole ledger.
-  const earliest = outstanding.map((p) => p.paymentDate).filter(Boolean).sort()[0]
+  // Start the scan before the earliest expected date: unlike a check, an ACH draft
+  // can pull EARLIER than the date the owner expected, and a row outside this window
+  // could never be suggested.
+  const earliestExpected = outstanding.map((p) => p.paymentDate).filter(Boolean).sort()[0]
+  const earliest = earliestExpected
+    ? new Date(
+        new Date(earliestExpected + 'T00:00:00').getTime() -
+          ACH_DRAFT_WINDOW_DAYS * 86_400_000,
+      )
+        .toISOString()
+        .slice(0, 10)
+    : undefined
   let txns: TxnRow[] = []
   try {
     txns = await fetchAllPages<TxnRow>(
@@ -346,6 +370,14 @@ export async function getAchReconcileMatches(): Promise<AchReconcileMatch[]> {
 export const CLEAR_WINDOW_DAYS = 45
 
 /**
+ * How far an ACH draft may land from the date the owner expected, in EITHER
+ * direction. Kept well under a month so a logged weekly COGS invoice cannot reach
+ * across to a different month's draft, while still absorbing a bank pulling a few
+ * days early or late.
+ */
+export const ACH_DRAFT_WINDOW_DAYS = 10
+
+/**
  * The pure matching algorithm behind getClearingSuggestions, split out so the
  * rules can be regression-tested without a database. Given outstanding checks
  * and candidate outgoing bank rows, decide which pairs to SUGGEST.
@@ -371,6 +403,7 @@ export function buildClearingSuggestions(
     transactionId: hit.id,
     matchType,
     checkNumber: p.checkNumber,
+    payeeName: p.payeeName,
     amount: p.amount,
     paymentDate: p.paymentDate,
     transactionDate: (hit.transaction_date ?? '').slice(0, 10),
@@ -392,9 +425,12 @@ export function buildClearingSuggestions(
     }
   }
 
-  // Pass 2: amount + date-window heuristic for checks still unmatched.
+  // Pass 2: amount + date-window heuristic for checks still unmatched. Restricted to
+  // checks deliberately — a numberless ACH matched on amount alone is exactly the
+  // false positive that would clear the wrong weekly COGS draft.
   const matchedPaymentIds = new Set(suggestions.map((s) => s.paymentId))
   for (const p of outstanding) {
+    if (p.paymentMethod !== 'check') continue
     if (matchedPaymentIds.has(p.id)) continue
     const hit = candidates.find((t) => {
       if (claimed.has(t.id)) return false
@@ -412,6 +448,47 @@ export function buildClearingSuggestions(
     if (hit) {
       claimed.add(hit.id)
       suggestions.push(build(p, hit, 'amount_date'))
+    }
+  }
+
+  // Pass 3: pending ACH drafts (logged COGS invoices) matched by PAYEE NAME in the
+  // bank description plus amount — an ACH carries no check number, so the vendor name
+  // is the identifier, exactly as in the autopay reconcile.
+  //
+  // Two tiers with exact amount first: when several weekly drafts to the same vendor
+  // are in flight, the unambiguous pair must win the transaction before a
+  // near-amount guess can take it.
+  //
+  // The date window is TWO-SIDED, unlike a check: the owner records an *expected*
+  // draft date and the bank may pull a few days early or late, so the
+  // "cannot clear before it was written" rule of pass 2 does not apply here.
+  const achPending = outstanding.filter(
+    (p) => p.paymentMethod === 'ach' && p.payeeName.trim() !== '',
+  )
+  for (const tier of ['exact', 'near'] as const) {
+    for (const p of achPending) {
+      if (suggestions.some((s) => s.paymentId === p.id)) continue
+      const hit = candidates.find((t) => {
+        if (claimed.has(t.id)) return false
+        if (!descriptionMatchesVendor(p.payeeName, t.description ?? '')) return false
+        const diff = Math.abs((Number(t.amount) || 0) - p.amount)
+        // 'near' stays tight (2% / $25): a loose band could pair one week's invoice
+        // with the neighbouring week's draft, which sit only days apart.
+        if (tier === 'exact' ? diff > 0.005 : diff > Math.max(p.amount * 0.02, 25)) {
+          return false
+        }
+        const td = (t.transaction_date ?? '').slice(0, 10)
+        if (!td) return false
+        const days = Math.abs(
+          (new Date(td + 'T00:00:00').getTime() -
+            new Date(p.paymentDate + 'T00:00:00').getTime()) / 86_400_000,
+        )
+        return days <= ACH_DRAFT_WINDOW_DAYS
+      })
+      if (hit) {
+        claimed.add(hit.id)
+        suggestions.push(build(p, hit, 'vendor_amount'))
+      }
     }
   }
 

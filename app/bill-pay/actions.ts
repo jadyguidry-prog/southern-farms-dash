@@ -271,6 +271,13 @@ export type RecordOneOffInput = {
   bankAccountId?: string | null
   purpose?: string
   memo?: string
+  /**
+   * ACH only: the draft has NOT pulled yet (a logged COGS invoice awaiting its
+   * weekly Sysco/Quirch draft). Records the payment as `outstanding` so it reduces
+   * spendable cash during the float, instead of the default "ACH already happened".
+   * `paymentDate` is then the EXPECTED draft date.
+   */
+  pending?: boolean
 }
 
 /**
@@ -304,7 +311,11 @@ export async function recordOneOffPayment(
   const supabase = await createClient()
   const actor = await currentActor()
 
-  const isCleared = method === 'ach'
+  // An ACH normally records something that already left the account, so it is
+  // cleared on entry. A *pending* ACH is the opposite — a draft that will pull in a
+  // few days — so it stays outstanding and floats, exactly like a written check.
+  // `pending` is ignored for checks, which are never cleared on entry anyway.
+  const isCleared = method === 'ach' && !input.pending
   const { data: inserted, error: insErr } = await supabase
     .from('obligation_payments')
     .insert({
@@ -338,6 +349,8 @@ export async function recordOneOffPayment(
       payee: payeeName,
       purpose: (input.purpose ?? '').trim() || null,
       one_off: true,
+      // Distinguishes a logged invoice awaiting its draft from a settled ACH.
+      pending_draft: method === 'ach' && Boolean(input.pending),
     },
     created_by: actor,
   })
