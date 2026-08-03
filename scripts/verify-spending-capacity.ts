@@ -111,23 +111,25 @@ check(
   'in',
 )
 
-// Transfer rows are positive in BOTH directions, so direction words must never
-// be used to assign a sign — the rows are dropped instead.
+// Transfer rows are stored POSITIVE in both directions, so direction has to be read
+// from the wording. It cannot be ignored: the counterpart accounts are absent from
+// this ledger and real transfers are asymmetric (~$21k in vs ~$43k out), so treating
+// them as net-zero deletes real cash and drives a reconstructed balance negative.
 check(
   'an outbound internal transfer is not spending',
   classifyFlow(
     row({ type: 'transfer', description: 'Internet Transfer to Acct# 2008275' }),
     ACCOUNTS,
   ),
-  'internal',
+  'internal_out',
 )
 check(
-  'an INBOUND internal transfer is not spending either',
+  'an INBOUND internal transfer is distinguished from an outbound one',
   classifyFlow(
     row({ type: 'transfer', description: 'Internet Transfer From Acct 2008275' }),
     ACCOUNTS,
   ),
-  'internal',
+  'internal_in',
 )
 check(
   'a Square Financial Services transfer is internal',
@@ -135,7 +137,15 @@ check(
     row({ type: 'transfer', description: 'Square Fin Svcs Transfer 35121567799' }),
     ACCOUNTS,
   ),
-  'internal',
+  'internal_out',
+)
+check(
+  'a deposit "from savings" is internal, never revenue',
+  classifyFlow(
+    row({ type: 'credit', description: 'Internet Transfer From Savings 9021' }),
+    ACCOUNTS,
+  ),
+  'internal_in',
 )
 
 // ---------------------------------------------------------------------------

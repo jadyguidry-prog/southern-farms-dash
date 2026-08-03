@@ -22,12 +22,17 @@
  *    recur. Real settlements look like "SQ260729" (SQ + date); advances look
  *    like "SQ CAP". Financing is excluded from expected income.
  *
- * 3. INTERNAL TRANSFERS ARE NOT SPENDING. Moving money from checking to Square
- *    Savings does not reduce cash on hand, because both accounts are counted as
- *    cash. Worse, transfer rows are stored with POSITIVE amounts in BOTH
- *    directions ("Internet Transfer to Acct# 2008275" vs "Internet Transfer
- *    From Acct 2008275"), so treating the type as an outflow booked ~$9,600 of
- *    incoming money as spending. Internal transfers are excluded entirely.
+ * 3. INTERNAL TRANSFERS ARE NOT SPENDING, BUT THEY DO MOVE THE BALANCE. Moving
+ *    money to Square Savings is not an expense, so transfers are excluded from
+ *    spending estimates. They are stored with POSITIVE amounts in BOTH directions
+ *    ("Internet Transfer to Acct# 2008275" vs "...From Acct 2008275"), so
+ *    direction must be read from the wording, never from the sign.
+ *    They are NOT net-zero: reconciliation against the real balance showed
+ *    transfers are strongly asymmetric (~$21k in vs ~$43k out) because the
+ *    counterpart accounts are absent from this ledger. Treating them as zero
+ *    deleted ~$45k of real movement and drove the reconstructed balance to
+ *    -$7,366 on a day the account was never overdrawn. Hence `internal_in` and
+ *    `internal_out`: ignored for spending, honoured for balance.
  *
  * 4. MEDIANS, NOT AVERAGES. On 2026-06-08 a $36,416 advance arrived and a
  *    $32,128 check went out the same day — a one-off financing event. A mean
@@ -57,7 +62,8 @@ export type DatedOutflow = {
 export type FlowClass =
   | 'in' // real operating money arriving
   | 'out' // real cash leaving an operating account
-  | 'internal' // moved between accounts we already count as cash
+  | 'internal_in' // arrived from another account we own (not revenue)
+  | 'internal_out' // sent to another account we own (not spending)
   | 'financing' // loan/advance proceeds — real cash, but never recurring
   | 'ignored' // not an operating cash account (e.g. a credit card)
 
@@ -70,11 +76,18 @@ const INFLOW_TYPES = new Set(['income', 'credit', 'refund'])
  */
 const FINANCING_PATTERN = /SQ\s*CAP|SQUARE\s+CAPITAL|LOAN\s+(ADVANCE|PROCEED)|ADVANCE\s+DEPOSIT/
 /**
- * Movements between accounts the business already owns. Direction words ("to"
- * vs "From") are deliberately NOT used to assign a sign — these rows are
- * dropped outright, because they never change total cash.
+ * Movements between accounts the business already owns.
+ *
+ * These are excluded from SPENDING estimates (moving your own money is not an
+ * expense), but they are NOT net-zero for this account's balance: the counterpart
+ * accounts (a second bank account, Square Financial) are absent from this ledger,
+ * and observed transfers are strongly asymmetric — ~$21k in vs ~$43k out. Treating
+ * them as zero deleted real cash movement and drove the reconstructed balance
+ * thousands of pounds negative. So direction IS read here, from the description.
  */
 const INTERNAL_PATTERN = /INTERNET\s+TRANSFER|SQUARE\s+FIN\s+SVCS\s+TRANSFER|TRANSFER\s+(TO|FROM)\s+ACCT/
+/** "From Acct 2008275" / "From Savings" => money arriving in this account. */
+const INTERNAL_INBOUND_PATTERN = /\bFROM\b/
 
 /** Round to cents, so repeated float math can't drift into fractions. */
 function money(n: number) {
@@ -101,8 +114,11 @@ export function classifyFlow(
 
   // Financing first: an advance is an inflow that must never look like sales.
   if (FINANCING_PATTERN.test(d)) return 'financing'
-  // Internal moves next, since they can carry any transaction type.
-  if (type === 'transfer' || INTERNAL_PATTERN.test(d)) return 'internal'
+  // Internal moves next, since they can carry any transaction type. Direction comes
+  // from the wording because every amount in this ledger is stored positive.
+  if (type === 'transfer' || INTERNAL_PATTERN.test(d)) {
+    return INTERNAL_INBOUND_PATTERN.test(d) ? 'internal_in' : 'internal_out'
+  }
 
   return INFLOW_TYPES.has(type) ? 'in' : 'out'
 }
