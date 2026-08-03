@@ -443,6 +443,12 @@ type InsightInput = {
    * 8 complete weeks exist, so a thin ledger produces no verdict on solvency.
    */
   spending?: SpendingInsightInput
+  /**
+   * Growth Planner position. Omit when the planner has no data (no revenue or
+   * transaction history), so no commitment advice is generated from an empty
+   * database.
+   */
+  growth?: GrowthInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
 }
@@ -464,6 +470,34 @@ export type SpendingInsightInput = {
   safeToSpendToday: number
   /** True when the 7-day projection dips under the owner's reserve. */
   breachesReserve: boolean
+}
+
+/**
+ * Growth Planner position, for advisor insights about new commitments.
+ *
+ * `headlineRecurring` is the STRESSED recommendation (survives the mode's sales
+ * decline), never the unstressed edge — the advisor must not headline a number
+ * that breaks on a small dip. `edgeRecurring` is carried only so the copy can
+ * explain the gap when the stressed answer is $0.
+ */
+export type GrowthInsightInput = {
+  /** Recommended monthly commitment that still clears every gate under stress. */
+  headlineRecurring: number
+  /** Largest amount tolerated on the expected path, with no downturn applied. */
+  edgeRecurring: number
+  /** Sales decline the recommendation was stress-tested against. */
+  stressDeclinePct: number
+  modeLabel: string
+  /** Saved proposals whose verdict changed since they were saved. */
+  changedProposals: {
+    name: string
+    fromClassification: string
+    toClassification: string
+    /** True when the change is for the worse (was affordable, now is not). */
+    worsened: boolean
+  }[]
+  /** Approved commitments the owner has said yes to, for the review nudge. */
+  approvedCount: number
 }
 
 export type BillPayInsightInput = {
@@ -494,6 +528,7 @@ export function generateInsights({
   marketing,
   billPay,
   spending,
+  growth,
   now,
   }: InsightInput): Insight[] {
   const out: Insight[] = []
@@ -1218,6 +1253,76 @@ export function generateInsights({
         title: 'A written check has been uncleared for weeks',
         detail: `The oldest outstanding check was written ${billPay.oldestOutstandingDays} days ago and still has not cleared. Confirm the payee received it before it is stale-dated, and reissue if it was lost.`,
         impact: `Uncleared ${billPay.oldestOutstandingDays} days`,
+      })
+    }
+  }
+
+  // --- Growth commitments -------------------------------------------------
+  // Every figure here is the STRESSED recommendation from the Growth Planner, so
+  // the advisor and the planner page can never headline different numbers.
+  if (growth) {
+    if (growth.headlineRecurring > 0) {
+      out.push({
+        id: 'auto-growth-capacity',
+        severity: 'opportunity',
+        category: 'Growth',
+        title: 'Room for a new monthly commitment',
+        detail:
+          `On ${growth.modeLabel}, you could take on about ` +
+          `${formatCurrency(growth.headlineRecurring)} a month and still stay above your ` +
+          `cash reserve even if sales fell ${growth.stressDeclinePct}%. ` +
+          `That is the amount that survives the downturn — not the most your limits ` +
+          `would technically allow today, which is higher and much closer to the edge.`,
+        impact: `Up to ${formatCurrency(growth.headlineRecurring)}/mo`,
+      })
+    } else if (growth.edgeRecurring > 0) {
+      // The stressed answer is $0 but the expected path allows something. Saying
+      // only "nothing fits" would be wrong; the honest version names what the
+      // expected path would allow and why it is not the recommendation.
+      out.push({
+        id: 'auto-growth-no-headroom',
+        severity: 'warning',
+        category: 'Growth',
+        title: 'No new commitment is safe against a downturn',
+        detail:
+          `If sales hold exactly as expected, your limits would tolerate about ` +
+          `${formatCurrency(growth.edgeRecurring)} a month. But nothing survives a ` +
+          `${growth.stressDeclinePct}% sales drop, so on ${growth.modeLabel} the ` +
+          `recommendation is to commit nothing new yet. Build cash first, or reconsider ` +
+          `once sales are steadier.`,
+        impact: `Recommended new commitment: ${formatCurrency(0)}`,
+      })
+    } else {
+      out.push({
+        id: 'auto-growth-none',
+        severity: 'warning',
+        category: 'Growth',
+        title: 'No room for a new commitment right now',
+        detail:
+          `Your current cash and obligations leave no room for new recurring spending ` +
+          `on ${growth.modeLabel} — not even before allowing for a downturn. ` +
+          `Rebuilding cash above your reserve is the first step.`,
+        impact: `Recommended new commitment: ${formatCurrency(0)}`,
+      })
+    }
+
+    // A saved proposal that flipped is the single most actionable growth signal:
+    // the owner already cared enough to save it, and the answer has since moved.
+    for (const p of growth.changedProposals) {
+      out.push({
+        id: `auto-growth-proposal-changed-${p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        severity: p.worsened ? 'warning' : 'opportunity',
+        category: 'Growth',
+        title: p.worsened
+          ? `"${p.name}" no longer fits as well as it did`
+          : `"${p.name}" fits better than when you saved it`,
+        detail:
+          `When you saved it the answer was "${p.fromClassification}". Against today's ` +
+          `cash it is "${p.toClassification}". ` +
+          (p.worsened
+            ? `Re-open it before committing — the version you remember is out of date.`
+            : `If you still want it, this is a better moment than when you first checked.`),
+        impact: `${p.fromClassification} → ${p.toClassification}`,
       })
     }
   }

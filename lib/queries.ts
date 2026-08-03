@@ -18,6 +18,8 @@ import {
   summarizeDailyRows,
 } from '@/lib/square-sales-service'
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
+import { getGrowthPlannerSnapshot } from '@/lib/growth-planner-service'
+import { getSavedProposalReviews } from '@/lib/growth-proposal-review'
 import { getLaborHealthSnapshot } from '@/lib/labor-service'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
 import { getOutstandingCheckSummary, getBillPaySnapshot } from '@/lib/bill-pay-service'
@@ -789,6 +791,8 @@ export async function getHealthSnapshot() {
   marketing,
   billPay,
   spendingCapacity,
+  growthPlanner,
+  proposalReviews,
   ] = await Promise.all([
   getKpis(),
   getCashDebtSummary(),
@@ -799,6 +803,10 @@ export async function getHealthSnapshot() {
   getMarketingAffordabilitySnapshot(),
   getBillPaySnapshot(),
   getSpendingCapacity(),
+  // Both are `cache`-wrapped and share the same underlying projection, so the
+  // dashboard, the advisor and the Growth Planner page all see identical figures.
+  getGrowthPlannerSnapshot(),
+  getSavedProposalReviews(),
   ])
   const settings = summary.settings
 
@@ -903,6 +911,27 @@ export async function getHealthSnapshot() {
       latestDate: squareWeekly.latestDate,
       conflictDayCount: squareSummary.conflictDays.length,
     },
+    // Omitted entirely when the planner has no data, so an empty database cannot
+    // produce commitment advice. `maxRecurring` is the STRESSED recommendation —
+    // passing the unstressed edge here would let the advisor headline a number that
+    // breaks on a small sales dip.
+    growth: growthPlanner.hasData
+      ? {
+          headlineRecurring: growthPlanner.maxRecurring,
+          edgeRecurring: growthPlanner.edgeRecurring,
+          stressDeclinePct: growthPlanner.activeMode.headlineStressSalesDeclinePct,
+          modeLabel: growthPlanner.activeMode.label,
+          changedProposals: proposalReviews
+            .filter((r) => r.changed)
+            .map((r) => ({
+              name: r.name,
+              fromClassification: r.originalClassification,
+              toClassification: r.live.classification,
+              worsened: r.worsened,
+            })),
+          approvedCount: proposalReviews.filter((r) => r.approvedAt != null).length,
+        }
+      : undefined,
     // Same guard as cash flow: with no timecards there is nothing to advise on,
     // so the group is omitted rather than passed as zeros.
     labor: labor.hasData
@@ -1127,6 +1156,12 @@ export async function getHealthSnapshot() {
     // tile, the advisor, and reporting all read this one snapshot so the
     // spendable-cash figure and the outstanding-check count never drift apart.
     billPay,
+    // Growth Planner position and every saved proposal re-checked live. Same
+    // contract as the rest: the dashboard card, the advisor insights and the admin
+    // report all read these two, so none of them can state a commitment figure the
+    // Growth Planner page itself would contradict.
+    growthPlanner,
+    proposalReviews,
   }
 }
 

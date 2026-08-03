@@ -18,6 +18,7 @@
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
 import { analyzeProposalFromSnapshot } from '@/lib/growth-planner-service'
+import { getSavedProposalReviews } from '@/lib/growth-proposal-review'
 import { draftToProposal, num } from '@/app/growth/proposal-draft'
 import type { Proposal, ProposalDecision } from '@/lib/growth-proposals'
 import type {
@@ -149,52 +150,47 @@ export async function saveProposal(draft: ProposalDraft): Promise<SaveProposalRe
   return { ok: true, id: inserted.id }
 }
 
-/** List saved proposals with their first and most-recently-STORED verdicts.
- *  Read-only: it shows "last checked" figures and never re-runs (that would make
- *  the list arbitrarily expensive); the detail view is where the live re-run lives. */
+/**
+ * List saved proposals with their original verdict and a LIVE one.
+ *
+ * Delegates to the shared `getSavedProposalReviews` loader rather than reading the
+ * last stored verdict. That was a real inconsistency: the list showed a stale badge
+ * while the detail page re-ran live, so a proposal that had quietly become
+ * unaffordable still looked fine until the owner opened it. One loader means the
+ * list, the detail page, the dashboard and the advisor cannot disagree.
+ */
 export async function listSavedProposals(): Promise<SavedProposalSummary[]> {
+  const reviews = await getSavedProposalReviews()
+  return reviews.map((r) => ({
+    id: r.id,
+    name: r.name,
+    proposalType: r.proposalType as SavedProposalSummary['proposalType'],
+    createdAt: r.createdAt,
+    modeKey: r.modeKey,
+    originalClassification: r.originalClassification,
+    liveClassification: r.live.classification,
+    changed: r.changed,
+    worsened: r.worsened,
+    approvedAt: r.approvedAt,
+  }))
+}
+
+/** Mark a proposal as one the owner actually went ahead with, or undo that. Kept
+ *  separate from the verdict history: approving is a decision, not an analysis. */
+export async function setProposalApproved(
+  id: string,
+  approved: boolean,
+): Promise<{ ok: boolean; error?: string }> {
   const supabase = await createClient()
-
-  const { data: proposals, error } = await supabase
+  const { error } = await supabase
     .from('growth_proposals')
-    .select('id, name, proposal_type, mode_key, created_at')
-    .is('deleted_at', null)
-    .order('created_at', { ascending: false })
-
-  if (error || !proposals || proposals.length === 0) return []
-
-  const ids = proposals.map((p) => p.id)
-  const { data: analyses } = await supabase
-    .from('growth_proposal_analyses')
-    .select('*')
-    .in('proposal_id', ids)
-    .order('created_at', { ascending: true })
-
-  const byProposal = new Map<string, AnalysisRow[]>()
-  for (const a of (analyses ?? []) as AnalysisRow[]) {
-    const list = byProposal.get(a.proposal_id) ?? []
-    list.push(a)
-    byProposal.set(a.proposal_id, list)
-  }
-
-  const out: SavedProposalSummary[] = []
-  for (const p of proposals) {
-    const list = byProposal.get(p.id)
-    if (!list || list.length === 0) continue // a proposal with no snapshot is unusable
-    const original = list[0]
-    const current = list[list.length - 1]
-    out.push({
-      id: p.id,
-      name: p.name,
-      proposalType: p.proposal_type as SavedProposalSummary['proposalType'],
-      createdAt: p.created_at,
-      modeKey: p.mode_key,
-      original: rowToSummary(original),
-      current: rowToSummary(current),
-      changed: original.classification !== current.classification,
-    })
-  }
-  return out
+    .update({ approved_at: approved ? new Date().toISOString() : null })
+    .eq('id', id)
+  if (error) return { ok: false, error: error.message }
+  revalidatePath('/growth')
+  revalidatePath('/growth/proposals')
+  revalidatePath(`/growth/proposals/${id}`)
+  return { ok: true }
 }
 
 /** Full detail with a LIVE re-run (never stale) plus original + history. Read-only. */

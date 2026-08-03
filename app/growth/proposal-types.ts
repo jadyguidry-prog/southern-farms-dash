@@ -40,18 +40,22 @@ export type AnalysisSummary = {
   lowestMonthKey: string | null
 }
 
-/** A saved proposal as shown in the list: its first verdict and its current one,
- *  so the owner sees how the answer moved as cash changed. `changed` is true when
- *  the current classification differs from the original. */
+/** A saved proposal as shown in the list. `liveClassification` is recomputed against
+ *  today's cash — NOT the last stored verdict — so the list, the detail page, the
+ *  dashboard and the advisor all say the same thing about the same proposal. */
 export type SavedProposalSummary = {
   id: string
   name: string
   proposalType: ProposalType
   createdAt: string
   modeKey: string
-  original: AnalysisSummary
-  current: AnalysisSummary
+  originalClassification: Classification
+  liveClassification: Classification
+  /** Live verdict differs from the one recorded when it was saved. */
   changed: boolean
+  /** The change is for the worse. */
+  worsened: boolean
+  approvedAt: string | null
 }
 
 /** Full detail: the live re-run decision (never stale), the original snapshot for

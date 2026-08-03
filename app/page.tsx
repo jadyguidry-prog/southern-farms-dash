@@ -60,8 +60,14 @@ export default async function DashboardPage() {
     checks,
     marketing,
     billPay,
+    growthPlanner,
+    proposalReviews,
   } =
     snapshot
+  // Saved proposals whose live verdict no longer matches the one recorded at save
+  // time. Counted from the same shared review the advisor uses, so the card and the
+  // advisor can never report a different number of changed proposals.
+  const changedProposalCount = proposalReviews.filter((r) => r.changed).length
   // Generated insights lead, followed by anything entered manually.
   //
   // Sorted by severity because the highlights card shows only the first three. On
@@ -443,8 +449,9 @@ export default async function DashboardPage() {
         </Card>
       </div>
 
-      {/* Marketing affordability */}
-      <div className="mt-4">
+      {/* Marketing affordability + growth capacity, side by side: both answer
+          "what can this business afford to commit to", at different scopes. */}
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -511,6 +518,86 @@ export default async function DashboardPage() {
                   className="text-sm font-medium underline"
                 >
                   See how this is calculated
+                </Link>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Growth capacity. Reads the SAME snapshot the Growth Planner page uses,
+            so the headline figure here can never contradict that page. */}
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <CardTitle className="text-base">Growth Investment</CardTitle>
+                <CardDescription>
+                  What a new commitment can be, tested against a downturn
+                </CardDescription>
+              </div>
+              {growthPlanner.hasData ? (
+                <Badge variant="secondary">{growthPlanner.activeMode.label}</Badge>
+              ) : null}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {!growthPlanner.hasData ? (
+              <div className="flex flex-col gap-2">
+                <p className="text-lg font-semibold text-muted-foreground">
+                  Not yet measurable
+                </p>
+                <p className="text-pretty text-sm text-muted-foreground">
+                  Planning a new commitment needs imported bank transactions and
+                  revenue history. Without both, any figure here would be a guess.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <span className="text-3xl font-semibold tracking-tight">
+                    {formatCurrency(growthPlanner.maxRecurring)}
+                  </span>
+                  <span className="text-sm text-muted-foreground">
+                    per month recommended
+                  </span>
+                </div>
+                {/* The headline is the STRESSED figure. Saying so on the card matters:
+                    without it, this number and the higher ceiling on the planner page
+                    look like a contradiction rather than two different standards. */}
+                <p className="text-pretty text-sm text-muted-foreground">
+                  {growthPlanner.maxRecurring > 0
+                    ? `Still clears every limit even if sales fell ${growthPlanner.activeMode.headlineStressSalesDeclinePct}%.`
+                    : growthPlanner.edgeRecurring > 0
+                      ? `Nothing survives a ${growthPlanner.activeMode.headlineStressSalesDeclinePct}% sales drop. If sales held exactly as expected your limits would tolerate about ${formatCurrency(growthPlanner.edgeRecurring)} a month — but that is not a recommendation.`
+                      : 'Your current cash and obligations leave no room for new recurring spending yet.'}
+                </p>
+                {growthPlanner.maxRecurring > 0 ? (
+                  <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                    <span className="text-muted-foreground">
+                      One-time{' '}
+                      <span className="font-medium text-foreground">
+                        {formatCurrency(growthPlanner.maxOneTime)}
+                      </span>
+                    </span>
+                    <span className="text-muted-foreground">
+                      Ceiling{' '}
+                      <span className="font-medium text-foreground">
+                        {formatCurrency(growthPlanner.edgeRecurring)}/mo
+                      </span>
+                    </span>
+                  </div>
+                ) : null}
+                {/* A saved proposal whose answer moved is the most actionable thing
+                    on this card, so it outranks the figures above it. */}
+                {changedProposalCount > 0 ? (
+                  <p className="text-pretty text-sm font-medium text-amber-700">
+                    {changedProposalCount === 1
+                      ? '1 saved proposal has a different answer than when you saved it.'
+                      : `${changedProposalCount} saved proposals have different answers than when you saved them.`}
+                  </p>
+                ) : null}
+                <Link href="/growth" className="text-sm font-medium underline">
+                  Open the Growth Planner
                 </Link>
               </div>
             )}

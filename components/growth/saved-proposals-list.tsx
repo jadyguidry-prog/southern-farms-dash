@@ -3,10 +3,11 @@
 /**
  * List of saved proposals with their before/after verdict.
  *
- * The figures shown are the LAST CHECKED snapshot (labelled with its date), not a
- * live re-run — re-running every row on every list render would be arbitrarily
- * expensive. Opening a proposal re-checks it live. When the current verdict differs
- * from the original, the row makes that movement explicit ("was X, now Y").
+ * Every badge here is a LIVE verdict from the shared `getSavedProposalReviews`
+ * loader — the same one the detail page, dashboard and advisor use — so no row can
+ * show a stale answer that contradicts the page it links to. When the live verdict
+ * differs from the one recorded at save time, the row states the movement outright
+ * ("was X, now Y").
  */
 
 import { useState, useTransition } from 'react'
@@ -14,7 +15,7 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { PROPOSAL_TYPE_LABELS } from '@/lib/growth-proposals'
 import type { SavedProposalSummary } from '@/app/growth/proposal-types'
-import { deleteProposal } from '@/app/growth/proposal-store'
+import { deleteProposal, setProposalApproved } from '@/app/growth/proposal-store'
 import { ClassificationBadge } from '@/components/growth/proposal-decision'
 import { Button, buttonVariants } from '@/components/ui/button'
 
@@ -55,6 +56,13 @@ function SavedRow({ p }: { p: SavedProposalSummary }) {
     })
   }
 
+  function onToggleApproved() {
+    startTransition(async () => {
+      await setProposalApproved(p.id, !p.approvedAt)
+      router.refresh()
+    })
+  }
+
   return (
     <li className="rounded-xl border border-border bg-card p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -73,17 +81,25 @@ function SavedRow({ p }: { p: SavedProposalSummary }) {
             {p.changed ? (
               <>
                 <span className="text-xs text-muted-foreground">Was</span>
-                <ClassificationBadge classification={p.original.classification} muted />
+                <ClassificationBadge classification={p.originalClassification} muted />
                 <span className="text-xs text-muted-foreground">→ now</span>
-                <ClassificationBadge classification={p.current.classification} />
+                <ClassificationBadge classification={p.liveClassification} />
               </>
             ) : (
-              <ClassificationBadge classification={p.current.classification} />
+              <ClassificationBadge classification={p.liveClassification} />
             )}
-            <span className="text-xs text-muted-foreground">
-              last checked {fmtDate(p.current.createdAt)}
-            </span>
+            <span className="text-xs text-muted-foreground">checked against today&apos;s cash</span>
+            {p.approvedAt ? (
+              <span className="inline-flex items-center rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs font-medium text-foreground">
+                Went ahead
+              </span>
+            ) : null}
           </div>
+          {p.worsened ? (
+            <p className="mt-2 text-xs text-amber-700">
+              This fits less well than when you saved it — re-open it before committing.
+            </p>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
@@ -103,9 +119,14 @@ function SavedRow({ p }: { p: SavedProposalSummary }) {
               </Button>
             </>
           ) : (
-            <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}>
-              Remove
-            </Button>
+            <>
+              <Button variant="ghost" size="sm" onClick={onToggleApproved} disabled={pending}>
+                {p.approvedAt ? 'Undo went ahead' : 'Mark as went ahead'}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}>
+                Remove
+              </Button>
+            </>
           )}
         </div>
       </div>
