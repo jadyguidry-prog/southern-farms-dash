@@ -25,6 +25,7 @@ import {
   type LedgerRow,
   type FlowEstimate,
 } from '../lib/spending-capacity-service'
+import { generateInsights } from '../lib/health'
 
 let pass = 0
 let fail = 0
@@ -475,6 +476,89 @@ console.log('\nEnd to end, with the real shape of the business')
     first.cautiousBalance,
     18_846 + first.cautiousIn - first.moneyOut,
     0.02,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The weekly position also has to reach the AI Advisor. The deficit warning is
+// the most consequential sentence this feature produces, so the conditions
+// under which it fires — and stays silent — are pinned here.
+console.log('\nThe advisor insight built from the weekly position')
+
+{
+  const advisorSettings = {
+    min_cash_reserve: 0,
+    target_payroll_pct: 25,
+    warning_payroll_pct: 30,
+    minimum_weekly_sales: 20000,
+    preferred_weekly_sales: 30000,
+  } as unknown as Parameters<typeof generateInsights>[0]['settings']
+
+  // Pillars forced to `unknown` so they emit nothing and only our ids remain.
+  const advisorPillars = {
+    payroll: { status: 'unknown', label: 'Unknown', message: '' },
+    cash: { status: 'unknown', label: 'Unknown', message: '' },
+    sales: { status: 'unknown', label: 'Unknown', message: '' },
+  } as never
+
+  type SpendingArg = Parameters<typeof generateInsights>[0]['spending']
+  const build = (spending?: SpendingArg) =>
+    generateInsights({ settings: advisorSettings, pillars: advisorPillars, spending })
+  const ids = (spending?: SpendingArg) =>
+    build(spending)
+      .filter((i) => i.id.startsWith('auto-weekly-cash-'))
+      .map((i) => i.id)
+      .sort()
+
+  // The farm's real position: takes in $13,095/wk, pays out $14,381/wk.
+  const real = {
+    typicalWeeklyInflow: 13_095,
+    typicalWeeklyOutflow: 14_381,
+    weeksObserved: 45,
+    safeToSpendToday: 16_185,
+    breachesReserve: false,
+  }
+
+  // Silence when there is nothing to judge, matching every other insight group.
+  check('no spending group produces no insight', ids(undefined), [])
+  // A partially-imported ledger must not yield a verdict on solvency.
+  check(
+    'fewer than 8 complete weeks produces no verdict',
+    ids({ ...real, weeksObserved: 7 }),
+    [],
+  )
+  check(
+    'at 8 weeks the verdict appears',
+    ids({ ...real, weeksObserved: 8 }),
+    ['auto-weekly-cash-deficit'],
+  )
+
+  check("the farm's real position warns", ids(real), ['auto-weekly-cash-deficit'])
+  check(
+    'spending more than you earn is critical, not a gentle nudge',
+    build(real).find((i) => i.id === 'auto-weekly-cash-deficit')?.severity,
+    'critical',
+  )
+
+  // A business that covers its costs gets the opposite framing.
+  check(
+    'covering costs reads as an opportunity',
+    ids({ ...real, typicalWeeklyInflow: 16_000 }),
+    ['auto-weekly-cash-surplus'],
+  )
+  // The branches must be mutually exclusive: never tell the owner they are
+  // losing money AND have a surplus in the same list.
+  check('exactly one weekly verdict is produced', ids(real).length, 1)
+
+  // The advice must be checkable rather than asserted, so the gap and the
+  // runway both appear in the copy. 14,381 - 13,095 = 1,286.
+  const detail = build(real).find((i) => i.id === 'auto-weekly-cash-deficit')?.detail ?? ''
+  ok('the weekly gap is quantified in the copy', detail.includes('$1,286'))
+  // 16,185 / 1,286 = 12.58 -> floored to 12 whole weeks of cover.
+  ok('runway is stated in whole weeks', detail.includes('12 weeks'))
+  ok(
+    'the copy says trimming spending alone only buys time',
+    detail.includes('buys time'),
   )
 }
 

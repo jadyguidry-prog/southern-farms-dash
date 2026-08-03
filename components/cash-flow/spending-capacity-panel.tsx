@@ -74,6 +74,17 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
     estimate,
   } = capacity
 
+  // With no reserve configured, this figure is what it takes to run the account to
+  // zero. That is a legitimate calculation but reckless advice to present bare, so
+  // the panel says so rather than letting a big number imply it is safe.
+  const noReserveSet = minCashReserve <= 0
+
+  // Structural check: if a typical week spends more than it takes in, spare cash is
+  // being drawn down regardless of today's balance. The owner needs that context,
+  // because "safe to spend" otherwise reads as a surplus that does not exist.
+  const weeklyGap = estimate.typicalInflow - estimate.typicalOutflow
+  const runningAtLoss = estimate.weeksObserved >= 8 && weeklyGap < 0
+
   return (
     <Card>
       <CardHeader>
@@ -132,6 +143,44 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                   </span>{' '}
                   under your {formatCurrency(minCashReserve)} reserve. There is
                   nothing spare to spend this week.
+                </p>
+              </div>
+            ) : null}
+
+            {runningAtLoss ? (
+              <div className="mt-4 flex gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+                <TriangleAlert
+                  className="size-4 shrink-0 text-destructive"
+                  aria-hidden
+                />
+                <p className="text-sm text-foreground text-pretty">
+                  Read this before spending: a typical week brings in{' '}
+                  <span className="font-medium tabular-nums">
+                    {formatCurrency(estimate.typicalInflow)}
+                  </span>{' '}
+                  but pays out{' '}
+                  <span className="font-medium tabular-nums">
+                    {formatCurrency(estimate.typicalOutflow)}
+                  </span>{' '}
+                  &mdash; about{' '}
+                  <span className="font-medium tabular-nums">
+                    {formatCurrency(Math.abs(weeklyGap))}
+                  </span>{' '}
+                  more going out than coming in. The figure above is spare cash you
+                  hold right now, not profit. Spending it brings the day you run
+                  short closer.
+                </p>
+              </div>
+            ) : null}
+
+            {noReserveSet ? (
+              <div className="mt-4 flex gap-3 rounded-lg border border-border bg-muted/40 p-3">
+                <Info className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                <p className="text-sm text-muted-foreground text-pretty">
+                  You have no minimum cash reserve set, so this figure is the amount
+                  that would take your account down to{' '}
+                  <span className="font-medium tabular-nums">$0</span>. Set a reserve
+                  in Settings and it will be held back automatically.
                 </p>
               </div>
             ) : null}

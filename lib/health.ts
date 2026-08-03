@@ -438,8 +438,32 @@ type InsightInput = {
    * farm not yet using Bill Pay gets no bill-pay insights rather than zeros.
    */
   billPay?: BillPayInsightInput
+  /**
+   * Weekly cash position from the spending-capacity engine. Omit when fewer than
+   * 8 complete weeks exist, so a thin ledger produces no verdict on solvency.
+   */
+  spending?: SpendingInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
+}
+
+/**
+ * Weekly money-in vs money-out, derived from bank deposits rather than invoices.
+ *
+ * This is the single most consequential input the advisor has: it answers whether
+ * the business is structurally covering its own costs. Both figures are medians,
+ * so a one-off loan advance or a large annual cheque cannot manufacture a
+ * surplus or a crisis that is not there.
+ */
+export type SpendingInsightInput = {
+  typicalWeeklyInflow: number
+  typicalWeeklyOutflow: number
+  /** Complete weeks behind the medians, for honest hedging in the copy. */
+  weeksObserved: number
+  /** Cash that could be spent now without breaching the reserve. */
+  safeToSpendToday: number
+  /** True when the 7-day projection dips under the owner's reserve. */
+  breachesReserve: boolean
 }
 
 export type BillPayInsightInput = {
@@ -469,10 +493,54 @@ export function generateInsights({
   checks,
   marketing,
   billPay,
+  spending,
   now,
   }: InsightInput): Insight[] {
   const out: Insight[] = []
   const { payroll, cash, sales } = pillars
+
+  // --- Weekly cash position (bank-derived) ---
+  // Deliberately placed first: whether a typical week covers its own costs
+  // outranks every ratio below it. Requires 8+ complete weeks, so a partially
+  // imported ledger cannot trigger a solvency verdict.
+  if (spending && spending.weeksObserved >= 8) {
+    const gap = spending.typicalWeeklyInflow - spending.typicalWeeklyOutflow
+    const weeklyGap = Math.abs(gap)
+    if (gap < 0) {
+      // Runway in whole weeks: how long today's spare cash absorbs the gap.
+      const weeksOfCover = weeklyGap > 0 ? Math.floor(spending.safeToSpendToday / weeklyGap) : 0
+      out.push({
+        id: 'auto-weekly-cash-deficit',
+        severity: 'critical',
+        category: 'Cash',
+        title: 'A typical week spends more than it takes in',
+        detail:
+          `Across ${spending.weeksObserved} weeks of bank history, a typical week brings in ` +
+          `${formatCurrency(spending.typicalWeeklyInflow)} and pays out ` +
+          `${formatCurrency(spending.typicalWeeklyOutflow)} — about ${formatCurrency(weeklyGap)} ` +
+          `more out than in. At that rate your spare cash of ` +
+          `${formatCurrency(spending.safeToSpendToday)} covers roughly ${weeksOfCover} ` +
+          `${weeksOfCover === 1 ? 'week' : 'weeks'} before the account runs short. ` +
+          `Closing the gap needs either higher sales or lower weekly costs — ` +
+          `trimming spending alone only buys time.`,
+        impact: `About ${formatCurrency(weeklyGap * 4)} a month`,
+      })
+    } else {
+      out.push({
+        id: 'auto-weekly-cash-surplus',
+        severity: 'opportunity',
+        category: 'Cash',
+        title: 'A typical week covers its own costs',
+        detail:
+          `Across ${spending.weeksObserved} weeks of bank history, a typical week brings in ` +
+          `${formatCurrency(spending.typicalWeeklyInflow)} against ` +
+          `${formatCurrency(spending.typicalWeeklyOutflow)} going out, leaving about ` +
+          `${formatCurrency(weeklyGap)} a week. Directing part of that to your cash ` +
+          `reserve builds a buffer for slow weeks.`,
+        impact: `About ${formatCurrency(weeklyGap * 4)} a month`,
+      })
+    }
+  }
 
   // --- Cash reserve ---
   if (cash.status === 'red') {

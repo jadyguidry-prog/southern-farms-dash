@@ -19,6 +19,8 @@ import {
   buildWeeklyFlows,
   estimateWeeklyFlow,
   buildDayOfWeekProfile,
+  deriveSpendingCapacity,
+  formatDate,
   weekStart,
   type LedgerRow,
 } from '../lib/spending-capacity-service'
@@ -263,6 +265,58 @@ async function main() {
   ok(
     'weekends carry no deposits (money lands Mon-Fri)',
     (shares[6] ?? 0) + (shares[7] ?? 0) < 0.02,
+  )
+
+  // ---- the actual number the owner will act on ----
+  // The page uses a cookie-scoped Supabase client that cannot run here, so this
+  // reproduces the same engine call with real settings and real obligations. If
+  // these two ever disagree, the difference is in the loader, not the maths.
+  const { data: settingsRows } = await db
+    .from('business_settings')
+    .select('min_cash_reserve')
+    .limit(1)
+  const minCashReserve = Number(settingsRows?.[0]?.min_cash_reserve ?? 0)
+
+  const cashOnHand = (accounts ?? [])
+    .filter((a) => !/credit|loan|card/i.test(`${a.account_type ?? ''} ${a.account_name ?? ''}`))
+    .reduce((s, a) => s + Number(a.current_balance ?? 0), 0)
+
+  const today = formatDate(new Date())
+  const result = deriveSpendingCapacity({
+    cashOnHand,
+    minCashReserve,
+    today,
+    estimate: est,
+    shares,
+    datedOutflows: [],
+    baselineWeeklyOutflow: est.typicalOutflow,
+  })
+
+  console.log('\nSpending capacity as the owner will see it')
+  console.log(`  cash on hand (all cash accts): ${money(cashOnHand)}`)
+  console.log(`  minimum reserve (settings)   : ${money(minCashReserve)}`)
+  console.log(`  safe to spend today          : ${money(result.safeToSpendToday)}`)
+  console.log(`  per-day allowance (7 days)   : ${money(result.perDayAllowance)}`)
+  console.log(
+    `  projected low point          : ${money(result.lowestBalance)} on ${result.lowestBalanceDate}`,
+  )
+  if (result.breachesReserve) {
+    console.log(`  reserve shortfall            : ${money(result.reserveShortfall)}`)
+  }
+
+  ok('the safe-to-spend figure is never negative', result.safeToSpendToday >= 0)
+  ok(
+    'safe-to-spend never exceeds cash on hand (cannot spend money we lack)',
+    result.safeToSpendToday <= cashOnHand,
+    `${money(result.safeToSpendToday)} vs ${money(cashOnHand)}`,
+  )
+  ok('a 7-day projection was produced', result.days.length === 7)
+  // Reserve is the whole point of the feature: if the projection dips below it,
+  // the engine must report that rather than quietly offering money to spend.
+  ok(
+    'a projected dip below the reserve is reported, not hidden',
+    !result.breachesReserve || result.safeToSpendToday === 0,
+    `breaches=${result.breachesReserve} safe=${money(result.safeToSpendToday)}`,
   )
 
   console.log(

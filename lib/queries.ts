@@ -21,6 +21,7 @@ import { getCashFlowInsight } from '@/lib/cash-flow-service'
 import { getLaborHealthSnapshot } from '@/lib/labor-service'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
 import { getOutstandingCheckSummary, getBillPaySnapshot } from '@/lib/bill-pay-service'
+import { getSpendingCapacity } from '@/lib/spending-capacity-data'
 
 // ---------- Types ----------
 export type KpiRow = {
@@ -123,64 +124,22 @@ export function asTrend(v: string | null): 'up' | 'down' | undefined {
   return v === 'up' || v === 'down' ? v : undefined
 }
 
-/**
- * A 30-day daily cash projection derived from live records: today's cash on
- * hand, obligations on their resolved due dates (outflows), and receivables on
- * their expected payment dates (inflows). Nothing is stored or hardcoded, so it
- * always reflects the current state of the books.
+/*
+ * The 30-day cash projection used to live here as `getCashForecast`. It has been
+ * replaced by `getSpendingCapacity` in lib/spending-capacity-data.ts.
+ *
+ * Why it was removed rather than kept: its only source of incoming money was
+ * unpaid receivables, of which this business has 2 totalling $761. Meanwhile it
+ * subtracted every scheduled obligation, so the projected line could only ever
+ * fall — it never counted the ~$13,095 a week that actually lands in the bank
+ * from daily sales. The replacement derives inflows from the deposit history
+ * itself, and is checked against the real balance by
+ * scripts/verify-cash-reconciliation.ts.
+ *
+ * Receivables are deliberately NOT added on top of that: when an invoice is
+ * paid it arrives as a bank deposit, which the deposit history already
+ * reflects. Counting both would double-count the same money.
  */
-export async function getCashForecast() {
-  const summary = await getCashDebtSummary()
-
-  const now = new Date()
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const dayKey = (d: Date) => d.toISOString().slice(0, 10)
-
-  // Bucket each dated cash movement onto the day it lands.
-  const movements = new Map<string, number>()
-  const add = (date: string, amount: number) => {
-    if (!date) return
-    movements.set(date, (movements.get(date) ?? 0) + amount)
-  }
-
-  for (const o of summary.scheduledObligations) {
-    add(o.effectiveDueDate, -o.amount)
-  }
-
-  for (const r of summary.receivables) {
-    if (r.status === 'Paid') continue
-    const outstanding = r.amount - r.amountPaid
-    if (outstanding <= 0) continue
-    // Fall back to the invoice due date when no expected date is set.
-    add(r.expectedPaymentDate || r.dueDate, outstanding)
-  }
-
-  // Anything already past due is treated as landing today.
-  const todayKey = dayKey(today)
-  let overdueNet = 0
-  for (const [date, amount] of movements) {
-    if (date < todayKey) {
-      overdueNet += amount
-      movements.delete(date)
-    }
-  }
-  if (overdueNet !== 0) add(todayKey, overdueNet)
-
-  let balance = summary.cashOnHand
-  const series: { day: string; balance: number }[] = []
-
-  for (let i = 0; i < 30; i++) {
-    const date = new Date(today)
-    date.setDate(today.getDate() + i)
-    balance += movements.get(dayKey(date)) ?? 0
-    series.push({
-      day: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      balance,
-    })
-  }
-
-  return series
-}
 
 export async function getCashAccounts() {
   const supabase = await createClient()
@@ -792,17 +751,19 @@ export async function getHealthSnapshot() {
     cashFlowInsight,
     labor,
     checks,
-    marketing,
-    billPay,
+  marketing,
+  billPay,
+  spendingCapacity,
   ] = await Promise.all([
-    getKpis(),
-    getCashDebtSummary(),
-    getSquareDailySales(),
-    getCashFlowInsight(),
-    getLaborHealthSnapshot(),
-    getCheckResolutionSnapshot(),
-    getMarketingAffordabilitySnapshot(),
-    getBillPaySnapshot(),
+  getKpis(),
+  getCashDebtSummary(),
+  getSquareDailySales(),
+  getCashFlowInsight(),
+  getLaborHealthSnapshot(),
+  getCheckResolutionSnapshot(),
+  getMarketingAffordabilitySnapshot(),
+  getBillPaySnapshot(),
+  getSpendingCapacity(),
   ])
   const settings = summary.settings
 
@@ -1026,6 +987,19 @@ export async function getHealthSnapshot() {
             oldestOutstandingDays: billPay.oldestOutstandingDays,
             cashAvailable: summary.cashAvailable,
             minCashReserve: summary.minCashReserve,
+          }
+        : undefined,
+    // Needs 8+ complete weeks of deposits before it will pass judgement on
+    // whether the business covers its costs; below that the group is omitted so
+    // a thin ledger produces no verdict rather than a wrong one.
+    spending:
+      spendingCapacity.estimate.weeksObserved >= 8
+        ? {
+            typicalWeeklyInflow: spendingCapacity.estimate.typicalInflow,
+            typicalWeeklyOutflow: spendingCapacity.estimate.typicalOutflow,
+            weeksObserved: spendingCapacity.estimate.weeksObserved,
+            safeToSpendToday: spendingCapacity.safeToSpendToday,
+            breachesReserve: spendingCapacity.breachesReserve,
           }
         : undefined,
   })
