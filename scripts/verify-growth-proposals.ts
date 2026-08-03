@@ -329,6 +329,20 @@ console.log('\nUnsupported proposal produces concrete, computed alternatives')
   // is worse than none.
   const reduce = decision.alternatives.find((a) => a.kind === 'reduce_recurring')
   ok('the alternatives address the real failure', evaluation.classification === 'Not Supported' && reduce != null)
+
+  // A proposal that fails at today's numbers has 0 survivable drop. That must read
+  // as "doesn't fit even today", NOT as a "won't fall more than 0%" threshold, which
+  // would dress a plain no up as a near-miss.
+  check('a base-case failure survives a 0% drop', decision.survivesSalesDeclinePct, 0)
+  ok(
+    'and the condition says it fails at today\'s sales, not a downturn threshold',
+    decision.conditions.some((c) => /even at today's sales/i.test(c)),
+    JSON.stringify(decision.conditions),
+  )
+  ok(
+    'the "won\'t fall more than 0%" phrasing never appears',
+    !decision.conditions.some((c) => /more than about 0%/i.test(c)),
+  )
 }
 
 console.log('\nSupported-with-conditions when resilience is thin')

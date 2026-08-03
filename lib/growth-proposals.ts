@@ -740,7 +740,15 @@ function buildConditions(
 ): string[] {
   const conditions: string[] = []
 
-  if (survives < mode.headlineStressSalesDeclinePct) {
+  if (survives <= 0) {
+    // Distinct from the "thin headroom" case below: a survivable drop of 0 means
+    // the proposal fails at today's numbers, so framing it as a tolerable-decline
+    // threshold ("won't fall more than 0%") would misrepresent a plain no as a
+    // near-miss.
+    conditions.push(
+      `This doesn't fit even at today's sales — it isn't a matter of avoiding a downturn. ${mode.label} wants ${mode.headlineStressSalesDeclinePct}% of headroom on top of that. See what would have to change below.`,
+    )
+  } else if (survives < mode.headlineStressSalesDeclinePct) {
     conditions.push(
       `Only proceed if you are confident sales won't fall more than about ${survives}% — below that this stops fitting, and ${mode.label} normally wants ${mode.headlineStressSalesDeclinePct}% of headroom.`,
     )

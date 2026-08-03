@@ -15,7 +15,7 @@
  * conflict, and the page must never present them as the same measure.
  */
 
-import { addMonths } from '@/lib/marketing-affordability-service'
+import { addMonths } from '@/lib/month-key'
 
 /* ------------------------------------------------------------------ */
 /* Risk modes — thresholds are DATA, loaded from `growth_risk_modes`   */

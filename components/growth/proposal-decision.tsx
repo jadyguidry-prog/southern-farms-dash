@@ -128,10 +128,21 @@ export function ProposalDecisionView({
             tone={decision.reserveRemaining < 0 ? 'bad' : undefined}
           />
           <Stat label="Days of cash" value={`${decision.daysOfCashAtLow}`} sub="at the low point" />
+          {/* A survivable drop of 0 does NOT mean "survives a 0% drop" — it means the
+              proposal already fails at today's numbers, before any downturn. Showing
+              "0%" as if it were a threshold reads as a near-pass; it isn't one. */}
           <Stat
-            label="Survives a drop of"
-            value={`${decision.survivesSalesDeclinePct}%`}
-            sub={`${modeLabel} wants ${decision.requiredResiliencePct}%`}
+            label={decision.survivesSalesDeclinePct <= 0 ? "Downturn headroom" : "Survives a drop of"}
+            value={
+              decision.survivesSalesDeclinePct <= 0
+                ? 'None'
+                : `${decision.survivesSalesDeclinePct}%`
+            }
+            sub={
+              decision.survivesSalesDeclinePct <= 0
+                ? "doesn't fit even at today's sales"
+                : `${modeLabel} wants ${decision.requiredResiliencePct}%`
+            }
             tone={
               decision.survivesSalesDeclinePct < decision.requiredResiliencePct ? 'warn' : 'good'
             }
