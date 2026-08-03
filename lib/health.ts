@@ -518,9 +518,14 @@ export function generateInsights({
           `Across ${spending.weeksObserved} weeks of bank history, a typical week brings in ` +
           `${formatCurrency(spending.typicalWeeklyInflow)} and pays out ` +
           `${formatCurrency(spending.typicalWeeklyOutflow)} — about ${formatCurrency(weeklyGap)} ` +
-          `more out than in. At that rate your spare cash of ` +
-          `${formatCurrency(spending.safeToSpendToday)} covers roughly ${weeksOfCover} ` +
-          `${weeksOfCover === 1 ? 'week' : 'weeks'} before the account runs short. ` +
+          `more out than in. ` +
+          (weeksOfCover < 1
+            ? `Your spare cash above the reserve is only ` +
+              `${formatCurrency(spending.safeToSpendToday)} — less than a single week of that ` +
+              `gap — so the reserve itself is now absorbing the shortfall. `
+            : `At that rate your spare cash of ` +
+              `${formatCurrency(spending.safeToSpendToday)} covers about ${weeksOfCover} ` +
+              `${weeksOfCover === 1 ? 'week' : 'weeks'} before the account runs short. `) +
           `Closing the gap needs either higher sales or lower weekly costs — ` +
           `trimming spending alone only buys time.`,
         impact: `About ${formatCurrency(weeklyGap * 4)} a month`,

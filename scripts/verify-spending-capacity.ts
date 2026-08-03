@@ -510,12 +510,14 @@ console.log('\nThe advisor insight built from the weekly position')
       .map((i) => i.id)
       .sort()
 
-  // The farm's real position: takes in $13,095/wk, pays out $14,381/wk.
+  // The farm's REAL position, confirmed against the live ledger by
+  // scripts/verify-cash-reconciliation.ts: $13,095/wk in, $14,381/wk out, and
+  // only $1,185 sitting above the $15,000 reserve.
   const real = {
     typicalWeeklyInflow: 13_095,
     typicalWeeklyOutflow: 14_381,
     weeksObserved: 45,
-    safeToSpendToday: 16_185,
+    safeToSpendToday: 1_185,
     breachesReserve: false,
   }
 
@@ -550,15 +552,41 @@ console.log('\nThe advisor insight built from the weekly position')
   // losing money AND have a surplus in the same list.
   check('exactly one weekly verdict is produced', ids(real).length, 1)
 
-  // The advice must be checkable rather than asserted, so the gap and the
-  // runway both appear in the copy. 14,381 - 13,095 = 1,286.
+  // The advice must be checkable rather than asserted, so the gap appears in the
+  // copy. 14,381 - 13,095 = 1,286.
   const detail = build(real).find((i) => i.id === 'auto-weekly-cash-deficit')?.detail ?? ''
   ok('the weekly gap is quantified in the copy', detail.includes('$1,286'))
-  // 16,185 / 1,286 = 12.58 -> floored to 12 whole weeks of cover.
-  ok('runway is stated in whole weeks', detail.includes('12 weeks'))
   ok(
     'the copy says trimming spending alone only buys time',
     detail.includes('buys time'),
+  )
+
+  // At the real position the spare cash ($1,185) is less than one week of the
+  // gap ($1,286). Claiming "covers about 0 weeks" would be both confusing and
+  // falsely reassuring, so this case gets its own wording.
+  ok(
+    'under one week of cover is stated plainly, not as "0 weeks"',
+    detail.includes('less than a single week') && !detail.includes('0 weeks'),
+  )
+  ok(
+    'it names the reserve as the thing now absorbing the shortfall',
+    detail.includes('reserve itself'),
+  )
+
+  // With a healthy buffer the runway IS worth quoting: 12,860 / 1,286 = 10.
+  const roomy = build({ ...real, safeToSpendToday: 12_860 }).find(
+    (i) => i.id === 'auto-weekly-cash-deficit',
+  )?.detail ?? ''
+  ok('a real runway is stated in whole weeks', roomy.includes('about 10 weeks'))
+  // Floored, never rounded up: 12,859 is still only 9 full weeks of cover.
+  const justUnder = build({ ...real, safeToSpendToday: 12_859 }).find(
+    (i) => i.id === 'auto-weekly-cash-deficit',
+  )?.detail ?? ''
+  ok('runway is floored rather than rounded up', justUnder.includes('about 9 weeks'))
+  ok('a single week is not pluralised', 
+    (build({ ...real, safeToSpendToday: 1_500 }).find(
+      (i) => i.id === 'auto-weekly-cash-deficit',
+    )?.detail ?? '').includes('about 1 week '),
   )
 }
 

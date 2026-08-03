@@ -271,11 +271,30 @@ async function main() {
   // The page uses a cookie-scoped Supabase client that cannot run here, so this
   // reproduces the same engine call with real settings and real obligations. If
   // these two ever disagree, the difference is in the loader, not the maths.
-  const { data: settingsRows } = await db
+  // business_settings is a KEY-VALUE table (setting_key / value), not one column
+  // per setting. Selecting `min_cash_reserve` as a column fails, and a `?? 0`
+  // fallback then silently reports "no reserve set" for a farm that has $15,000
+  // configured — understating the reserve and overstating safe-to-spend. So the
+  // read is asserted rather than defaulted.
+  const { data: settingsRows, error: settingsError } = await db
     .from('business_settings')
-    .select('min_cash_reserve')
-    .limit(1)
-  const minCashReserve = Number(settingsRows?.[0]?.min_cash_reserve ?? 0)
+    .select('setting_key, value')
+  if (settingsError) {
+    throw new Error(`could not read business_settings: ${settingsError.message}`)
+  }
+  const reserveRow = (settingsRows ?? []).find((r) => r.setting_key === 'min_cash_reserve')
+  if (!reserveRow) {
+    throw new Error(
+      'business_settings has no min_cash_reserve row — refusing to assume $0, ' +
+        'which would overstate how much is safe to spend.',
+    )
+  }
+  const minCashReserve = Number(reserveRow.value)
+  ok(
+    'the configured cash reserve is read, not defaulted to zero',
+    Number.isFinite(minCashReserve) && minCashReserve > 0,
+    `min_cash_reserve=${minCashReserve}`,
+  )
 
   const cashOnHand = (accounts ?? [])
     .filter((a) => !/credit|loan|card/i.test(`${a.account_type ?? ''} ${a.account_name ?? ''}`))

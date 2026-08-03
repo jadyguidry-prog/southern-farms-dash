@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import {
   Wallet,
+  PiggyBank,
   CreditCard,
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -165,6 +166,21 @@ export default async function DashboardPage() {
           changeLabel="vs last month"
           hint={cashHint}
         />
+        {/* Placed directly after Cash on Hand because it qualifies it: cash on
+            hand is not spendable cash. Only shown once the engine has enough
+            history to stand behind a figure — a guess here would be acted on. */}
+        {capacity.confidence.level === 'ok' && (
+          <StatCard
+            label="Safe to Spend Today"
+            value={formatCurrency(capacity.safeToSpendToday)}
+            icon={PiggyBank}
+            hint={
+              capacity.safeToSpendToday > 0
+                ? `≈ ${formatCurrency(capacity.perDayAllowance)}/day for 7 days · keeps ${formatCurrency(capacity.minCashReserve)} reserve`
+                : `Cash is at or below your ${formatCurrency(capacity.minCashReserve)} reserve`
+            }
+          />
+        )}
         <StatCard
           label="Available Line of Credit"
           value={formatCurrency(locAvailable)}

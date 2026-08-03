@@ -155,8 +155,11 @@ export function CashFlowReport({
             advance cannot make a normal week look better than it was.
           </p>
 
-          <div className="mt-3 overflow-x-auto">
-            <table className="w-full min-w-[28rem] border-collapse text-sm">
+          {/* No min-width here, unlike the wider tables above: this one is just a
+              label and a figure, so it fits a 390px phone without sideways
+              scrolling. The owner reviews on mobile. */}
+          <div className="mt-3">
+            <table className="w-full border-collapse text-sm">
               <caption className="sr-only">
                 Typical weekly money in, money out, and the resulting weekly
                 surplus or shortfall
