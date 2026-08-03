@@ -269,13 +269,18 @@ check(
 console.log('\nThe 7-day projection and the headline number')
 
 const evenShares = { 1: 1 / 5, 2: 1 / 5, 3: 1 / 5, 4: 1 / 5, 5: 1 / 5, 6: 0, 7: 0 }
-const est = (o: Partial<FlowEstimate> = {}): FlowEstimate => ({
-  typicalInflow: 17_500,
-  cautiousInflow: 14_000,
-  typicalOutflow: 16_000,
-  weeksObserved: 12,
-  ...o,
-})
+// Declared as a function, not an arrow returning a parenthesised object: the
+// bare `{ ... }` scoping blocks used below would otherwise make tsc re-parse
+// `({ ... })` as an arrow parameter list. esbuild/tsx tolerates it, tsc does not.
+function est(o: Partial<FlowEstimate> = {}): FlowEstimate {
+  return {
+    typicalInflow: 17_500,
+    cautiousInflow: 14_000,
+    typicalOutflow: 16_000,
+    weeksObserved: 12,
+    ...o,
+  }
+}
 
 {
   const r = deriveSpendingCapacity({

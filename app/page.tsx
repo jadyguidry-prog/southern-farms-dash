@@ -27,11 +27,11 @@ import { formatCurrency, formatPercent } from '@/lib/data'
 import {
   kpi,
   asTrend,
-  getCashForecast,
   getCashFlowMonthly,
   getRecommendations,
   getHealthSnapshot,
 } from '@/lib/queries'
+import { getSpendingCapacity } from '@/lib/spending-capacity-data'
 import { HEALTH_COLOR, HEALTH_TEXT } from '@/lib/health'
 
 const severityStyles: Record<string, string> = {
@@ -41,9 +41,9 @@ const severityStyles: Record<string, string> = {
 }
 
 export default async function DashboardPage() {
-  const [snapshot, cashForecast, cashFlowMonthly, saved] = await Promise.all([
+  const [snapshot, capacity, cashFlowMonthly, saved] = await Promise.all([
     getHealthSnapshot(),
-    getCashForecast(),
+    getSpendingCapacity(),
     getCashFlowMonthly(),
     getRecommendations(),
   ])
@@ -512,7 +512,11 @@ export default async function DashboardPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <CashForecastChart data={cashForecast} />
+            <CashForecastChart
+              data={capacity.thirtyDay}
+              minBuffer={capacity.minCashReserve}
+              showCautious
+            />
           </CardContent>
         </Card>
 

@@ -83,14 +83,27 @@ export const getSpendingCapacity = cache(async (): Promise<SpendingCapacity> => 
 
   // The ledger labels accounts by bank name while `bank_accounts` uses friendly
   // names, so resolve the ledger's own labels rather than assuming they match.
-  const ledgerRows = await fetchAllPages((from, to) =>
-    supabase
-      .from('financial_transactions')
-      .select('transaction_date, description, amount, transaction_type, account_name')
-      .is('deleted_at', null)
-      .not('account_name', 'is', null)
-      .order('transaction_date', { ascending: true })
-      .range(from, to),
+  type LedgerQueryRow = {
+    transaction_date: string | null
+    description: string | null
+    amount: number | string | null
+    transaction_type: string | null
+    account_name: string | null
+  }
+
+  // Paginated: PostgREST silently caps responses at 1,000 rows, and a truncated
+  // history would quietly bias every median computed below.
+  const ledgerRows = await fetchAllPages<LedgerQueryRow>(
+    (from, to) =>
+      supabase
+        .from('financial_transactions')
+        .select('transaction_date, description, amount, transaction_type, account_name')
+        .is('deleted_at', null)
+        .not('account_name', 'is', null)
+        .order('transaction_date', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to),
+    'getSpendingCapacity ledger',
   )
 
   const rows: LedgerRow[] = (ledgerRows ?? []).map((r) => ({
@@ -114,25 +127,35 @@ export const getSpendingCapacity = cache(async (): Promise<SpendingCapacity> => 
   // ---- dated outflows ----
   const datedOutflows: DatedOutflow[] = []
 
+  const outstanding = payments.filter((p) => p.status === 'outstanding' && p.amount > 0)
+
+  // An obligation that ALREADY has a payment written against it must not also be
+  // charged on its due date. The written payment is the more concrete fact, and
+  // counting both would double-charge the same bill against spendable cash.
+  const coveredObligationIds = new Set(
+    outstanding.map((p) => p.obligationId).filter((id): id is string => Boolean(id)),
+  )
+
+  const obligationLabels = new Map<string, string>()
   for (const o of summary.scheduledObligations) {
+    const label = o.vendorName || o.obligationName || 'Scheduled obligation'
+    if (o.id) obligationLabels.set(String(o.id), label)
     if (!o.effectiveDueDate || o.amount <= 0) continue
-    datedOutflows.push({
-      date: o.effectiveDueDate,
-      amount: Number(o.amount),
-      label: o.vendor || o.name || 'Scheduled obligation',
-    })
+    if (o.id && coveredObligationIds.has(String(o.id))) continue
+    datedOutflows.push({ date: o.effectiveDueDate, amount: Number(o.amount), label })
   }
 
-  // Written checks and logged ACH drafts that have not cleared. These are real
+  // Written checks and logged ACH drafts that have not cleared. This is real
   // committed money that the bank balance does not yet reflect.
-  for (const p of payments) {
-    if (p.status !== 'outstanding' || p.amount <= 0) continue
+  for (const p of outstanding) {
+    const name =
+      p.payeeName ||
+      (p.obligationId ? obligationLabels.get(String(p.obligationId)) : '') ||
+      'Uncleared payment'
     datedOutflows.push({
       date: p.paymentDate,
       amount: Number(p.amount),
-      label: p.payee
-        ? `${p.payee}${p.checkNumber ? ` (check ${p.checkNumber})` : ''}`
-        : 'Uncleared payment',
+      label: p.checkNumber ? `${name} (check ${p.checkNumber})` : name,
     })
   }
 
