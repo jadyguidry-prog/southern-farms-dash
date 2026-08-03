@@ -5,6 +5,9 @@ import { CashFlowReport } from '@/components/admin/cash-flow-report'
 import { LaborReport } from '@/components/admin/labor-report'
 import { CogsReport } from '@/components/admin/cogs-report'
 import { BillPayReport } from '@/components/admin/bill-pay-report'
+import { GrowthReport } from '@/components/admin/growth-report'
+import { getGrowthPlannerSnapshot } from '@/lib/growth-planner-service'
+import { getSavedProposalReviews } from '@/lib/growth-proposal-review'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
 import { getBillPaySnapshot } from '@/lib/bill-pay-service'
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
@@ -47,6 +50,8 @@ export default async function AdminPage() {
     checkSnapshot,
     billPaySnapshot,
     spendingCapacity,
+    growthPlanner,
+    proposalReviews,
   ] =
     await Promise.all([
       getCsvImportBatches(),
@@ -64,6 +69,11 @@ export default async function AdminPage() {
       // Same capacity engine the Cash Flow page and advisor read, so the weekly
       // position here cannot contradict what those two surfaces show.
       getSpendingCapacity(),
+      // Same planner snapshot and same live proposal re-check the dashboard card
+      // and advisor read, so this report cannot state a commitment capacity the
+      // Growth Planner page would disagree with.
+      getGrowthPlannerSnapshot(),
+      getSavedProposalReviews(),
     ])
   const laborSummary = summarizeLabor(laborDataset.shifts, laborDataset.coverage)
   const laborMonthly = deriveMonthlyLabor(
@@ -85,6 +95,8 @@ export default async function AdminPage() {
         <CogsReport snapshot={checkSnapshot} />
 
         <BillPayReport snapshot={billPaySnapshot} />
+
+        <GrowthReport snapshot={growthPlanner} reviews={proposalReviews} />
 
         <SquareCsvImport
           onPreflight={preflightDailyImport}

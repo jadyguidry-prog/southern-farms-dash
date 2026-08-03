@@ -43,7 +43,7 @@ export function GrowthReport({
     (sum, r) => sum + r.live.monthlyCost,
     0,
   )
-  const committedOneTime = approved.reduce((sum, r) => sum + r.live.oneTimeCost, 0)
+  const committedOneTime = approved.reduce((sum, r) => sum + r.live.upfrontCost, 0)
 
   return (
     <section
