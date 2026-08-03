@@ -19,6 +19,7 @@ import { addInterval } from '@/lib/health'
 import {
   buildAchReconcileMatches,
   descriptionMatchesVendor,
+  isAwaitingPayment,
   ACH_LOOKBACK_DAYS,
   type AchObligationInput,
   type AchReconcileMatch,
@@ -238,14 +239,15 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
     console.log('[v0] getClearingSuggestions: payments unreadable:', err)
     return []
   }
-  // Outstanding checks, plus pending ACH drafts (a logged COGS invoice whose draft
-  // hasn't pulled yet). A pending ACH is identified by its payee, since there is no
-  // check number to key on — without a payee it could never be matched, so it is
-  // excluded rather than left to match on amount alone.
+  // Outstanding written checks, plus payments still awaiting their money (a logged
+  // invoice whose ACH hasn't pulled, or one whose check isn't written yet). Anything
+  // without a check number is identified by its payee instead — without a name it
+  // could never be matched, so it is excluded rather than left to match on amount
+  // alone, which is the false positive this pipeline exists to prevent.
   const outstanding = payments.filter(
     (p) =>
       p.status === 'outstanding' &&
-      (p.paymentMethod === 'check' || (p.paymentMethod === 'ach' && p.payeeName.trim() !== '')),
+      (Boolean(p.checkNumber) || p.payeeName.trim() !== ''),
   )
   if (outstanding.length === 0) return []
 
@@ -437,6 +439,14 @@ export function buildClearingSuggestions(
   const matchedPaymentIds = new Set(suggestions.map((s) => s.paymentId))
   for (const p of outstanding) {
     if (p.paymentMethod !== 'check') continue
+    // A check with no number yet is a PLANNED payment, not a written one, so the
+    // date below is an intention rather than a fact. The "cannot clear before it
+    // was written" rule would then reject the real debit if it lands early and
+    // accept a coincidental same-amount row instead. Such a payment is matched by
+    // payee in pass 3 instead, and becomes eligible here once its number is
+    // recorded. Without this guard, allowing checks-to-be-written into pass 2
+    // would suggest clearing them against unrelated same-amount debits.
+    if (!p.checkNumber) continue
     if (matchedPaymentIds.has(p.id)) continue
     const hit = candidates.find((t) => {
       if (claimed.has(t.id)) return false
@@ -468,8 +478,13 @@ export function buildClearingSuggestions(
   // The date window is TWO-SIDED, unlike a check: the owner records an *expected*
   // draft date and the bank may pull a few days early or late, so the
   // "cannot clear before it was written" rule of pass 2 does not apply here.
+  // Also covers a bill logged as "check, not written yet": like an ACH draft it has
+  // no number to key on and its date is an expectation, so payee-plus-amount with a
+  // two-sided window is the right test. Requires a payee for the same reason as ACH
+  // — with no name it could only match on amount, which is the false positive this
+  // whole function is built to avoid.
   const achPending = outstanding.filter(
-    (p) => p.paymentMethod === 'ach' && p.payeeName.trim() !== '',
+    (p) => isAwaitingPayment(p) && p.payeeName.trim() !== '',
   )
   for (const tier of ['exact', 'near'] as const) {
     for (const p of achPending) {

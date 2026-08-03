@@ -12,6 +12,7 @@ import {
   Landmark,
   Zap,
   FileText,
+  Undo2,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -39,12 +40,18 @@ import { formatCurrency } from '@/lib/data'
 // module would (and did) break the build.
 import type { ObligationPayment, ClearingSuggestion } from '@/lib/bill-pay-service'
 // Pure display helper + type, kept in a server-free module for the reason noted above.
-import { paymentLabel, type AchReconcileMatch } from '@/lib/bill-pay-shared'
+import {
+  paymentLabel,
+  isAwaitingPayment,
+  type AchReconcileMatch,
+} from '@/lib/bill-pay-shared'
 import {
   recordPayment,
   recordOneOffPayment,
   voidPayment,
   clearPayment,
+  unclearPayment,
+  recordCheckNumber,
   confirmClearWithMatch,
   reconcileAchFromBank,
 } from '@/app/bill-pay/actions'
@@ -91,6 +98,18 @@ export function BillPayClient({
   // knows a match is wrong isn't nagged on every load of this session.
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
   const outstanding = payments.filter((p) => p.status === 'outstanding')
+  // Recently cleared, newest first. These were already fetched but never rendered,
+  // which is why a clear recorded by mistake had no way back — the row simply
+  // vanished from the page. Capped at 8: enough to undo a slip, short enough that
+  // the outstanding work stays the focus of the page.
+  const recentlyCleared = useMemo(
+    () =>
+      payments
+        .filter((p) => p.status === 'cleared')
+        .sort((a, b) => (b.clearedDate ?? '').localeCompare(a.clearedDate ?? ''))
+        .slice(0, 8),
+    [payments],
+  )
   const visibleSuggestions = suggestions.filter((s) => !dismissed.has(s.paymentId))
   // Lets an outstanding row name its scheduled bill; one-off checks fall back to
   // their payee inside paymentLabel.
@@ -281,6 +300,22 @@ export function BillPayClient({
         )}
       </section>
 
+      {/* Recently cleared, purely so a mistaken clear can be undone. Hidden when
+          empty rather than showing an empty-state card, since it is a correction
+          tool and not something to act on day to day. */}
+      {recentlyCleared.length > 0 && (
+        <section>
+          <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Recently Cleared
+          </h3>
+          <div className="space-y-2">
+            {recentlyCleared.map((p) => (
+              <ClearedRow key={p.id} payment={p} label={paymentLabel(p, obligationNames)} />
+            ))}
+          </div>
+        </section>
+      )}
+
       <RecordPaymentDialog
         key={activeObligation?.id ?? 'none'}
         obligation={activeObligation}
@@ -384,15 +419,31 @@ function OutstandingRow({
   label: string
 }) {
   const [pending, startTransition] = useTransition()
+  const [numberOpen, setNumberOpen] = useState(false)
+  const [draftNumber, setDraftNumber] = useState('')
 
-  // An outstanding ACH is a pending draft (a logged invoice), never a written check.
-  const isDraft = payment.paymentMethod === 'ach'
+  // Shared with the server so the label can never disagree with the validation.
+  // Covers an ACH awaiting its draft AND a check the owner hasn't written yet.
+  const isDraft = isAwaitingPayment(payment)
+  // A check promised but not yet written: the one case where we can still capture
+  // the number, which is what lets check-resolution match it to the bank later.
+  const needsCheckNumber = payment.paymentMethod === 'check' && !payment.checkNumber
 
   const onClear = () => {
     startTransition(async () => {
       const res = await clearPayment(payment.id, todayStr())
-      if (res.ok) toast.success(isDraft ? 'Draft marked cleared.' : 'Check marked cleared.')
+      if (res.ok) toast.success(isDraft ? 'Payment marked cleared.' : 'Check marked cleared.')
       else toast.error(res.error ?? 'Could not clear the payment.')
+    })
+  }
+  const onSaveNumber = () => {
+    startTransition(async () => {
+      const res = await recordCheckNumber(payment.id, draftNumber)
+      if (res.ok) {
+        toast.success('Check number saved.')
+        setNumberOpen(false)
+        setDraftNumber('')
+      } else toast.error(res.error ?? 'Could not save the check number.')
     })
   }
   const onVoid = () => {
@@ -405,7 +456,10 @@ function OutstandingRow({
 
   return (
     <Card>
-      <CardContent className="flex items-center justify-between gap-3 p-4">
+      {/* Column wrapper so the check-number input can appear BELOW the row instead
+          of squeezing the payee name on a phone. */}
+      <CardContent className="flex flex-col gap-3 p-4">
+      <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           {/* Who was paid leads, because a list of bare check numbers is unreadable
               once one-off checks sit alongside scheduled bills. */}
@@ -416,11 +470,12 @@ function OutstandingRow({
             </span>
           </p>
           <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            {/* An ACH here is a logged invoice awaiting its draft, not a written
-                check — saying "Written" would misdescribe it. */}
+            {/* A logged bill awaiting payment, not a written check — saying "Written"
+                would misdescribe it. The wording follows the actual method so a
+                check-to-be-written is never labelled ACH. */}
             {isDraft && (
               <Badge variant="outline" className="text-xs font-normal">
-                ACH · pending draft
+                {payment.paymentMethod === 'ach' ? 'ACH · pending draft' : 'Check not written yet'}
               </Badge>
             )}
             <p className="min-w-0 truncate text-xs text-muted-foreground">
@@ -452,6 +507,121 @@ function OutstandingRow({
             <X className="size-4" aria-hidden="true" />
           </Button>
         </div>
+      </div>
+
+      {/* Only for a check that hasn't been written: capturing the number here is
+          what lets the bank feed match it later. */}
+      {needsCheckNumber && !numberOpen && (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-11 self-start px-2 text-xs"
+          onClick={() => setNumberOpen(true)}
+          disabled={pending}
+        >
+          Add check number
+        </Button>
+      )}
+      {needsCheckNumber && numberOpen && (
+        <div className="flex items-end gap-2">
+          <div className="min-w-0 flex-1">
+            <Label htmlFor={`num-${payment.id}`} className="text-xs">
+              Check # you wrote
+            </Label>
+            <Input
+              id={`num-${payment.id}`}
+              inputMode="numeric"
+              className="mt-1 h-11 text-base"
+              value={draftNumber}
+              onChange={(e) => setDraftNumber(e.target.value)}
+              placeholder="e.g. 1318"
+              // Enter submits, but not mid-IME-composition.
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                  e.preventDefault()
+                  onSaveNumber()
+                }
+              }}
+            />
+          </div>
+          <Button
+            size="sm"
+            className="h-11"
+            onClick={onSaveNumber}
+            disabled={pending || !draftNumber.trim()}
+          >
+            Save
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-11"
+            onClick={() => {
+              setNumberOpen(false)
+              setDraftNumber('')
+            }}
+            disabled={pending}
+          >
+            Cancel
+          </Button>
+        </div>
+      )}
+      </CardContent>
+    </Card>
+  )
+}
+
+/**
+ * A cleared payment with a way back to outstanding.
+ *
+ * Deliberately offers un-clear and NOT void. Void means the payment never happened
+ * and drops it out of the float entirely, which would overstate spendable cash;
+ * un-clearing says "this hasn't actually left the bank yet", which is what a
+ * mistaken clear needs.
+ */
+function ClearedRow({
+  payment,
+  label,
+}: {
+  payment: ObligationPayment
+  label: string
+}) {
+  const [pending, startTransition] = useTransition()
+
+  const onUnclear = () => {
+    startTransition(async () => {
+      const res = await unclearPayment(payment.id)
+      if (res.ok) toast.success('Moved back to outstanding.')
+      else toast.error(res.error ?? 'Could not undo the clear.')
+    })
+  }
+
+  return (
+    <Card>
+      <CardContent className="flex items-center justify-between gap-3 p-4">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-foreground">
+            {label}
+            <span className="ml-2 font-mono text-muted-foreground">
+              {formatCurrency(payment.amount)}
+            </span>
+          </p>
+          <p className="mt-0.5 min-w-0 truncate text-xs text-muted-foreground">
+            {payment.checkNumber ? `Check #${payment.checkNumber} · ` : ''}
+            Cleared {payment.clearedDate ?? payment.paymentDate}
+            {payment.purpose ? ` · ${payment.purpose}` : ''}
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-11 shrink-0"
+          onClick={onUnclear}
+          disabled={pending}
+        >
+          <Undo2 className="size-4" aria-hidden="true" />
+          Not cleared
+        </Button>
       </CardContent>
     </Card>
   )
@@ -718,9 +888,10 @@ function OneOffPaymentDialog({
 }: {
   open: boolean
   /**
-   * 'invoice' logs a bill that will be drafted by ACH in a few days: the payment is
-   * recorded as PENDING so it floats against spendable cash, and the date entered is
-   * the expected draft date rather than a settled payment date.
+   * 'invoice' logs a bill that is not yet paid: the payment is recorded as PENDING so
+   * it floats against spendable cash, and the date entered is when the money is
+   * expected to leave rather than a settled payment date. The bill may be settled by
+   * ACH draft OR by a check the owner has not written yet.
    */
   mode: 'check' | 'invoice'
   banks: Bank[]
@@ -729,8 +900,9 @@ function OneOffPaymentDialog({
 }) {
   const isInvoice = mode === 'invoice'
   const [pending, startTransition] = useTransition()
-  // An invoice is drafted by ACH by definition, so the method is fixed rather than
-  // offered — a check has no "expected draft" to wait for.
+  // ACH is only the DEFAULT for an invoice, not a constraint. This used to be locked
+  // to ACH on the theory that an invoice is always drafted, which quietly made it
+  // impossible to log a bill destined for a handwritten check.
   const [method, setMethod] = useState<'check' | 'ach'>(isInvoice ? 'ach' : 'check')
   const [payeeName, setPayeeName] = useState('')
   const [payeeVendorId, setPayeeVendorId] = useState<string | null>(null)
@@ -830,21 +1002,23 @@ function OneOffPaymentDialog({
             )}
           </div>
 
-          <div className={isInvoice ? undefined : 'grid grid-cols-2 gap-3'}>
-            {!isInvoice && (
-              <div>
-                <Label htmlFor="oo-method">Method</Label>
-                <Select value={method} onValueChange={(v) => setMethod(v as 'check' | 'ach')}>
-                  <SelectTrigger id="oo-method" className="mt-1 h-11">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="check">Check</SelectItem>
-                    <SelectItem value="ach">ACH / Transfer</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
+          {/* Method is offered for BOTH modes now. It was hidden for invoices, which
+              left no way to say a bill would be paid by check. */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label htmlFor="oo-method">
+                {isInvoice ? 'How will you pay it?' : 'Method'}
+              </Label>
+              <Select value={method} onValueChange={(v) => setMethod(v as 'check' | 'ach')}>
+                <SelectTrigger id="oo-method" className="mt-1 h-11">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="check">Check</SelectItem>
+                  <SelectItem value="ach">ACH / Transfer</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <div>
               <Label htmlFor="oo-amount">
                 {isInvoice ? 'Amount on the invoice' : 'Amount'}
@@ -863,7 +1037,11 @@ function OneOffPaymentDialog({
           <div className={method === 'check' ? 'grid grid-cols-2 gap-3' : undefined}>
             <div>
               <Label htmlFor="oo-date">
-                {isInvoice ? 'Expected draft date' : 'Payment date'}
+                {isInvoice
+                  ? method === 'check'
+                    ? 'When do you plan to pay it?'
+                    : 'Expected draft date'
+                  : 'Payment date'}
               </Label>
               <Input
                 id="oo-date"
@@ -874,22 +1052,33 @@ function OneOffPaymentDialog({
               />
               {isInvoice && (
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Roughly when the ACH will pull. A few days off is fine — the bank
-                  match uses the vendor and amount.
+                  {method === 'check'
+                    ? 'Roughly when you expect to write the check. A few days off is fine — the bank match uses the vendor and amount.'
+                    : 'Roughly when the ACH will pull. A few days off is fine — the bank match uses the vendor and amount.'}
                 </p>
               )}
             </div>
             {method === 'check' && (
               <div>
-                <Label htmlFor="oo-check">Check #</Label>
+                {/* Required when writing a check, optional when logging a bill you
+                    have not written the check for yet. The server enforces the same
+                    split via validatePaymentBasics(allowUnwrittenCheck). */}
+                <Label htmlFor="oo-check">
+                  {isInvoice ? 'Check # (if written)' : 'Check #'}
+                </Label>
                 <Input
                   id="oo-check"
                   inputMode="numeric"
                   className="mt-1 h-11 text-base"
                   value={checkNumber}
                   onChange={(e) => setCheckNumber(e.target.value)}
-                  placeholder="e.g. 1318"
+                  placeholder={isInvoice ? 'Leave blank until written' : 'e.g. 1318'}
                 />
+                {isInvoice && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Optional. Add it later from the bill list once you write the check.
+                  </p>
+                )}
               </div>
             )}
           </div>
