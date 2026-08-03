@@ -14,7 +14,11 @@ import {
   getBusinessSettings,
   getMarketingAffordabilitySnapshot,
 } from '@/lib/queries'
-import { assessCardSafety, type CardSafetySummary } from '@/lib/card-safety'
+import {
+  assessCardSafety,
+  CARD_ACCOUNT_TYPE,
+  type CardSafetySummary,
+} from '@/lib/card-safety'
 import {
   assessStrategicTiming,
   buildCapacityLadder,
@@ -159,6 +163,8 @@ export const getGrowthPlannerSnapshot = cache(
     modeKey?: string
     customRecurring?: number | null
     customOneTime?: number | null
+    /** Owner's own stress test: the sales drop they actually fear. */
+    customSalesDeclinePct?: number | null
   }): Promise<GrowthPlannerSnapshot> => {
     const [affordability, accounts, settings, modes] = await Promise.all([
       getMarketingAffordabilitySnapshot(),
@@ -180,18 +186,27 @@ export const getGrowthPlannerSnapshot = cache(
     const startMonthKey = nextMonthKey(today)
 
     // ---- Card safety from real account rows -----------------------------
+    // Cards ONLY. `assessCardSafety` accepts every credit account, which includes
+    // 'Line of Credit', but this page reports card exposure and borrowing capacity
+    // as two separate figures. Passing the line into both made the same $15,000 LOC
+    // draw show up as card debt AND as available borrowing -- the same
+    // double-counting class of bug as the Square Capital offer. Keeping the two
+    // disjoint here means "Credit cards" reports only real cards, and correctly
+    // says nothing is tracked until the Amex balances are entered.
     const cards = assessCardSafety(
-      accounts.map((a) => ({
-        id: a.id,
-        accountName: a.accountName,
-        accountType: a.accountType,
-        currentBalance: a.currentBalance,
-        creditLimit: a.creditLimit,
-        availableCredit: a.availableCredit,
-        statementBalance: a.statementBalance,
-        statementDueDate: a.statementDueDate,
-        lastUpdated: a.lastUpdated,
-      })),
+      accounts
+        .filter((a) => a.accountType === CARD_ACCOUNT_TYPE)
+        .map((a) => ({
+          id: a.id,
+          accountName: a.accountName,
+          accountType: a.accountType,
+          currentBalance: a.currentBalance,
+          creditLimit: a.creditLimit,
+          availableCredit: a.availableCredit,
+          statementBalance: a.statementBalance,
+          statementDueDate: a.statementDueDate,
+          lastUpdated: a.lastUpdated,
+        })),
       today,
       { staleAfterDays },
     )
@@ -257,6 +272,25 @@ export const getGrowthPlannerSnapshot = cache(
     if (cards.confidence === 'missing') confidencePct = Math.min(confidencePct, 60)
     else if (cards.confidence === 'reduced') confidencePct = Math.min(confidencePct, 80)
 
+    const maxRecurring = maxSupported(assumptions, activeMode, coverage, 'recurring')
+    const maxOneTime = maxSupported(assumptions, activeMode, coverage, 'one-time')
+
+    // ---- Stress test the headline number, not a hypothetical ------------
+    // The number the owner will act on is the headline recommendation, so that is
+    // what must survive a downturn. Testing an arbitrary amount instead would let
+    // the page claim resilience it never checked. If a custom amount was asked
+    // for, that is the figure under consideration and takes precedence.
+    const stressCommitment: Commitment =
+      opts?.customRecurring != null && opts.customRecurring > 0
+        ? { kind: 'recurring', amount: opts.customRecurring }
+        : maxRecurring > 0
+          ? { kind: 'recurring', amount: maxRecurring }
+          : NO_COMMITMENT
+
+    const scenarios = buildScenarioMatrix(assumptions, stressCommitment, activeMode, coverage, {
+      customSalesDeclinePct: opts?.customSalesDeclinePct ?? null,
+    })
+
     return {
       hasData: affordability.hasData,
       modes,
@@ -266,8 +300,10 @@ export const getGrowthPlannerSnapshot = cache(
       baseline,
       baselineEvaluation,
       ladder,
-      maxRecurring: maxSupported(assumptions, activeMode, coverage, 'recurring'),
-      maxOneTime: maxSupported(assumptions, activeMode, coverage, 'one-time'),
+      stressCommitment,
+      scenarios,
+      maxRecurring,
+      maxOneTime,
       strategy,
       cards,
       nearTerm: {

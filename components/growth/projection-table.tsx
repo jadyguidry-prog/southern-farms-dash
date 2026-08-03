@@ -40,22 +40,21 @@ export function ProjectionTable({
         </p>
       </CardHeader>
       <CardContent className="p-6">
-        <div className="relative -mx-6 overflow-x-auto px-6">
-          <table className="w-full min-w-[30rem] border-collapse text-sm">
+        {/* Month + closing cash only. This card sits in a narrow side column, and with
+            In/Out columns the table needed a 30rem min-width and horizontal scroll --
+            which pushed "Closing cash" off-screen. That is the one number every gate is
+            actually tested against, so it must never be the column that gets clipped.
+            No min-width and no overflow here means nothing can hide. */}
+        <div className="relative">
+          <table className="w-full border-collapse text-sm">
             <caption className="sr-only">
-              Projected cash by month with no new commitment, showing inflow, outflow
-              and closing balance against the reserve floor.
+              Projected closing cash by month with no new commitment, compared against
+              the reserve floor.
             </caption>
             <thead>
               <tr className="border-b border-border text-left">
                 <th scope="col" className="pb-2 pr-4 font-medium text-muted-foreground">
                   Month
-                </th>
-                <th scope="col" className="pb-2 pr-4 text-right font-medium text-muted-foreground">
-                  In
-                </th>
-                <th scope="col" className="pb-2 pr-4 text-right font-medium text-muted-foreground">
-                  Out
                 </th>
                 <th scope="col" className="pb-2 text-right font-medium text-muted-foreground">
                   Closing cash
@@ -77,12 +76,6 @@ export function ProjectionTable({
                         <span className="ml-2 text-xs text-muted-foreground">low point</span>
                       )}
                     </th>
-                    <td className="py-2.5 pr-4 text-right font-mono text-muted-foreground">
-                      {formatCurrency(m.inflow)}
-                    </td>
-                    <td className="py-2.5 pr-4 text-right font-mono text-muted-foreground">
-                      {formatCurrency(m.outflow)}
-                    </td>
                     <td
                       className={`py-2.5 text-right font-mono font-semibold ${
                         belowFloor ? 'text-destructive' : 'text-foreground'

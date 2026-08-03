@@ -490,6 +490,71 @@ console.log('\nNo silent zeros')
   check('a zero reserve target still classifies', r2.classification !== 'Not Supported', true)
 }
 
+console.log('\nCoverage gates must not override the owner-set reserve')
+{
+  // REGRESSION. The seeded 1.5-month payroll minimum required $18,030 of low-point
+  // cash against an owner-set $15,000 reserve floor, making the payroll gate strictly
+  // tighter than the reserve. It became the binding constraint on every rung and
+  // failed even the do-nothing baseline, so the page told the owner nothing -- and it
+  // silently substituted our judgment for their own cushion setting.
+  const payroll = 12020
+  const reserve = 15000
+
+  const overriding = { ...balanced, minPayrollCoverageMonths: 1.5 }
+  const needed = payroll * overriding.minPayrollCoverageMonths
+  checkTrue(
+    'a 1.5-month payroll gate would demand more cash than the reserve floor',
+    needed > reserve,
+  )
+
+  const calibrated = { ...balanced, minPayrollCoverageMonths: 1.0 }
+  checkTrue(
+    'the calibrated 1-month gate sits below the reserve floor',
+    payroll * calibrated.minPayrollCoverageMonths < reserve,
+  )
+
+  // With cash exactly at the reserve floor, the reserve is satisfied, so the payroll
+  // gate must not be what fails the rung.
+  const atFloor: CoverageInputs = {
+    ...COV,
+    minCashReserve: reserve,
+    monthlyPayroll: payroll,
+  }
+  const base = { ...BASE, cashOnHand: reserve, expectedInflow: 0, expectedOutflow: 0 }
+  const r = evaluateRung(base, NO_COMMITMENT, calibrated, atFloor)
+  checkTrue(
+    'doing nothing at the reserve floor raises no payroll failure',
+    !r.failures.some((f) => /payroll/i.test(f)),
+  )
+
+  // The gate must still fire when payroll genuinely outgrows the reserve.
+  const bigPayroll: CoverageInputs = { ...atFloor, monthlyPayroll: 20000 }
+  const r2 = evaluateRung(base, NO_COMMITMENT, calibrated, bigPayroll)
+  checkTrue(
+    'but still fires once one month of payroll exceeds the reserve',
+    r2.failures.some((f) => /payroll/i.test(f)),
+  )
+}
+
+console.log('\nA planner that fails its own baseline is useless')
+{
+  // Whatever the thresholds, committing to NOTHING must be achievable whenever the
+  // projection stays at or above the reserve floor. If the baseline itself fails, no
+  // rung can pass and the whole ladder is noise.
+  const steady: CoverageInputs = {
+    ...COV,
+    minCashReserve: 15000,
+    monthlyPayroll: 12020,
+    monthlyDebtService: 2000,
+  }
+  const base = { ...BASE, cashOnHand: 19614, expectedInflow: 0, expectedOutflow: 0 }
+  const r = evaluateRung(base, NO_COMMITMENT, balanced, steady)
+  checkTrue(
+    'the do-nothing baseline passes when cash stays above the floor',
+    r.classification !== 'Not Supported',
+  )
+}
+
 /* ------------------------------------------------------------------ */
 
 console.log(`\n${passed} passed, ${failed} failed\n`)

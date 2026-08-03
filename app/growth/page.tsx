@@ -108,6 +108,11 @@ export default async function GrowthPage({
             reserveFloor={data.baselineEvaluation.reserveFloor}
             lowestMonthKey={data.baselineEvaluation.lowestMonthKey}
           />
+          <ScenarioMatrix
+            scenarios={data.scenarios}
+            commitment={data.stressCommitment}
+            modeLabel={data.activeMode.label}
+          />
           <ConstraintsPanel
             strategy={data.strategy}
             cards={data.cards}

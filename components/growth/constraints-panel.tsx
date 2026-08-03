@@ -67,12 +67,18 @@ export function ConstraintsPanel({
           ) : (
             <>
               <dl className="flex flex-wrap gap-x-8 gap-y-3">
+                {/* "Not tracked", never "$0". The only card row on file is the closed
+                    Amex, so a literal $0 here is indistinguishable from a card that is
+                    genuinely paid off -- and this business runs $11k-25k/month through
+                    Amex. Showing $0 would understate real exposure to zero. */}
                 <div>
                   <dt className="text-xs uppercase tracking-wide text-muted-foreground">
                     Owed
                   </dt>
                   <dd className="mt-0.5 font-mono text-sm font-semibold text-foreground">
-                    {formatCurrency(cards.totalOwed)}
+                    {cards.utilization === null && cards.totalOwed === 0
+                      ? 'Not tracked'
+                      : formatCurrency(cards.totalOwed)}
                   </dd>
                 </div>
                 <div>
@@ -80,7 +86,9 @@ export function ConstraintsPanel({
                     Usable headroom
                   </dt>
                   <dd className="mt-0.5 font-mono text-sm font-semibold text-foreground">
-                    {formatCurrency(cards.totalHeadroom)}
+                    {cards.utilization === null && cards.totalHeadroom === 0
+                      ? 'Not tracked'
+                      : formatCurrency(cards.totalHeadroom)}
                   </dd>
                 </div>
                 <div>
