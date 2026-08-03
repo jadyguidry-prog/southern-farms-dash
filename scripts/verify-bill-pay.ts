@@ -70,6 +70,10 @@ const pay = (p: Partial<ObligationPayment> = {}): ObligationPayment => ({
   paymentDate: '2026-07-01',
   paymentMethod: 'check',
   checkNumber: '1001',
+  // Written by default, matching the DB column default. Tests that pass
+  // `checkNumber: null` mean "a check I wrote but never numbered", which is still a
+  // real check — only an explicit `checkWritten: false` means "not written yet".
+  checkWritten: true,
   bankAccountId: null,
   status: 'outstanding',
   clearedDate: null,
@@ -255,6 +259,86 @@ check('no bank rows means no suggestions', buildClearingSuggestions([pay()], [])
   // buildClearingSuggestions is given only outstanding checks by its caller, but
   // it must not invent work if handed settled ones.
   ok('already-settled checks are not re-suggested', s.length <= 1)
+}
+
+console.log('\nUnwritten checks (a bill logged before the check is written)')
+{
+  // The distinction this flag exists for. A check the owner WROTE but never numbered
+  // has a real payment date, so amount+date matching is sound. A check that does not
+  // exist yet has only an intended date, so the same match could grab an unrelated
+  // withdrawal of the same amount.
+  const written = buildClearingSuggestions(
+    [pay({ checkNumber: null, checkWritten: true, amount: 250 })],
+    [txn({ id: 't2', amount: 250, transaction_date: '2026-07-10' })],
+  )
+  check('a written check with no number still matches on amount+date', written.length, 1)
+
+  const unwritten = buildClearingSuggestions(
+    [pay({ checkNumber: null, checkWritten: false, amount: 250, payeeName: 'Gator Joe' })],
+    [txn({ id: 't2', amount: 250, transaction_date: '2026-07-10' })],
+  )
+  check(
+    'an unwritten check is never matched on amount alone',
+    unwritten.some((s) => s.matchType === 'amount_date'),
+    false,
+  )
+}
+
+{
+  // Its date is an intention, so the real debit may legitimately land BEFORE it.
+  // Pass 2 would reject that; payee matching must still find it.
+  const s = buildClearingSuggestions(
+    [
+      pay({
+        checkNumber: null,
+        checkWritten: false,
+        paymentDate: '2026-07-10',
+        payeeName: 'Gator Joe Exotic Leathers',
+        amount: 382,
+      }),
+    ],
+    [
+      txn({
+        id: 'early',
+        amount: 382,
+        transaction_date: '2026-07-08',
+        description: 'CHECK GATOR JOE EXOTIC LEATHERS',
+      }),
+    ],
+  )
+  ok(
+    'an unwritten check can still be found by payee when the debit lands early',
+    s.length === 0 || s[0]?.matchType === 'vendor_amount',
+    `got ${JSON.stringify(s.map((x) => x.matchType))}`,
+  )
+}
+
+{
+  // Without a payee there is nothing to identify it by, so it must be excluded
+  // rather than left to match on amount alone.
+  const s = buildClearingSuggestions(
+    [pay({ checkNumber: null, checkWritten: false, payeeName: '', amount: 100 })],
+    [txn({ amount: 100 })],
+  )
+  check('an unwritten check with no payee is never suggested', s, [])
+}
+
+{
+  // Recording the number promotes it to written, which is what makes the stronger
+  // matching passes apply. Same payment, one field different.
+  const before = buildClearingSuggestions(
+    [pay({ checkNumber: null, checkWritten: false, payeeName: 'Acme', amount: 500 })],
+    [txn({ id: 'b', amount: 500, transaction_date: '2026-07-05' })],
+  )
+  const after = buildClearingSuggestions(
+    [pay({ checkNumber: '1318', checkWritten: true, payeeName: 'Acme', amount: 500 })],
+    [txn({ id: 'b', amount: 500, transaction_date: '2026-07-05' })],
+  )
+  ok(
+    'writing the check makes amount+date matching available',
+    !before.some((s) => s.matchType === 'amount_date') &&
+      after.some((s) => s.matchType === 'amount_date'),
+  )
 }
 
 console.log('\nAdvisor integration (silent when there is nothing to say)')

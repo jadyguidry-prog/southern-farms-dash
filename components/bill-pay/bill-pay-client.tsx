@@ -427,6 +427,9 @@ function OutstandingRow({
   const isDraft = isAwaitingPayment(payment)
   // A check promised but not yet written: the one case where we can still capture
   // the number, which is what lets check-resolution match it to the bank later.
+  // Offered whenever a check has no number, whether it is unwritten (capturing the
+  // number also marks it written) or written-but-unlogged (the number simply fills a
+  // gap). Both cases benefit, so this stays keyed on the missing number.
   const needsCheckNumber = payment.paymentMethod === 'check' && !payment.checkNumber
 
   const onClear = () => {

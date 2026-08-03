@@ -336,6 +336,13 @@ export async function recordOneOffPayment(
       // `|| null` matters: an unwritten check must store NULL, not '', so that
       // "has a check number" is one unambiguous test everywhere downstream.
       check_number: method === 'check' ? (input.checkNumber ?? '').trim() || null : null,
+      // A check is "written" unless this is a bill being logged ahead of writing it.
+      // Supplying a number always means it exists, whatever `pending` says — the
+      // owner cannot have a number for a check that isn't written.
+      check_written:
+        method !== 'check' ||
+        !input.pending ||
+        Boolean((input.checkNumber ?? '').trim()),
       bank_account_id: input.bankAccountId || null,
       status: isCleared ? 'cleared' : 'outstanding',
       cleared_date: isCleared ? input.paymentDate : null,
@@ -594,7 +601,7 @@ export async function recordCheckNumber(
 
   const { data: existing, error: readErr } = await supabase
     .from('obligation_payments')
-    .select('id, status, payment_method, check_number')
+    .select('id, status, payment_method, check_number, check_written')
     .eq('id', paymentId)
     .maybeSingle()
   if (readErr) return { ok: false, error: readErr.message }
@@ -608,16 +615,26 @@ export async function recordCheckNumber(
     return { ok: false, error: 'This payment is set to ACH, not check.' }
   }
 
+  // Recording a number proves the check exists, so it also becomes "written". That
+  // promotes it out of payee-only matching and into amount+date matching, which is
+  // the point of capturing the number at all.
   const { error: updErr } = await supabase
     .from('obligation_payments')
-    .update({ check_number: num })
+    .update({ check_number: num, check_written: true })
     .eq('id', paymentId)
   if (updErr) return { ok: false, error: updErr.message }
 
   await supabase.from('obligation_payment_audit').insert({
     payment_id: paymentId,
     action: 'updated',
-    detail: { checkNumber: num, previousCheckNumber: existing.check_number },
+    detail: {
+      checkNumber: num,
+      previousCheckNumber: existing.check_number,
+      // Records the state transition, not just the value, so the trail explains why
+      // this payment's matching behaviour changed.
+      checkWrittenBefore: existing.check_written,
+      checkWrittenAfter: true,
+    },
     created_by: actor,
   })
 

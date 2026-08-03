@@ -76,16 +76,20 @@ export function validatePaymentBasics(
 }
 
 /**
- * Is this outstanding payment still WAITING to leave the bank by a route we can't
- * yet point at a specific piece of paper?
+ * Is this payment still WAITING to leave the bank, with no physical instrument in
+ * existence yet?
  *
  * Two cases, both "money promised, nothing written":
  *   - an ACH draft that hasn't been taken yet, and
- *   - a bill logged as check-to-be-written, before the check exists.
+ *   - a bill logged as pay-by-check, before the check is written.
  *
- * Both must be described as "expected", never "written". Keyed on the absence of a
- * check number rather than on `method === 'ach'`, because the old method test
- * silently mislabelled a check-to-be-written as an already-written check.
+ * Both must be described as "expected", never "written".
+ *
+ * Keyed on `checkWritten`, NOT on a missing check number. A written check whose
+ * number simply wasn't recorded is still written: its payment date is a fact, so it
+ * stays eligible for amount+date bank matching. Only an unwritten check has a date
+ * that is merely an intention. Conflating the two would silently change matching
+ * behaviour for checks the owner wrote but didn't fully log.
  *
  * Note this deliberately does NOT change the cash math: `sumOutstanding` counts
  * every outstanding row regardless, which is correct — the money is owed and the
@@ -93,10 +97,12 @@ export function validatePaymentBasics(
  */
 export function isAwaitingPayment(p: {
   paymentMethod: string
-  checkNumber?: string | null
+  checkWritten?: boolean
 }): boolean {
   if (p.paymentMethod === 'ach') return true
-  return !(p.checkNumber ?? '').trim()
+  // Absent flag means "written": matches the column default, so a caller reading an
+  // older row (or a partial object) never gets silently downgraded to unwritten.
+  return p.checkWritten === false
 }
 
 // ---------------------------------------------------------------------------

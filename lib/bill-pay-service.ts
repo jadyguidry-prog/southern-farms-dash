@@ -41,6 +41,13 @@ export type ObligationPayment = {
   paymentDate: string
   paymentMethod: PaymentMethod
   checkNumber: string | null
+  /**
+   * Does the physical check exist? True (the default) for every written check,
+   * including one whose number was never recorded — its payment date is still a
+   * fact. False only for a bill logged as pay-by-check before the check is written,
+   * where the date is an intention. Irrelevant when paymentMethod is 'ach'.
+   */
+  checkWritten: boolean
   bankAccountId: string | null
   status: PaymentStatus
   clearedDate: string | null
@@ -62,6 +69,7 @@ type PaymentRow = {
   payment_date: string | null
   payment_method: string | null
   check_number: string | null
+  check_written?: boolean | null
   bank_account_id: string | null
   status: string | null
   cleared_date: string | null
@@ -82,6 +90,10 @@ function mapPayment(r: PaymentRow): ObligationPayment {
     // Constrained by a DB check; the fallback keeps a bad row from crashing a render.
     paymentMethod: r.payment_method === 'ach' ? 'ach' : 'check',
     checkNumber: r.check_number,
+    // Only an explicit false means unwritten. Null/undefined (an older row, or a
+    // select that omitted the column) reads as written, matching the DB default so
+    // matching behaviour is never silently changed by a missing field.
+    checkWritten: r.check_written !== false,
     bankAccountId: r.bank_account_id,
     status:
       r.status === 'cleared' ? 'cleared' : r.status === 'void' ? 'void' : 'outstanding',
@@ -239,15 +251,19 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
     console.log('[v0] getClearingSuggestions: payments unreadable:', err)
     return []
   }
-  // Outstanding written checks, plus payments still awaiting their money (a logged
-  // invoice whose ACH hasn't pulled, or one whose check isn't written yet). Anything
-  // without a check number is identified by its payee instead — without a name it
-  // could never be matched, so it is excluded rather than left to match on amount
-  // alone, which is the false positive this pipeline exists to prevent.
+  // Every outstanding WRITTEN check is a candidate: it exists, so its date is a
+  // fact and it can be matched by number or by amount+date — unchanged behaviour,
+  // and it must not require a payee, since obligation-backed checks carry no payee
+  // name (they borrow the bill's name instead).
+  //
+  // A payment still awaiting its money (ACH not yet drafted, or a check not yet
+  // written) has no instrument and only an intended date, so it can only be
+  // identified by payee. Without a name it could match on amount alone, which is
+  // exactly the false positive this pipeline exists to prevent — so it is excluded.
   const outstanding = payments.filter(
     (p) =>
       p.status === 'outstanding' &&
-      (Boolean(p.checkNumber) || p.payeeName.trim() !== ''),
+      (isAwaitingPayment(p) ? p.payeeName.trim() !== '' : true),
   )
   if (outstanding.length === 0) return []
 
@@ -439,14 +455,15 @@ export function buildClearingSuggestions(
   const matchedPaymentIds = new Set(suggestions.map((s) => s.paymentId))
   for (const p of outstanding) {
     if (p.paymentMethod !== 'check') continue
-    // A check with no number yet is a PLANNED payment, not a written one, so the
-    // date below is an intention rather than a fact. The "cannot clear before it
-    // was written" rule would then reject the real debit if it lands early and
-    // accept a coincidental same-amount row instead. Such a payment is matched by
-    // payee in pass 3 instead, and becomes eligible here once its number is
-    // recorded. Without this guard, allowing checks-to-be-written into pass 2
-    // would suggest clearing them against unrelated same-amount debits.
-    if (!p.checkNumber) continue
+    // An UNWRITTEN check is a planned payment, so the date below is an intention
+    // rather than a fact. The "cannot clear before it was written" rule would then
+    // reject the real debit if it lands earlier than planned, and could accept a
+    // coincidental same-amount row instead. Those are matched by payee in pass 3,
+    // and become eligible here the moment the check is actually written.
+    //
+    // Note this tests the flag, not the number: a check written but never numbered
+    // stays eligible here, which is the long-standing behaviour this pass exists for.
+    if (!p.checkWritten) continue
     if (matchedPaymentIds.has(p.id)) continue
     const hit = candidates.find((t) => {
       if (claimed.has(t.id)) return false
