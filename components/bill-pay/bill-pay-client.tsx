@@ -580,7 +580,9 @@ function RecordPaymentDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md">
+      {/* grid-rows pins the title and the action buttons while only the fields
+          scroll, so "Record Payment" stays reachable on a short window. */}
+      <DialogContent className="max-w-md grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
         <DialogHeader>
           <DialogTitle>Record Payment</DialogTitle>
           <DialogDescription>
@@ -592,7 +594,8 @@ function RecordPaymentDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        {/* -mx-1 px-1 so focus rings on the inputs aren't clipped by the scroll box. */}
+        <div className="-mx-1 space-y-4 overflow-y-auto px-1">
           <div className="grid grid-cols-2 gap-3">
             <div>
               <Label htmlFor="bp-method">Method</Label>
@@ -783,7 +786,9 @@ function OneOffPaymentDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md">
+      {/* Same pinning as Record Payment: this form is the tallest in the app, so
+          the Save button must stay visible rather than sit below the viewport. */}
+      <DialogContent className="max-w-md grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
         <DialogHeader>
           <DialogTitle>{isInvoice ? 'Log an Invoice' : 'One-Off Payment'}</DialogTitle>
           <DialogDescription>
@@ -793,7 +798,7 @@ function OneOffPaymentDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="-mx-1 space-y-4 overflow-y-auto px-1">
           <div>
             <Label htmlFor="oo-payee">Pay to</Label>
             <Input
