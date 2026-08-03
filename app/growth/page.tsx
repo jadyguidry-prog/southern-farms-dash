@@ -6,6 +6,7 @@ import { GrowthVerdict } from '@/components/growth/growth-verdict'
 import { RiskModeSelector } from '@/components/growth/risk-mode-selector'
 import { CapacityLadder } from '@/components/growth/capacity-ladder'
 import { ProjectionTable } from '@/components/growth/projection-table'
+import { ScenarioMatrix } from '@/components/growth/scenario-matrix'
 import { ConstraintsPanel } from '@/components/growth/constraints-panel'
 import { getGrowthPlannerSnapshot } from '@/lib/growth-planner-service'
 

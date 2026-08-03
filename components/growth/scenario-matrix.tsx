@@ -23,11 +23,20 @@ const CLASS_STYLE: Record<Classification, { badge: string; label: string }> = {
   'Not Supported': { badge: 'border-transparent bg-destructive text-white', label: 'Breaks' },
 }
 
+/**
+ * `Commitment` carries recurring and one-time amounts TOGETHER, not as a tagged
+ * union, so both can be non-zero at once and the label has to say so. Describing
+ * only one part would understate what was actually stress-tested.
+ */
 function commitmentLabel(c: Commitment): string {
-  if (c.amount <= 0) return 'no new commitment'
-  return c.kind === 'recurring'
-    ? `${formatCurrency(c.amount)}/mo`
-    : `${formatCurrency(c.amount)} one-time`
+  const parts: string[] = []
+  if (c.recurringMonthly > 0) parts.push(`${formatCurrency(c.recurringMonthly)}/mo`)
+  if (c.oneTime > 0) parts.push(`${formatCurrency(c.oneTime)} one-time`)
+  return parts.length === 0 ? 'no new commitment' : parts.join(' plus ')
+}
+
+function isNoCommitment(c: Commitment): boolean {
+  return c.recurringMonthly <= 0 && c.oneTime <= 0
 }
 
 export function ScenarioMatrix({
@@ -42,7 +51,7 @@ export function ScenarioMatrix({
   if (scenarios.length === 0) return null
 
   const breaking = scenarios.filter((s) => s.classification === 'Not Supported')
-  const isBaseline = commitment.amount <= 0
+  const isBaseline = isNoCommitment(commitment)
 
   return (
     <Card className="gap-0 py-0">

@@ -100,6 +100,15 @@ export type GrowthPlannerSnapshot = {
   maxRecurring: number
   maxOneTime: number
 
+  /**
+   * The commitment the scenario matrix was actually run against — the headline
+   * recommendation, or the owner's custom amount when one was supplied. Exposed
+   * so the UI can state WHICH figure was stress-tested rather than implying the
+   * downturn columns apply to some unnamed amount.
+   */
+  stressCommitment: Commitment
+  scenarios: ScenarioResult[]
+
   strategy: StrategicTiming
   cards: CardSafetySummary
 
@@ -281,10 +290,14 @@ export const getGrowthPlannerSnapshot = cache(
     // the page claim resilience it never checked. If a custom amount was asked
     // for, that is the figure under consideration and takes precedence.
     const stressCommitment: Commitment =
-      opts?.customRecurring != null && opts.customRecurring > 0
-        ? { kind: 'recurring', amount: opts.customRecurring }
+      (opts?.customRecurring != null && opts.customRecurring > 0) ||
+      (opts?.customOneTime != null && opts.customOneTime > 0)
+        ? {
+            recurringMonthly: opts?.customRecurring ?? 0,
+            oneTime: opts?.customOneTime ?? 0,
+          }
         : maxRecurring > 0
-          ? { kind: 'recurring', amount: maxRecurring }
+          ? { recurringMonthly: maxRecurring, oneTime: 0 }
           : NO_COMMITMENT
 
     const scenarios = buildScenarioMatrix(assumptions, stressCommitment, activeMode, coverage, {
