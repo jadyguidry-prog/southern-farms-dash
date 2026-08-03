@@ -14,22 +14,9 @@ import { analyzeProposalFromSnapshot } from '@/lib/growth-planner-service'
 import {
   type EquipmentFinancing,
   type Proposal,
-  type ProposalDecision,
   type ProposalType,
 } from '@/lib/growth-proposals'
-
-export type ProposalDraft = {
-  type: ProposalType
-  name: string
-  modeKey?: string
-  /** Owner-entered gross margin, optional and labelled an assumption downstream. */
-  assumedMarginPct?: string
-  fields: Record<string, string>
-}
-
-export type AnalysisResult =
-  | { ok: true; decision: ProposalDecision; modeLabel: string; confidencePct: number }
-  | { ok: false; error: string }
+import type { AnalysisResult, ProposalDraft } from '@/app/growth/proposal-types'
 
 /** Parse a form string into a non-negative number, or null when blank/invalid. */
 function num(raw: string | undefined): number | null {
@@ -82,7 +69,7 @@ function defaultName(type: ProposalType): string {
   }
 }
 
-function require(value: number | null, label: string): number {
+function required(value: number | null, label: string): number {
   if (value == null) throw new Error(`Enter a value for ${label}.`)
   return value
 }
@@ -93,14 +80,14 @@ function buildProposal(type: ProposalType, name: string, f: Record<string, strin
       return {
         type,
         name,
-        monthlyRetainer: require(num(f.monthlyRetainer), 'the monthly retainer'),
+        monthlyRetainer: required(num(f.monthlyRetainer), 'the monthly retainer'),
         setupFee: num(f.setupFee) ?? undefined,
       }
     case 'marketing_campaign':
       return {
         type,
         name,
-        monthlyAmount: require(num(f.monthlyAmount), 'the monthly ad spend'),
+        monthlyAmount: required(num(f.monthlyAmount), 'the monthly ad spend'),
         durationMonths: num(f.durationMonths) ?? undefined,
       }
     case 'equipment': {
@@ -108,7 +95,7 @@ function buildProposal(type: ProposalType, name: string, f: Record<string, strin
       return {
         type,
         name,
-        price: require(num(f.price), 'the purchase price'),
+        price: required(num(f.price), 'the purchase price'),
         financing,
         downPayment: num(f.downPayment) ?? undefined,
         monthlyPayment: num(f.monthlyPayment) ?? undefined,
@@ -128,7 +115,7 @@ function buildProposal(type: ProposalType, name: string, f: Record<string, strin
         hourlyWage: hourlyWage ?? undefined,
         hoursPerWeek: num(f.hoursPerWeek) ?? undefined,
         annualSalary: annualSalary ?? undefined,
-        employerBurdenPct: require(num(f.employerBurdenPct), 'the employer burden percent'),
+        employerBurdenPct: required(num(f.employerBurdenPct), 'the employer burden percent'),
         oneTimeSetup: num(f.oneTimeSetup) ?? undefined,
       }
     }
@@ -136,7 +123,7 @@ function buildProposal(type: ProposalType, name: string, f: Record<string, strin
       return {
         type,
         name,
-        amount: require(num(f.amount), 'the purchase amount'),
+        amount: required(num(f.amount), 'the purchase amount'),
       }
   }
 }

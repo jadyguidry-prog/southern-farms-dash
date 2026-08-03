@@ -8,6 +8,7 @@ import { CapacityLadder } from '@/components/growth/capacity-ladder'
 import { ProjectionTable } from '@/components/growth/projection-table'
 import { ScenarioMatrix } from '@/components/growth/scenario-matrix'
 import { ConstraintsPanel } from '@/components/growth/constraints-panel'
+import { ProposalAnalyzer } from '@/components/growth/proposal-analyzer'
 import { getGrowthPlannerSnapshot } from '@/lib/growth-planner-service'
 
 export const metadata = {
@@ -126,6 +127,11 @@ export default async function GrowthPage({
           />
         </div>
       </div>
+
+      {/* Full-width below the ladder: the ladder and headline answer "how much in
+          general", the analyzer answers "what about THIS specific thing" — judged
+          under the same active mode. */}
+      <ProposalAnalyzer activeModeKey={data.activeMode.modeKey} />
     </div>
   )
 }
