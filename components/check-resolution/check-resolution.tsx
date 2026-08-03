@@ -546,7 +546,9 @@ export function CheckResolution({
       {/* Naming dialog. Shows the exact dollar impact before saving, because the
           owner is committing to a number that will feed gross profit. */}
       <Dialog open={Boolean(active)} onOpenChange={(o) => !o && setActive(null)}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+        {/* Body scrolls, header and Save stay pinned — on a short window the
+            Save button previously fell below the fold. */}
+        <DialogContent className="grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-lg">
           <DialogHeader>
             <DialogTitle className="text-pretty">
               {active?.label ?? 'Name this group'}
@@ -557,7 +559,7 @@ export function CheckResolution({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex flex-col gap-4">
+          <div className="-mx-1 flex flex-col gap-4 overflow-y-auto px-1">
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="payee">Paid to</Label>
               <Input
