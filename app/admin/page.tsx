@@ -8,6 +8,7 @@ import { BillPayReport } from '@/components/admin/bill-pay-report'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
 import { getBillPaySnapshot } from '@/lib/bill-pay-service'
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
+import { getSpendingCapacity } from '@/lib/spending-capacity-data'
 import {
   getLaborDataset,
   summarizeLabor,
@@ -39,7 +40,14 @@ export default async function AdminPage() {
   )
 
   const data = Object.fromEntries(results) as Record<string, Record<string, unknown>[]>
-  const [batches, cashFlowInsight, laborDataset, checkSnapshot, billPaySnapshot] =
+  const [
+    batches,
+    cashFlowInsight,
+    laborDataset,
+    checkSnapshot,
+    billPaySnapshot,
+    spendingCapacity,
+  ] =
     await Promise.all([
       getCsvImportBatches(),
       // Reporting shows every imported month, not the dashboard's trailing 12, so
@@ -53,6 +61,9 @@ export default async function AdminPage() {
       getCheckResolutionSnapshot(),
       // Same bill-pay snapshot the dashboard tile and advisor read.
       getBillPaySnapshot(),
+      // Same capacity engine the Cash Flow page and advisor read, so the weekly
+      // position here cannot contradict what those two surfaces show.
+      getSpendingCapacity(),
     ])
   const laborSummary = summarizeLabor(laborDataset.shifts, laborDataset.coverage)
   const laborMonthly = deriveMonthlyLabor(
@@ -67,7 +78,7 @@ export default async function AdminPage() {
         description="Add, import, and manage the financial records that power your dashboard. Changes appear across all pages immediately."
       />
       <div className="mb-6 flex flex-col gap-4">
-        <CashFlowReport insight={cashFlowInsight} />
+        <CashFlowReport insight={cashFlowInsight} capacity={spendingCapacity} />
 
         <LaborReport summary={laborSummary} monthly={laborMonthly} />
 
