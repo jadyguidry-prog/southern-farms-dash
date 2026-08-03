@@ -18,6 +18,7 @@ import {
   buildClearingSuggestions,
   nextDueAfterPayment,
   CLEAR_WINDOW_DAYS,
+  ACH_DRAFT_WINDOW_DAYS,
   type ObligationPayment,
   type TxnRow,
 } from '../lib/bill-pay-service'
@@ -180,6 +181,16 @@ check('no bank rows means no suggestions', buildClearingSuggestions([pay()], [])
   check('check-number match is found even when the amount differs', s.length, 1)
   check('and is labelled as the strong match', s[0]?.matchType, 'check_number')
   check('and points at the right bank row', s[0]?.transactionId, 't9')
+}
+
+{
+  // A settled payment must never be offered again, whatever the caller passes in —
+  // confirming it twice would double-count it against cash.
+  const s = buildClearingSuggestions(
+    [pay({ status: 'cleared', checkNumber: '1001' })],
+    [txn({ check_number: '1001' })],
+  )
+  check('an already-cleared check is never re-suggested', s, [])
 }
 
 {
@@ -492,6 +503,134 @@ console.log('\nGraceful degrade (module unused / overlay table absent)')
       (i) => !i.id.startsWith('auto-billpay'),
     ),
   )
+}
+
+console.log('\nPending ACH drafts (a logged Sysco/Quirch invoice awaiting its draft)')
+
+{
+  // A logged invoice: ACH, outstanding, identified by payee (no check number).
+  const draft = (p: Partial<ObligationPayment> = {}): ObligationPayment =>
+    pay({
+      obligationId: null,
+      paymentMethod: 'ach',
+      checkNumber: null,
+      payeeName: 'Sysco',
+      amount: 5188,
+      paymentDate: '2026-07-10',
+      ...p,
+    })
+
+  {
+    const s = buildClearingSuggestions(
+      [draft()],
+      [txn({ id: 'tq', description: 'SYSCO BROS ACH DEBIT', amount: 5188, transaction_date: '2026-07-12' })],
+    )
+    check('a pending draft matches its bank debit by vendor + amount', s.length, 1)
+    check('and is labelled as a vendor match', s[0]?.matchType, 'vendor_amount')
+    check('and carries the payee so a numberless draft is identifiable', s[0]?.payeeName, 'Sysco')
+  }
+
+  {
+    // The float is the whole point: an unsettled draft must reduce spendable cash
+    // exactly like a written check, or the number lies during the 3+ day window.
+    const d = deriveOutstandingCash(20_000, [draft({ amount: 7_500 })])
+    check('a pending ACH draft reduces spendable cash', d.cashAvailable, 12_500)
+    check('and is counted as outstanding', d.outstandingChecks, 7_500)
+  }
+
+  {
+    // Unlike a check, an ACH may pull EARLIER than the date the owner guessed.
+    const s = buildClearingSuggestions(
+      [draft({ paymentDate: '2026-07-10' })],
+      [txn({ id: 'te', description: 'SYSCO DEBIT', amount: 5188, transaction_date: '2026-07-07' })],
+    )
+    check('a draft that pulled before the expected date still matches', s.length, 1)
+  }
+
+  {
+    const far = new Date('2026-07-10T00:00:00')
+    far.setDate(far.getDate() + ACH_DRAFT_WINDOW_DAYS + 4)
+    const s = buildClearingSuggestions(
+      [draft()],
+      [txn({ description: 'SYSCO DEBIT', amount: 5188, transaction_date: far.toISOString().slice(0, 10) })],
+    )
+    check('a debit far outside the draft window is not matched', s, [])
+  }
+
+  {
+    // Real invoices rarely draft to the penny; a small variance must still match.
+    const s = buildClearingSuggestions(
+      [draft({ amount: 5000 })],
+      [txn({ description: 'SYSCO DEBIT', amount: 5060, transaction_date: '2026-07-11' })],
+    )
+    check('a small amount variance still matches', s.length, 1)
+  }
+
+  {
+    const s = buildClearingSuggestions(
+      [draft({ amount: 5000 })],
+      [txn({ description: 'SYSCO DEBIT', amount: 8900, transaction_date: '2026-07-11' })],
+    )
+    check('a wildly different amount is not matched', s, [])
+  }
+
+  {
+    const s = buildClearingSuggestions(
+      [draft({ payeeName: 'Quirch Foods' })],
+      [txn({ description: 'SYSCO BROS ACH DEBIT', amount: 5188, transaction_date: '2026-07-11' })],
+    )
+    check('a different vendor is never matched on amount alone', s, [])
+  }
+
+  {
+    // Without a payee there is no identifier, so matching could only be by amount —
+    // precisely the false positive that would clear the wrong weekly draft.
+    const s = buildClearingSuggestions(
+      [draft({ payeeName: '   ' })],
+      [txn({ description: 'ACH DEBIT 5188', amount: 5188, transaction_date: '2026-07-11' })],
+    )
+    check('a draft with no payee name is never auto-suggested', s, [])
+  }
+
+  {
+    // Two weekly Sysco invoices in flight, one debit: the exact amount must win it,
+    // not whichever near-amount draft happened to be checked first.
+    const s = buildClearingSuggestions(
+      [
+        draft({ id: 'near', amount: 5100, paymentDate: '2026-07-09' }),
+        draft({ id: 'exact', amount: 5188, paymentDate: '2026-07-11' }),
+      ],
+      [txn({ id: 'one', description: 'SYSCO DEBIT', amount: 5188, transaction_date: '2026-07-10' })],
+    )
+    check('only one draft claims the single debit', s.length, 1)
+    check('and the exact-amount draft wins it over the near one', s[0]?.paymentId, 'exact')
+  }
+
+  {
+    const s = buildClearingSuggestions(
+      [draft({ status: 'cleared' })],
+      [txn({ description: 'SYSCO DEBIT', amount: 5188, transaction_date: '2026-07-11' })],
+    )
+    check('an already-cleared draft is never re-suggested', s, [])
+  }
+
+  {
+    // A settled one-off ACH (recorded after the fact) is cleared, so it is not a
+    // pending draft and must not be pulled into the suggestion list.
+    const s = buildClearingSuggestions(
+      [draft({ id: 'd1' }), pay({ id: 'c1', checkNumber: '1001', amount: 300 })],
+      [
+        txn({ id: 'tb1', description: 'SYSCO DEBIT', amount: 5188, transaction_date: '2026-07-11' }),
+        txn({ id: 'tb2', check_number: '1001', amount: 300, transaction_date: '2026-07-05' }),
+      ],
+    )
+    check('drafts and checks are matched side by side', s.length, 2)
+    ok(
+      'each keeps its own match kind',
+      s.some((x) => x.paymentId === 'd1' && x.matchType === 'vendor_amount') &&
+        s.some((x) => x.paymentId === 'c1' && x.matchType === 'check_number'),
+    )
+  }
 }
 
 console.log('\nAutopay/ACH auto-reconcile from the bank feed')

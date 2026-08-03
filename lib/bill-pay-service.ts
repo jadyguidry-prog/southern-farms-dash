@@ -388,11 +388,17 @@ export const ACH_DRAFT_WINDOW_DAYS = 10
  * never resolves two different checks.
  */
 export function buildClearingSuggestions(
-  outstanding: ObligationPayment[],
+  payments: ObligationPayment[],
   candidates: TxnRow[],
 ): ClearingSuggestion[] {
   const suggestions: ClearingSuggestion[] = []
   const claimed = new Set<string>()
+
+  // Defence in depth: only an unsettled payment can be suggested for clearing.
+  // Callers already filter, but re-suggesting an already-cleared payment would
+  // double-count it against cash, so the rule is enforced here where it cannot be
+  // bypassed rather than trusted to every future caller.
+  const outstanding = payments.filter((p) => p.status === 'outstanding')
 
   const build = (
     p: ObligationPayment,
