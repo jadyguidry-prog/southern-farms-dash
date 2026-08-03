@@ -35,12 +35,22 @@ export function paymentLabel(
  *
  * Returns an error message, or null when the input is acceptable.
  */
-export function validatePaymentBasics(input: {
-  amount: number
-  paymentDate: string
-  paymentMethod: string
-  checkNumber?: string
-}): string | null {
+export function validatePaymentBasics(
+  input: {
+    amount: number
+    paymentDate: string
+    paymentMethod: string
+    checkNumber?: string
+  },
+  opts: {
+    /**
+     * Permit `check` with no number yet — for logging a bill that WILL be paid by
+     * check before the check is actually written. Defaults to false so the
+     * "Write a Check" path keeps the strict rule; only invoice logging opts in.
+     */
+    allowUnwrittenCheck?: boolean
+  } = {},
+): string | null {
   const amount = Number(input.amount)
   if (!Number.isFinite(amount) || amount <= 0) {
     return 'Enter a payment amount greater than zero.'
@@ -51,12 +61,42 @@ export function validatePaymentBasics(input: {
   if (input.paymentMethod !== 'check' && input.paymentMethod !== 'ach') {
     return 'Choose check or ACH.'
   }
-  // A check with no number cannot be matched to the bank feed later, which is the
-  // whole reason the float number can be trusted. Same rule as check-resolution.
-  if (input.paymentMethod === 'check' && !(input.checkNumber ?? '').trim()) {
+  // A written check with no number cannot be matched to the bank feed later, which
+  // is the whole reason the float number can be trusted. Same rule as
+  // check-resolution. An invoice logged before the check exists is exempt: the
+  // number is captured later, when the check is actually written.
+  if (
+    input.paymentMethod === 'check' &&
+    !opts.allowUnwrittenCheck &&
+    !(input.checkNumber ?? '').trim()
+  ) {
     return 'Enter the check number.'
   }
   return null
+}
+
+/**
+ * Is this outstanding payment still WAITING to leave the bank by a route we can't
+ * yet point at a specific piece of paper?
+ *
+ * Two cases, both "money promised, nothing written":
+ *   - an ACH draft that hasn't been taken yet, and
+ *   - a bill logged as check-to-be-written, before the check exists.
+ *
+ * Both must be described as "expected", never "written". Keyed on the absence of a
+ * check number rather than on `method === 'ach'`, because the old method test
+ * silently mislabelled a check-to-be-written as an already-written check.
+ *
+ * Note this deliberately does NOT change the cash math: `sumOutstanding` counts
+ * every outstanding row regardless, which is correct — the money is owed and the
+ * bank balance still includes it either way.
+ */
+export function isAwaitingPayment(p: {
+  paymentMethod: string
+  checkNumber?: string | null
+}): boolean {
+  if (p.paymentMethod === 'ach') return true
+  return !(p.checkNumber ?? '').trim()
 }
 
 // ---------------------------------------------------------------------------

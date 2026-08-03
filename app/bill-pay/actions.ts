@@ -305,7 +305,12 @@ export async function recordOneOffPayment(
   // and the DB check constraint would reject it anyway. Fail with a clear message
   // rather than surfacing a raw constraint violation.
   if (!payeeName) return { ok: false, error: 'Enter who the payment was made out to.' }
-  const invalid = validatePaymentBasics(input)
+  // `pending` means "logging a bill I still owe", so a check number is not required
+  // yet — the check may not be written. A non-pending check is one the owner has
+  // physically written, and still must carry its number for bank matching.
+  const invalid = validatePaymentBasics(input, {
+    allowUnwrittenCheck: Boolean(input.pending),
+  })
   if (invalid) return { ok: false, error: invalid }
 
   const supabase = await createClient()
@@ -328,7 +333,9 @@ export async function recordOneOffPayment(
       amount,
       payment_date: input.paymentDate,
       payment_method: method,
-      check_number: method === 'check' ? (input.checkNumber ?? '').trim() : null,
+      // `|| null` matters: an unwritten check must store NULL, not '', so that
+      // "has a check number" is one unambiguous test everywhere downstream.
+      check_number: method === 'check' ? (input.checkNumber ?? '').trim() || null : null,
       bank_account_id: input.bankAccountId || null,
       status: isCleared ? 'cleared' : 'outstanding',
       cleared_date: isCleared ? input.paymentDate : null,
@@ -349,8 +356,9 @@ export async function recordOneOffPayment(
       payee: payeeName,
       purpose: (input.purpose ?? '').trim() || null,
       one_off: true,
-      // Distinguishes a logged invoice awaiting its draft from a settled ACH.
-      pending_draft: method === 'ach' && Boolean(input.pending),
+      // A logged invoice awaiting payment, by either route. No longer gated on
+      // method: a bill to be paid by a not-yet-written check is equally pending.
+      pending_draft: Boolean(input.pending),
     },
     created_by: actor,
   })
@@ -507,6 +515,109 @@ export async function clearPayment(
     payment_id: paymentId,
     action: 'cleared',
     detail: { clearedDate, source: 'manual' },
+    created_by: actor,
+  })
+
+  revalidateAll()
+  return { ok: true, paymentId }
+}
+
+/**
+ * Undo a clear that was recorded by mistake, returning the payment to outstanding.
+ *
+ * This is NOT the same as voiding. Void says "this payment never happened" and
+ * removes the money from the float entirely; un-clearing says "it hasn't left the
+ * bank yet", which puts the amount back into outstanding so spendable cash drops
+ * again. Using void for a misclick would overstate spendable cash by the amount.
+ *
+ * `cleared_transaction_id` must be released too, or the matched bank row stays
+ * claimed forever: there is a unique index on that column, so the real debit could
+ * never be attached to this payment on a later, correct attempt.
+ */
+export async function unclearPayment(paymentId: string): Promise<ActionResult> {
+  if (!paymentId) return { ok: false, error: 'No payment was specified.' }
+
+  const supabase = await createClient()
+  const actor = await currentActor()
+
+  const { data: existing, error: readErr } = await supabase
+    .from('obligation_payments')
+    .select('id, status, cleared_date, cleared_transaction_id')
+    .eq('id', paymentId)
+    .maybeSingle()
+  if (readErr) return { ok: false, error: readErr.message }
+  if (!existing) return { ok: false, error: 'That payment no longer exists.' }
+  // A void row is intentionally excluded: reviving it would resurrect money the
+  // owner deliberately removed. Voids are undone by re-entering the payment.
+  if (existing.status !== 'cleared') {
+    return { ok: false, error: 'Only a cleared payment can be moved back to outstanding.' }
+  }
+
+  const { error: updErr } = await supabase
+    .from('obligation_payments')
+    .update({ status: 'outstanding', cleared_date: null, cleared_transaction_id: null })
+    .eq('id', paymentId)
+  if (updErr) return { ok: false, error: updErr.message }
+
+  await supabase.from('obligation_payment_audit').insert({
+    payment_id: paymentId,
+    action: 'uncleared',
+    detail: {
+      source: 'manual-correction',
+      // Kept so the trail shows what was undone, not merely that something was.
+      previousClearedDate: existing.cleared_date,
+      releasedTransactionId: existing.cleared_transaction_id,
+    },
+    created_by: actor,
+  })
+
+  revalidateAll()
+  return { ok: true, paymentId }
+}
+
+/**
+ * Attach a check number to an outstanding payment once the check is actually
+ * written. Completes the "log the invoice now, write the check later" flow: until
+ * the number exists the payment shows as expected rather than written, and
+ * check-resolution cannot match it to the bank (it skips numberless payments).
+ */
+export async function recordCheckNumber(
+  paymentId: string,
+  checkNumber: string,
+): Promise<ActionResult> {
+  if (!paymentId) return { ok: false, error: 'No payment was specified.' }
+  const num = (checkNumber ?? '').trim()
+  if (!num) return { ok: false, error: 'Enter the check number.' }
+
+  const supabase = await createClient()
+  const actor = await currentActor()
+
+  const { data: existing, error: readErr } = await supabase
+    .from('obligation_payments')
+    .select('id, status, payment_method, check_number')
+    .eq('id', paymentId)
+    .maybeSingle()
+  if (readErr) return { ok: false, error: readErr.message }
+  if (!existing) return { ok: false, error: 'That payment no longer exists.' }
+  if (existing.status !== 'outstanding') {
+    return { ok: false, error: 'Only an outstanding payment can be updated.' }
+  }
+  // Switching an ACH to a check would change how the money is expected to move;
+  // that is a different decision than filling in a number, so it is refused here.
+  if (existing.payment_method !== 'check') {
+    return { ok: false, error: 'This payment is set to ACH, not check.' }
+  }
+
+  const { error: updErr } = await supabase
+    .from('obligation_payments')
+    .update({ check_number: num })
+    .eq('id', paymentId)
+  if (updErr) return { ok: false, error: updErr.message }
+
+  await supabase.from('obligation_payment_audit').insert({
+    payment_id: paymentId,
+    action: 'updated',
+    detail: { checkNumber: num, previousCheckNumber: existing.check_number },
     created_by: actor,
   })
 
