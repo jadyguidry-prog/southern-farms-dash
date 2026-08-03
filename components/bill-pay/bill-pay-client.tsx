@@ -240,15 +240,16 @@ export function BillPayClient({
         <Card>
           <CardContent className="p-4 text-sm text-muted-foreground">
             <p>
-              <span className="font-medium text-foreground">Write a check</span> for a
-              payment that isn&apos;t one of the bills above — a seed supplier, a
-              repair, a one-time contractor.
+              <span className="font-medium text-foreground">Write a check</span>
+              {
+                ' for a payment that isn’t one of the bills above — a seed supplier, a repair, a one-time contractor.'
+              }
             </p>
             <p className="mt-2">
-              <span className="font-medium text-foreground">Log an invoice</span> when a
-              bill arrives that will be drafted by ACH in a few days (Sysco, Quirch).
-              Enter the amount and the date you expect it to pull — it reduces your
-              spendable cash right away, then clears itself when the draft posts.
+              <span className="font-medium text-foreground">Log an invoice</span>
+              {
+                ' when a bill arrives that will be drafted by ACH in a few days (Sysco, Quirch). Enter the amount and the date you expect it to pull — it reduces your spendable cash right away, then clears itself when the draft posts.'
+              }
             </p>
           </CardContent>
         </Card>
@@ -414,20 +415,20 @@ function OutstandingRow({
               {formatCurrency(payment.amount)}
             </span>
           </p>
-            <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-              {/* An ACH here is a logged invoice awaiting its draft, not a written
-                  check — saying "Written" would misdescribe it. */}
-              {isDraft && (
-                <Badge variant="outline" className="text-xs font-normal">
-                  ACH · pending draft
-                </Badge>
-              )}
-              <p className="min-w-0 truncate text-xs text-muted-foreground">
-                {payment.checkNumber ? `Check #${payment.checkNumber} · ` : ''}
-                {isDraft ? 'Expected' : 'Written'} {payment.paymentDate}
-                {payment.purpose ? ` · ${payment.purpose}` : ''}
-              </p>
-            </div>
+          <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            {/* An ACH here is a logged invoice awaiting its draft, not a written
+                check — saying "Written" would misdescribe it. */}
+            {isDraft && (
+              <Badge variant="outline" className="text-xs font-normal">
+                ACH · pending draft
+              </Badge>
+            )}
+            <p className="min-w-0 truncate text-xs text-muted-foreground">
+              {payment.checkNumber ? `Check #${payment.checkNumber} · ` : ''}
+              {isDraft ? 'Expected' : 'Written'} {payment.paymentDate}
+              {payment.purpose ? ` · ${payment.purpose}` : ''}
+            </p>
+          </div>
         </div>
         <div className="flex shrink-0 gap-2">
           <Button

@@ -24,8 +24,8 @@ export default async function BillPayPage() {
       getCashObligations(),
       getBankAccounts(),
       getObligationPayments(),
-      // Suggested bank matches for outstanding checks — surfaced for confirmation,
-      // never auto-applied.
+      // Suggested bank matches for outstanding checks and pending ACH drafts —
+      // surfaced for confirmation, never auto-applied.
       getClearingSuggestions(),
       // Known vendors, so a one-off check can reuse an existing payee instead of
       // creating a near-duplicate spelling of a name already in the system.
@@ -68,7 +68,7 @@ export default async function BillPayPage() {
     <div>
       <PageHeader
         title="Bill Payments"
-        description="Record payments against scheduled bills. Written checks stay outstanding until they clear the bank, so your spendable cash reflects money already committed."
+        description="Record payments against scheduled bills. Written checks and pending ACH drafts stay outstanding until they clear the bank, so your spendable cash reflects money already committed."
       />
 
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
@@ -82,11 +82,14 @@ export default async function BillPayPage() {
           label="Spendable Now"
           value={formatCurrency(summary.cashAvailable)}
           icon={CircleDollarSign}
-          hint="After outstanding checks"
+          hint="After outstanding payments"
           goodDirection="up"
         />
         <StatCard
-          label="Outstanding Checks"
+          // Covers written checks AND pending ACH drafts (logged COGS invoices):
+          // both are money committed but not yet gone, so "Checks" would understate
+          // the figure this tile actually shows.
+          label="Outstanding"
           value={formatCurrency(summary.outstandingChecks)}
           icon={FileClock}
           hint={`${summary.outstandingCheckCount} not yet cleared`}
