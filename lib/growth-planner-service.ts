@@ -39,6 +39,11 @@ import {
   type ScenarioResult,
   type StrategicTiming,
 } from '@/lib/growth-planner'
+import {
+  analyzeProposal,
+  type Proposal,
+  type ProposalDecision,
+} from '@/lib/growth-proposals'
 
 /* ------------------------------------------------------------------ */
 /* Risk modes                                                          */
@@ -432,6 +437,60 @@ export function buildSeasonalIndex(
     out.push(byMonth.get(cal) ?? 1)
   }
   return out
+}
+
+/**
+ * Analyse a typed proposal against the live snapshot.
+ *
+ * Thin orchestration: it loads the SAME snapshot the ladder uses and hands the
+ * pure `analyzeProposal` its assumptions, coverage, active mode, strategy and
+ * confidence gaps. No money math happens here, so a proposal and the ladder can
+ * never disagree about what the business can absorb. `todayISO` is read once, here
+ * at the impure edge, and passed down so the analyzer stays clock-free and
+ * testable.
+ */
+export async function analyzeProposalFromSnapshot(
+  proposal: Proposal,
+  opts?: {
+    modeKey?: string
+    assumedMarginPct?: number | null
+    customSalesDeclinePct?: number | null
+  },
+): Promise<{
+  decision: ProposalDecision
+  evaluation: RungEvaluation
+  scenarios: ScenarioResult[]
+  activeModeLabel: string
+  confidencePct: number
+}> {
+  const [snap, settings] = await Promise.all([
+    getGrowthPlannerSnapshot({ modeKey: opts?.modeKey }),
+    getBusinessSettings(),
+  ])
+
+  const reviewCadenceMonths = requireSetting(settings, 'growth_review_cadence_months')
+  const today = new Date()
+
+  const { decision, evaluation, scenarios } = analyzeProposal({
+    proposal,
+    assumptions: snap.assumptions,
+    mode: snap.activeMode,
+    cov: snap.coverage,
+    strategy: snap.strategy,
+    confidenceGaps: snap.meta.confidenceGaps,
+    todayISO: toISODate(today),
+    reviewCadenceMonths,
+    assumedMarginPct: opts?.assumedMarginPct ?? null,
+    customSalesDeclinePct: opts?.customSalesDeclinePct ?? null,
+  })
+
+  return {
+    decision,
+    evaluation,
+    scenarios,
+    activeModeLabel: snap.activeMode.label,
+    confidencePct: snap.meta.confidencePct,
+  }
 }
 
 /** Evaluate one specific commitment — used by the scenario matrix on the page. */
