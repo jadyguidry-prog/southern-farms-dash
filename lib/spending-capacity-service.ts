@@ -1,3 +1,6 @@
+// `card-activity` is pure (no db, no clock), so importing it keeps this module pure too.
+import { planCardPayments } from './card-activity'
+
 /**
  * Spending capacity: "what can I safely spend today, and over the next 7 days?"
  *
@@ -311,6 +314,23 @@ export type CapacityInput = {
   datedOutflows: DatedOutflow[]
   /** Baseline weekly spend to spread across the week, excluding dated items. */
   baselineWeeklyOutflow: number
+  /**
+   * Days to project while looking for the low point and reserve breaches. Defaults to 7.
+   *
+   * Deliberately separate from `nearTermDays`: the horizon must be long enough to contain
+   * a card statement due date (~15 days out here), because an outflow beyond the last
+   * projected day is invisible no matter how large it is.
+   */
+  horizonDays?: number
+  /**
+   * Days the "safe to spend" headline is allowed to consider. Defaults to 7.
+   *
+   * This is NOT the horizon. If the headline used the full horizon, a known payoff three
+   * weeks out would drag today's number toward zero and the honest answer ("you can spend
+   * this now, and there is a cliff on the 18th") would collapse into a single misleading
+   * $0. Two questions, two windows, both reported.
+   */
+  nearTermDays?: number
 }
 
 export type CapacityResult = {
@@ -325,6 +345,16 @@ export type CapacityResult = {
   /** True if the cautious projection dips under the reserve at any point. */
   breachesReserve: boolean
   reserveShortfall: number
+  /**
+   * The low point within the NEAR-TERM window only — what the headline is solved against.
+   * Reported alongside the horizon low point so the two standards are never confused,
+   * the way a ladder marked "Tight" once sat beside a headline of $0 with no explanation.
+   */
+  nearTermLowestBalance: number
+  /** Days of projection actually produced. */
+  horizonDays: number
+  /** Days the headline considered. */
+  nearTermDays: number
 }
 
 /**
@@ -344,7 +374,12 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
     shares,
     datedOutflows,
     baselineWeeklyOutflow,
+    horizonDays = 7,
+    nearTermDays = 7,
   } = input
+
+  // The headline can never consider more than what was actually projected.
+  const nearTerm = Math.max(1, Math.min(nearTermDays, horizonDays))
 
   const dated = new Map<string, DatedOutflow[]>()
   for (const item of datedOutflows) {
@@ -362,8 +397,16 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
   let typicalBalance = cashOnHand
   let lowestBalance = Number.POSITIVE_INFINITY
   let lowestBalanceDate = today
+  let nearTermLowestBalance = Number.POSITIVE_INFINITY
 
-  for (let i = 0; i < 7; i++) {
+  // Always project far enough to include every dated outflow. A known payment sitting one
+  // day past the horizon is invisible, which is the exact failure being fixed here — so
+  // the horizon stretches to cover it rather than trusting the setting to be big enough.
+  const furthestDated = [...dated.keys()].sort().at(-1) ?? today
+  let span = Math.max(1, horizonDays)
+  while (addDays(today, span - 1) < furthestDated && span < 400) span++
+
+  for (let i = 0; i < span; i++) {
     const date = addDays(today, i)
     const dow = isoDayOfWeek(date)
     const share = shares[dow] ?? 0
@@ -390,6 +433,10 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
       lowestBalanceDate = date
     }
 
+    if (i < nearTerm && cautiousBalance < nearTermLowestBalance) {
+      nearTermLowestBalance = cautiousBalance
+    }
+
     days.push({
       date,
       cautiousIn,
@@ -403,20 +450,36 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
   }
 
   if (!Number.isFinite(lowestBalance)) lowestBalance = cashOnHand
+  if (!Number.isFinite(nearTermLowestBalance)) nearTermLowestBalance = cashOnHand
 
-  // The headline uses the LOWEST point in the week, not the closing balance. A
+  // The headline uses the LOWEST point in the NEAR-TERM window, not the closing balance. A
   // strong Friday must never paper over a Wednesday that cannot cover payroll.
-  const headroom = lowestBalance - minCashReserve
+  //
+  // It deliberately does NOT use the full-horizon low point. Spending is a decision about
+  // now; a payoff three weeks out is a scheduling fact, and folding it into today's
+  // headline would report $0 spendable while $5k sits in the account — technically
+  // defensible, useless as advice, and the kind of number that gets ignored. The horizon
+  // low point drives `breachesReserve` instead, so the warning still fires.
+  const headroom = nearTermLowestBalance - minCashReserve
   const safeToSpendToday = money(Math.max(0, headroom))
+
+  // The BREACH warning is judged across the FULL horizon, not the headline window. This is
+  // the whole point of separating them: a $9.9k payoff on day 15 must raise the alarm even
+  // though it is correctly excluded from what is spendable today. Using near-term headroom
+  // here would restore the original blind spot with extra steps.
+  const horizonHeadroom = lowestBalance - minCashReserve
 
   return {
     days,
     safeToSpendToday,
-    perDayAllowance: money(safeToSpendToday / 7),
+    perDayAllowance: money(safeToSpendToday / nearTerm),
     lowestBalance,
     lowestBalanceDate,
-    breachesReserve: headroom < 0,
-    reserveShortfall: money(Math.max(0, -headroom)),
+    breachesReserve: horizonHeadroom < 0,
+    reserveShortfall: money(Math.max(0, -horizonHeadroom)),
+    nearTermLowestBalance,
+    horizonDays: span,
+    nearTermDays: nearTerm,
   }
 }
 
@@ -471,6 +534,26 @@ export type AssembleInput = {
   payments: { obligationId?: string | null; payeeName?: string | null; checkNumber?: string | null; paymentDate: string; amount: number; status: string }[]
   minCashReserve: number
   today: string
+  /**
+   * Credit cards, so a statement payoff can be charged on its DUE DATE instead of
+   * disappearing into an averaged daily outflow. Optional: omitting it preserves the
+   * previous behaviour exactly, which keeps existing callers and tests honest.
+   */
+  cards?: {
+    accountName: string
+    closedAt: string | null
+    balanceOwed: number | null
+    statementDueDate: string | null
+    /** Ledger descriptor of a payoff TO this card, e.g. "AMEX EPAYMENT". */
+    paymentDescriptionMatch: string | null
+  }[]
+  /**
+   * How many days ahead to project when hunting for the cash low point. Defaults to the
+   * old 7 so nothing changes for callers that do not pass it.
+   */
+  horizonDays?: number
+  /** Length of the near-term "safe to spend" window. Defaults to 7. */
+  nearTermDays?: number
 }
 
 /**
@@ -484,7 +567,17 @@ export type AssembleInput = {
  * implementation and both callers use it.
  */
 export function assembleCapacity(input: AssembleInput) {
-  const { accounts, rows, obligations, payments, minCashReserve, today } = input
+  const {
+    accounts,
+    rows,
+    obligations,
+    payments,
+    minCashReserve,
+    today,
+    cards = [],
+    horizonDays = 7,
+    nearTermDays = 7,
+  } = input
   const money = (n: number) => Math.round(n * 100) / 100
 
   // Only accounts holding spendable cash. A line of credit is borrowing capacity,
@@ -536,9 +629,26 @@ export function assembleCapacity(input: AssembleInput) {
     })
   }
 
+  // ---- Credit-card payoffs, charged on the statement due date ----
+  //
+  // A card payoff is one large monthly event. Averaging it into a daily figure hides the
+  // cliff: ~$9.9k becomes ~$300/day, which looks like nothing on the day it actually
+  // clears. These are added as dated outflows so the trough is real.
+  const cardPlans = planCardPayments(cards, today)
+  const cardPayments = cardPlans.filter((p) => p.blockedReason === null)
+  const blockedCardPayments = cardPlans.filter((p) => p.blockedReason !== null)
+
+  for (const p of cardPayments) {
+    datedOutflows.push({
+      date: p.dueDate,
+      amount: p.amount,
+      label: `${p.accountName} statement payment`,
+    })
+  }
+
   // Vendors charged as dated items are removed from the estimated baseline, or
   // the same bill is subtracted twice.
-  const windowEnd = addDays(today, 7)
+  const windowEnd = addDays(today, Math.max(nearTermDays, horizonDays))
   const excludeMatchers = [
     ...new Set(
       datedOutflows
@@ -548,7 +658,34 @@ export function assembleCapacity(input: AssembleInput) {
     ),
   ]
 
-  const weeks = buildWeeklyFlows(rows, { operatingAccounts, today, excludeMatchers })
+  // Card payoffs need a SEPARATE matcher list from the one above, for two reasons:
+  //
+  // 1. The label ("American Express ending 0-73009 statement payment") is not what the
+  //    bank writes in the ledger ("AMEX EPAYMENT"), so label matching would never fire
+  //    and every historical payoff would stay in the baseline — the double count.
+  // 2. Historical payoffs must be excluded across the WHOLE history, not just inside the
+  //    forecast window, because the baseline is a median of past weeks. A window filter
+  //    is right for a one-off bill and wrong for a recurring monthly event.
+  //
+  // Only cards actually being forecast contribute a matcher. Excluding history for a card
+  // whose payoff is NOT being charged forward would erase real spending from the
+  // baseline and overstate available cash.
+  const cardExcludeMatchers = [
+    ...new Set(
+      cardPayments
+        .map(
+          (p) =>
+            cards.find((c) => c.accountName === p.accountName)?.paymentDescriptionMatch ?? '',
+        )
+        .filter((m) => m.length >= 3),
+    ),
+  ]
+
+  const weeks = buildWeeklyFlows(rows, {
+    operatingAccounts,
+    today,
+    excludeMatchers: [...excludeMatchers, ...cardExcludeMatchers],
+  })
   const estimate = estimateWeeklyFlow(weeks)
   const { shares, hasProfile } = buildDayOfWeekProfile(rows, { operatingAccounts })
 
@@ -560,6 +697,8 @@ export function assembleCapacity(input: AssembleInput) {
     shares,
     datedOutflows,
     baselineWeeklyOutflow: estimate.typicalOutflow,
+    horizonDays,
+    nearTermDays,
   })
 
   const confidence = assessConfidence({
@@ -578,5 +717,9 @@ export function assembleCapacity(input: AssembleInput) {
     cashOnHand,
     operatingAccounts,
     lastLedgerDate,
+    cardPayments,
+    // Surfaced so the UI can say WHY a card is absent from the forecast. A card silently
+    // missing from the projection is indistinguishable from one that owes nothing.
+    blockedCardPayments,
   }
 }

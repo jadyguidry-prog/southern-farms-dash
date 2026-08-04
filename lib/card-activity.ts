@@ -87,6 +87,140 @@ export function summarizeCardFreshness(
 }
 
 /**
+ * A card payoff the cash forecast should expect on a specific DATE.
+ *
+ * WHY THIS EXISTS
+ * Card purchases are correctly neutral to cash (the money leaves when the card is paid,
+ * not when it is swiped), but "neutral" was implemented as *invisible*: the payoff only
+ * reached the forecast as part of an averaged daily outflow. A single ~$9.9k payment
+ * smeared into ~$300/day looks like nothing, so the forecast never showed the cliff on
+ * the due date — which is exactly the moment the owner needs to be ready for.
+ *
+ * `amount` is the FULL BALANCE OWED, per the owner's decision, because that is how this
+ * card is actually paid (the ledger shows one lump payment a month, not a minimum).
+ * Statement balance is deliberately NOT used: the recorded value here was $2 against a
+ * $9,948 balance, and forecasting $2 of outflow would understate the real event to
+ * nothing.
+ */
+export type ForecastCardPayment = {
+  accountName: string
+  amount: number
+  dueDate: string
+  /** True when `dueDate` is a repeat of a recorded day-of-month, not a confirmed date. */
+  isEstimatedDate: boolean
+  /** Set when this payoff cannot be forecast; explains what is missing. */
+  blockedReason: string | null
+}
+
+/**
+ * Decide which card payoffs the forecast can place on a date, and why not when it can't.
+ *
+ * Returns an entry for EVERY open card with a balance, including the ones that cannot be
+ * forecast, so a missing due date surfaces as a stated gap instead of silently producing
+ * a rosier forecast. A card quietly dropped from the projection is indistinguishable
+ * from a card with nothing owed.
+ *
+ * Rolls a due date that has already passed forward by one month: a due date of the 18th
+ * still means "the 18th" next cycle. Without this, a stale date would park a large
+ * outflow in the past where the projection never looks, and the cliff would vanish the
+ * day after it was paid.
+ */
+export function planCardPayments(
+  cards: {
+    accountName: string
+    closedAt: string | null
+    balanceOwed: number | null
+    statementDueDate: string | null
+  }[],
+  todayISO: string,
+): ForecastCardPayment[] {
+  const out: ForecastCardPayment[] = []
+
+  for (const card of cards) {
+    if (card.closedAt !== null) continue
+
+    // Null balance means "not recorded" — NOT zero. Forecasting $0 of outflow for a card
+    // whose balance nobody has entered is the "paid off" lie this codebase exists to
+    // avoid, so it is reported as blocked instead.
+    if (card.balanceOwed === null) {
+      out.push({
+        accountName: card.accountName,
+        amount: 0,
+        dueDate: todayISO,
+        isEstimatedDate: false,
+        blockedReason: 'balance not recorded',
+      })
+      continue
+    }
+
+    // A real, confirmed zero is nothing to forecast. Distinct from the null case above.
+    if (card.balanceOwed <= 0) continue
+
+    if (card.statementDueDate === null) {
+      out.push({
+        accountName: card.accountName,
+        amount: card.balanceOwed,
+        dueDate: todayISO,
+        isEstimatedDate: false,
+        blockedReason: 'no statement due date recorded',
+      })
+      continue
+    }
+
+    const { date, isEstimated } = nextOccurrence(card.statementDueDate, todayISO)
+    out.push({
+      accountName: card.accountName,
+      amount: card.balanceOwed,
+      dueDate: date,
+      isEstimatedDate: isEstimated,
+      blockedReason: null,
+    })
+  }
+
+  return out
+}
+
+/**
+ * Roll a recorded due date forward to the next time that day-of-month occurs.
+ *
+ * Clamps to the end of a shorter month, so a 31st due date lands on the 30th in a
+ * 30-day month rather than overflowing into the following month — an overflow would move
+ * a large outflow to the wrong side of a month boundary.
+ */
+function nextOccurrence(
+  recordedISO: string,
+  todayISO: string,
+): { date: string; isEstimated: boolean } {
+  if (recordedISO >= todayISO) return { date: recordedISO, isEstimated: false }
+
+  const dayOfMonth = Number(recordedISO.slice(8, 10))
+  const [ty, tm, td] = [
+    Number(todayISO.slice(0, 4)),
+    Number(todayISO.slice(5, 7)),
+    Number(todayISO.slice(8, 10)),
+  ]
+
+  // This month's occurrence if it is still ahead, otherwise next month's.
+  let y = ty
+  let m = tm
+  if (dayOfMonth < td) {
+    m += 1
+    if (m > 12) {
+      m = 1
+      y += 1
+    }
+  }
+
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate()
+  const d = Math.min(dayOfMonth, lastDay)
+
+  return {
+    date: `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`,
+    isEstimated: true,
+  }
+}
+
+/**
  * How a card total and its caveat are worded, in ONE place.
  *
  * Exists because the panel and the Cash & Debt tile each rendered their own version of
