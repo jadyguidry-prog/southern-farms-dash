@@ -59,6 +59,10 @@ const KPI_FALLBACK = {
 export const SETTING_DEFAULTS = {
   target_payroll_pct: 15,
   warning_payroll_pct: 16,
+  // Gross margin target. Was previously read from a `grossProfitPct` KPI row's
+  // meta with a literal 38 fallback — and that KPI row does not exist, so the
+  // literal was always what was used. Now an owner-editable setting.
+  target_gross_profit_pct: 38,
   min_cash_reserve: 15000,
   preferred_weekly_sales: 18000,
   minimum_weekly_sales: 17000,
@@ -941,6 +945,7 @@ export async function getHealthSnapshot() {
           grossProfitReady: checks.readiness.ready,
           topClusters: checks.topClusters,
           monthsMissingCogs: checks.monthsMissingCogs,
+          monthsMissingBankData: checks.monthsMissingBankData,
           withCheckNumberCount: checks.unresolvedWithCheckNumber,
           attachedCount: checks.unresolvedWithScan,
         }

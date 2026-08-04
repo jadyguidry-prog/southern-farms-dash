@@ -308,6 +308,116 @@ eq(gapMonths.length, 1, 'monthly: a sales-only month is not dropped')
 eq(gapMonths[0].baseCogs, 0, 'monthly: sales-only month reports zero COGS')
 ok(gapMonths[0].salesComplete === true, 'monthly: completeness verdict is carried through')
 
+// ---------- bank-data guard ----------
+//
+// The failure this prevents: a month where only a CARD statement was imported has
+// full Square sales but a fragment of the real spend, so the margin computes to
+// ~99% and reads as a spectacular month rather than as missing data. This was
+// live — Jan/Feb/Mar 2026 showed 90.9%/99.9%/95.5% against $62–$5,557 of COGS.
+
+const bankMap = new Map([['2026-06', true]])
+const cardOnlyMap = new Map([['2026-06', false]])
+
+// Baseline: with bank data present and every check attributed, a margin IS quoted.
+// Asserted first, because a guard that blocks everything would also pass the
+// negative tests below while being useless.
+const quotableClean = deriveMonthlyCogs(
+  txns.slice(0, 3),
+  [],
+  sales,
+  bankMap,
+)
+ok(quotableClean[0].quotable, 'bank guard: a complete month with bank data is quotable')
+eq(quotableClean[0].withheldReason, null, 'bank guard: nothing withheld on a clean month')
+approx(
+  quotableClean[0].marginPct ?? 0,
+  ((79093.03 - 33425.66) / 79093.03) * 100,
+  0.01,
+  'bank guard: margin is sales less COGS over sales',
+)
+
+// The real-data shape: sales present, bank data absent, COGS a thin fragment.
+const cardOnly = deriveMonthlyCogs(
+  [{ id: 'x1', transactionDate: '2026-06-05', amount: 62.51, expenseCategory: 'Meat / COGS', isCheck: false }],
+  [],
+  sales,
+  cardOnlyMap,
+)
+eq(
+  cardOnly[0].withheldReason,
+  'bank-data-missing',
+  'bank guard: a card-only month is withheld as an IMPORT gap',
+)
+eq(cardOnly[0].marginPct, null, 'bank guard: no margin computed without bank data')
+eq(cardOnly[0].grossProfit, null, 'bank guard: gross profit is null, never a misleading 0')
+ok(
+  !cardOnly[0].quotable,
+  'bank guard: the 99.9% margin that would have been printed is suppressed',
+)
+
+// Ordering matters: missing bank data must be reported as the import gap it is,
+// NOT as a categorization gap, or the owner is sent to categorize transactions
+// that were never imported.
+const noCogsNoBank = deriveMonthlyCogs([], [], sales, cardOnlyMap)
+eq(
+  noCogsNoBank[0].withheldReason,
+  'bank-data-missing',
+  'bank guard: missing bank data outranks no-cogs, because it is the cause',
+)
+const noCogsWithBank = deriveMonthlyCogs([], [], sales, bankMap)
+eq(
+  noCogsWithBank[0].withheldReason,
+  'no-cogs',
+  'bank guard: with bank data present, zero COGS is a genuine categorization gap',
+)
+
+// A month absent from the coverage map must be treated as NOT imported. The
+// conservative direction withholds; the alternative quotes a margin for a month
+// whose costs are unknown.
+const absentFromMap = deriveMonthlyCogs(txns.slice(0, 3), [], sales, new Map())
+eq(
+  absentFromMap[0].withheldReason,
+  'bank-data-missing',
+  'bank guard: a month missing from the coverage map defaults to withheld',
+)
+
+// Unresolved checks are still reported as such once bank data is present, so the
+// new guard has not swallowed the original one.
+const stillChecks = deriveMonthlyCogs(txns, [], sales, bankMap)
+eq(
+  stillChecks[0].withheldReason,
+  'unresolved-checks',
+  'bank guard: unattributed checks remain the reason when bank data is present',
+)
+
+// Partial sales must outrank both — a partial month understates sales and would
+// inflate the margin regardless of how complete the cost side is.
+const partialSales = deriveMonthlyCogs(
+  txns.slice(0, 3),
+  [],
+  new Map([['2026-06', { netSales: 79093.03, complete: false }]]),
+  bankMap,
+)
+eq(
+  partialSales[0].withheldReason,
+  'partial-sales',
+  'bank guard: incomplete sales outrank the cost-side reasons',
+)
+
+// Every reason must have a human label — a missing case would render blank.
+for (const reason of [
+  'no-sales',
+  'partial-sales',
+  'bank-data-missing',
+  'no-cogs',
+  'unresolved-checks',
+] as const) {
+  ok(
+    marginWithheldLabel(reason).length > 0,
+    `bank guard: '${reason}' has a display label`,
+  )
+}
+
 // ---------- readiness gate ----------
 
 const blocked = grossProfitReadiness(noRes, 48964)

@@ -33,6 +33,9 @@ import {
   getHealthSnapshot,
 } from '@/lib/queries'
 import { HEALTH_COLOR, HEALTH_TEXT } from '@/lib/health'
+// Reused rather than adding a second month formatter, so the Gross Profit card
+// labels months identically to the cash-flow chart beside it.
+import { monthLabel } from '@/lib/cash-flow-service'
 
 const severityStyles: Record<string, string> = {
   critical: 'bg-destructive/10 text-destructive',
@@ -105,7 +108,13 @@ export default async function DashboardPage() {
   const weeklySales = kpi(kpis, 'weeklySales')
   const monthlySales = kpi(kpis, 'monthlySales')
   const payrollPct = kpi(kpis, 'payrollPct')
-  const grossProfitPct = kpi(kpis, 'grossProfitPct')
+  // Gross margin is DERIVED from the check-resolution snapshot, not read from a
+  // stored KPI. There is no `grossProfitPct` row in `kpis`, so `kpi()` returned
+  // the 0 fallback: the gauge would have drawn 0.0% and declared "Below target by
+  // 38%" the moment the readiness gate opened — a confident verdict built from an
+  // absent row. Reading the snapshot also means this card and the Reporting table
+  // are computed from one function and cannot disagree.
+  const quotableMonth = checks.latestQuotableMonth
 
   // Monthly sales provenance. The Square feed usually lags the calendar by a few
   // days, so the card names the month and says how far through it the figure
@@ -139,7 +148,7 @@ export default async function DashboardPage() {
   const payrollTarget = settings.target_payroll_pct
   const payrollWarning = settings.warning_payroll_pct
   const payrollOverTarget = payrollPct.value - payrollTarget
-  const gpTarget = Number(grossProfitPct.meta.target ?? 38)
+  const gpTarget = settings.target_gross_profit_pct
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -380,47 +389,92 @@ export default async function DashboardPage() {
           </CardHeader>
           <CardContent className="pt-2">
             {/*
-              Gross margin is only drawn once unattributed checks are small
-              enough to trust it. Before that the card explains what is missing
-              instead of rendering a figure: the stored KPI is 0, so the gauge
-              would otherwise announce "Below target by 38%" — a verdict derived
-              from absent data rather than from the shop's actual performance.
+              The gauge is drawn from the newest month that passes EVERY guard —
+              complete sales, imported bank data, categorized COGS and no
+              unattributed checks — rather than from the business-wide readiness
+              flag. A single clean month is a real, defensible figure even while
+              older months are still being attributed; the alternative was
+              withholding a true number until the entire history was perfect.
+              The month is named so a figure from an older month can never be
+              read as the current one.
             */}
-            {checks.readiness.ready ? (
+            {quotableMonth?.marginPct != null ? (
               <>
                 <RadialStat
-                  value={grossProfitPct.value}
+                  value={quotableMonth.marginPct}
                   max={60}
                   color="var(--chart-2)"
                   label="margin"
-                  centerText={formatPercent(grossProfitPct.value)}
+                  centerText={formatPercent(quotableMonth.marginPct)}
                 />
                 <p className="text-center text-sm text-muted-foreground">
-                  {grossProfitPct.value >= gpTarget
-                    ? `Above target by ${formatPercent(grossProfitPct.value - gpTarget)}`
-                    : `Below target by ${formatPercent(gpTarget - grossProfitPct.value)}`}
+                  {quotableMonth.marginPct >= gpTarget
+                    ? `Above target by ${formatPercent(quotableMonth.marginPct - gpTarget)}`
+                    : `Below target by ${formatPercent(gpTarget - quotableMonth.marginPct)}`}
                 </p>
+                <p className="text-center text-xs text-muted-foreground">
+                  {monthLabel(quotableMonth.month)} ·{' '}
+                  {formatCurrency(quotableMonth.netSales)} sales less{' '}
+                  {formatCurrency(quotableMonth.totalCogs)} cost of goods
+                </p>
+                {/* A clean month inside an otherwise unresolved record needs the
+                    caveat attached, or it reads as a verdict on the business. */}
+                {!checks.readiness.ready ? (
+                  <p className="mt-1 text-pretty text-center text-xs text-muted-foreground">
+                    This month is fully attributed. Other months still have{' '}
+                    {formatCurrency(checks.progress.pendingAmount)} of
+                    unattributed checks, so this is not yet a trend.
+                  </p>
+                ) : null}
               </>
             ) : (
               <div className="flex min-h-[180px] flex-col justify-center gap-2 text-center">
                 <p className="text-2xl font-semibold text-muted-foreground">
                   Not yet measurable
                 </p>
-                <p className="text-pretty text-sm text-muted-foreground">
-                  {checks.progress.pendingCount.toLocaleString()} check payments
-                  worth {formatCurrency(checks.progress.pendingAmount)} have no
-                  payee, so cost of goods is incomplete
-                  {checks.readiness.unresolvedVsCogsRatio != null
-                    ? ` — ${checks.readiness.unresolvedVsCogsRatio.toFixed(1)}x the ${formatCurrency(checks.readiness.identifiedCogs)} identified`
-                    : ''}
-                  . A margin now would overstate profit.
-                </p>
-                <Link
-                  href="/check-resolution"
-                  className="text-sm font-medium underline"
-                >
-                  Resolve checks
-                </Link>
+                {/*
+                  Name the reason that actually applies. Unattributed checks are
+                  the usual cause, but a month can also be unmeasurable because
+                  its bank statements were never imported — and pointing the
+                  owner at Check Resolution for THAT would be the wrong job
+                  entirely.
+                */}
+                {checks.progress.pendingCount > 0 ? (
+                  <>
+                    <p className="text-pretty text-sm text-muted-foreground">
+                      {checks.progress.pendingCount.toLocaleString()} check
+                      payments worth{' '}
+                      {formatCurrency(checks.progress.pendingAmount)} have no
+                      payee, so cost of goods is incomplete
+                      {checks.readiness.unresolvedVsCogsRatio != null
+                        ? ` — ${checks.readiness.unresolvedVsCogsRatio.toFixed(1)}x the ${formatCurrency(checks.readiness.identifiedCogs)} identified`
+                        : ''}
+                      . A margin now would overstate profit.
+                    </p>
+                    <Link
+                      href="/check-resolution"
+                      className="text-sm font-medium underline"
+                    >
+                      Resolve checks
+                    </Link>
+                  </>
+                ) : checks.monthsMissingBankData.length > 0 ? (
+                  <p className="text-pretty text-sm text-muted-foreground">
+                    {checks.monthsMissingBankData.length}{' '}
+                    {checks.monthsMissingBankData.length === 1
+                      ? 'month has'
+                      : 'months have'}{' '}
+                    sales but no bank transactions imported, so their cost of
+                    goods is a fragment of what was really spent. Importing those
+                    statements is what makes a margin measurable.
+                  </p>
+                ) : (
+                  <p className="text-pretty text-sm text-muted-foreground">
+                    No month yet has complete sales, imported bank data and
+                    categorized cost of goods together, so any margin would be
+                    built on partial records.
+                  </p>
+                )}
               </div>
             )}
           </CardContent>

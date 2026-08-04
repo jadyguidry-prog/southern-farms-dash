@@ -350,8 +350,17 @@ export type CheckInsightInput = {
   grossProfitReady: boolean
   /** Largest same-amount groups, the fastest way to clear dollars. */
   topClusters: { amount: number; count: number; total: number; cadence: string | null }[]
-  /** Complete months that have sales but no COGS at all. */
+  /**
+   * Complete months with imported bank data and sales but no COGS categorized —
+   * a genuine categorization gap.
+   */
   monthsMissingCogs: string[]
+  /**
+   * Months with sales whose bank transactions were never imported. Separate from
+   * `monthsMissingCogs` because the remedy differs: these need an import, not
+   * categorization. Optional so existing callers keep working.
+   */
+  monthsMissingBankData?: string[]
   /**
    * How many unresolved checks carry a check number. Optional so existing
    * callers keep working. This matters because a numbered check can be looked up
@@ -713,6 +722,24 @@ export function generateInsights({
       title: 'Some complete months record sales but no cost of goods',
       detail: `${list.length} complete ${list.length === 1 ? 'month has' : 'months have'} Square sales but no cost-of-goods spend recorded at all (${list.join(', ')}). The shop plainly bought stock in ${list.length === 1 ? 'that month' : 'those months'}, so this is a categorization gap rather than a month without purchases. Any margin for ${list.length === 1 ? 'it' : 'them'} would read as almost pure profit, which would flatter the average across every window.`,
       impact: `${list.length} ${list.length === 1 ? 'month' : 'months'} without COGS`,
+    })
+  }
+
+  /*
+   * Months whose bank statements were never imported. A DIFFERENT insight from
+   * the categorization gap above, and deliberately so: telling the owner to
+   * categorize cost of goods in a month that contains no bank transactions sends
+   * them to do work that cannot be done. The remedy here is an import.
+   */
+  if (checks && (checks.monthsMissingBankData?.length ?? 0) > 0) {
+    const list = checks.monthsMissingBankData ?? []
+    out.push({
+      id: 'auto-checks-months-missing-bank-data',
+      severity: 'warning',
+      category: 'Expenses',
+      title: 'Some months have sales but no bank transactions imported',
+      detail: `${list.length} ${list.length === 1 ? 'month has' : 'months have'} Square sales but no deposits or bank spending on file (${list.join(', ')}) — only card statements reached ${list.length === 1 ? 'it' : 'them'}. Cost of goods for ${list.length === 1 ? 'that month' : 'those months'} is therefore a fragment of what was really spent, and a margin would compute to almost pure profit. This is an import gap, not a categorization one: there are no transactions there to categorize. Importing the missing bank statements also closes the matching hole in net cash movement.`,
+      impact: `${list.length} ${list.length === 1 ? 'month' : 'months'} without bank data`,
     })
   }
 

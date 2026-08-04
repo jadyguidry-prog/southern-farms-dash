@@ -144,6 +144,10 @@ export async function markPaid(
 const SETTING_LABELS: Record<string, { label: string; unit: string }> = {
   target_payroll_pct: { label: 'Target Payroll Percentage', unit: 'percent' },
   warning_payroll_pct: { label: 'Warning Payroll Percentage', unit: 'percent' },
+  target_gross_profit_pct: {
+    label: 'Target Gross Profit Percentage',
+    unit: 'percent',
+  },
   min_cash_reserve: { label: 'Target Minimum Cash Reserve', unit: 'currency' },
   preferred_weekly_sales: { label: 'Preferred Weekly Sales', unit: 'currency' },
   minimum_weekly_sales: { label: 'Minimum Weekly Sales', unit: 'currency' },

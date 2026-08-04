@@ -35,6 +35,12 @@ const FIELDS: FieldDef[] = [
     hint: 'Above this, the dashboard flags payroll in red.',
   },
   {
+    key: 'target_gross_profit_pct',
+    label: 'Gross Profit % Target',
+    unit: 'percent',
+    hint: 'The margin the Gross Profit gauge measures against.',
+  },
+  {
     key: 'min_cash_reserve',
     label: 'Min Cash Reserve',
     unit: 'currency',
