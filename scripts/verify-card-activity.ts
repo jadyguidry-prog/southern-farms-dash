@@ -17,6 +17,7 @@ import {
   checkCardBalance,
   typicalMonthlyCharges,
   formatOwedAmount,
+  describeCardTotal,
   type CardLedgerRow,
 } from '../lib/card-activity'
 
@@ -357,6 +358,66 @@ console.log('— formatOwedAmount never renders unknown as $0 —')
   check('undefined', formatOwedAmount(undefined), 'Not recorded')
   ok('a real zero still shows as money', formatOwedAmount(0).includes('0'))
   ok('and is not the words', formatOwedAmount(0) !== 'Not recorded')
+}
+
+// ---------------------------------------------------------------------------
+console.log('— describeCardTotal: the live "$0 headline" bug —')
+{
+  // THE ACTUAL BUG, caught by reading a screenshot rather than a text snapshot.
+  // Retired card 0-72001 has a genuine confirmed $0; the ACTIVE card 0-73009 has never
+  // had a balance entered. Summing only confirmed cards produced a headline "$0" on a
+  // business charging thousands a month, which reads as "paid off".
+  const t = describeCardTotal({
+    totalOwed: null,
+    confirmedSubtotal: 0,
+    confirmedCount: 1,
+    cardCount: 2,
+  })
+  ok('never a bare $0 headline', t.value !== '$0' && t.value !== '$0.00')
+  ok('says "At least"', t.value.startsWith('At least'))
+  ok('flags incompleteness', t.caveat.toLowerCase().includes('incomplete'))
+  ok('names how many are missing', t.caveat.includes('1 of 2'))
+  ok('not marked complete', t.isComplete === false)
+}
+
+// ---------------------------------------------------------------------------
+console.log('— describeCardTotal: complete vs empty —')
+{
+  // Whole dollars: formatCurrency rounds, so 4126.5 renders "$4,127". Asserting the
+  // rounded string rather than the raw input keeps this a test of behaviour.
+  const all = describeCardTotal({
+    totalOwed: 4126,
+    confirmedSubtotal: 4126,
+    confirmedCount: 2,
+    cardCount: 2,
+  })
+  ok('a real total is shown plainly', all.value.includes('4,126'), all.value)
+  ok('no "at least" hedge when complete', !all.value.includes('At least'))
+  ok('marked complete', all.isComplete === true)
+
+  const none = describeCardTotal({
+    totalOwed: null,
+    confirmedSubtotal: null,
+    confirmedCount: 0,
+    cardCount: 2,
+  })
+  check('nothing confirmed -> words, not $0', none.value, 'Not recorded')
+  ok('not marked complete', none.isComplete === false)
+}
+
+// ---------------------------------------------------------------------------
+console.log('— describeCardTotal: a genuine zero is still reportable —')
+{
+  // When EVERY card is confirmed at $0 the business really does owe nothing, and the
+  // function must not hedge that into "Not recorded" — the opposite failure.
+  const t = describeCardTotal({
+    totalOwed: 0,
+    confirmedSubtotal: 0,
+    confirmedCount: 2,
+    cardCount: 2,
+  })
+  ok('shows money', t.value !== 'Not recorded')
+  ok('and is complete', t.isComplete === true)
 }
 
 // ---------------------------------------------------------------------------

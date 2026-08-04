@@ -16,7 +16,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { EntityManager, type Column } from '@/components/cash-debt/entity-manager'
 import { getCashDebtSummary, getRawTable } from '@/lib/queries'
 import { getCardExposure } from '@/lib/card-exposure-service'
-import { formatOwedAmount as money } from '@/lib/card-activity'
+import { describeCardTotal } from '@/lib/card-activity'
 import { CardExposurePanel } from '@/components/cards/card-exposure-panel'
 import { getTableDef } from '@/lib/admin-config'
 import { formatCurrency } from '@/lib/data'
@@ -79,6 +79,10 @@ export default async function CashDebtPage() {
     getRawTable('receivables', receivableDef.orderBy ?? { column: 'created_at', ascending: true }),
     getRawTable('cash_obligations', obligationDef.orderBy ?? { column: 'created_at', ascending: true }),
   ])
+
+  // Shared with the exposure panel below, so the tile and the panel cannot disagree
+  // about what is owed or about how incomplete that figure is.
+  const cardTotal = describeCardTotal(cardExposure)
 
   const hasOverdue =
     summary.overdueObligationsCount > 0 || summary.overdueReceivablesCount > 0
@@ -177,15 +181,9 @@ export default async function CashDebtPage() {
             $0, because $0 reads as "paid off" on a card that runs thousands. */}
         <StatCard
           label="Credit Cards Owed"
-          value={money(cardExposure.totalOwed)}
+          value={cardTotal.value}
           icon={CreditCard}
-          hint={
-            cardExposure.totalOwed === null
-              ? 'No card balance confirmed yet'
-              : `${cardExposure.confirmedCount} of ${cardExposure.cardCount} ${
-                  cardExposure.cardCount === 1 ? 'card' : 'cards'
-                } confirmed`
-          }
+          hint={cardTotal.caveat}
         />
         <StatCard
           label="Upcoming Obligations"

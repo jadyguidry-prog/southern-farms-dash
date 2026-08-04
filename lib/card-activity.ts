@@ -40,6 +40,60 @@ export function formatOwedAmount(value: number | null | undefined): string {
 }
 
 /**
+ * How a card total and its caveat are worded, in ONE place.
+ *
+ * Exists because the panel and the Cash & Debt tile each rendered their own version of
+ * this and immediately disagreed. Two surfaces reading the same data are not
+ * automatically consistent — they are only consistent when they call the same
+ * function.
+ *
+ * A partial sum must never be shown as if it were the whole. The live bug: the retired
+ * card has a genuine confirmed $0 while the ACTIVE card's balance had never been
+ * entered, so a "confirmed cards only" sum rendered a headline "$0" on a business
+ * charging thousands a month — which reads as "paid off".
+ *
+ * - Every card confirmed -> the real total.
+ * - Some confirmed       -> "At least $X" plus how many are missing.
+ * - None confirmed       -> "Not recorded", never "$0".
+ */
+export function describeCardTotal(input: {
+  totalOwed: number | null
+  confirmedSubtotal: number | null
+  confirmedCount: number
+  cardCount: number
+}): { value: string; caveat: string; isComplete: boolean } {
+  const { totalOwed, confirmedSubtotal, confirmedCount, cardCount } = input
+  const cardWord = cardCount === 1 ? 'card' : 'cards'
+
+  if (totalOwed !== null) {
+    return {
+      value: formatCurrency(totalOwed),
+      caveat: `${confirmedCount} of ${cardCount} ${cardWord} confirmed`,
+      isComplete: true,
+    }
+  }
+
+  if (confirmedSubtotal !== null) {
+    const missing = cardCount - confirmedCount
+    return {
+      value: `At least ${formatCurrency(confirmedSubtotal)}`,
+      caveat: `Incomplete — ${missing} of ${cardCount} ${cardWord} ${
+        missing === 1 ? 'has' : 'have'
+      } no balance recorded`,
+      isComplete: false,
+    }
+  }
+
+  return {
+    value: formatOwedAmount(null),
+    caveat: `No balance confirmed on ${
+      cardCount === 1 ? 'the card' : 'any of the cards'
+    } yet`,
+    isComplete: false,
+  }
+}
+
+/**
  * One ledger row. A structural subset of `financial_transactions` so callers can
  * pass their rows straight in.
  *

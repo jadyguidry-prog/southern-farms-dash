@@ -121,6 +121,18 @@ export type CardExposure = {
   /** How many cards have a confirmed balance, and how many exist at all. */
   confirmedCount: number
   cardCount: number
+  /**
+   * Sum of amounts owed, but ONLY when every card has a confirmed balance. Null the
+   * moment any card is unrecorded, because a partial sum presented as the total is
+   * indistinguishable from a real total and understates debt.
+   */
+  // (declared above alongside the other aggregates; see confirmedSubtotal for the
+  // partial figure)
+  /**
+   * Sum across the cards that DO have a confirmed balance, even when others do not.
+   * Only safe to display next to an explicit "incomplete" qualifier.
+   */
+  confirmedSubtotal: number | null
   /** Cards whose recorded spending stops before the current month. */
   behindCount: number
   /**
@@ -220,10 +232,24 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
   })
 
   const confirmed = cards.filter((c) => c.owed !== null)
-  const totalOwed =
+
+  // A total built from SOME cards is not the total owed, and displaying it as one is
+  // how a real bug reached the screen: the retired 0-72001 card has a genuine
+  // confirmed $0 while the ACTIVE card's balance has never been entered, so summing
+  // only confirmed cards produced a headline "$0" on a business that charges
+  // thousands a month. Per-card handling was already correct; the aggregate was the
+  // liar.
+  //
+  // So the total is only a number when EVERY card is confirmed. When any card is
+  // missing, `totalOwed` stays null (rendered "Not recorded") and
+  // `confirmedSubtotal` carries the partial figure for callers that explicitly want
+  // to show "at least this much, and it is incomplete".
+  const allConfirmed = confirmed.length === cards.length && cards.length > 0
+  const confirmedSubtotal =
     confirmed.length > 0
       ? confirmed.reduce((s, c) => s + (c.owed as number), 0)
       : null
+  const totalOwed = allConfirmed ? confirmedSubtotal : null
 
   const lastActivityDate =
     activity.accounts.reduce<string | null>((latest, a) => {
@@ -301,6 +327,7 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
   return {
     cards,
     totalOwed,
+    confirmedSubtotal,
     confirmedCount: confirmed.length,
     cardCount: cardAccounts.length,
     behindCount: activity.behindCount,

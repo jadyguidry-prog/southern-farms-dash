@@ -26,7 +26,7 @@ import {
 } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { formatCurrency } from '@/lib/data'
-import { formatOwedAmount } from '@/lib/card-activity'
+import { formatOwedAmount, describeCardTotal } from '@/lib/card-activity'
 import type { CardExposure } from '@/lib/card-exposure-service'
 
 /**
@@ -82,6 +82,8 @@ export function CardExposurePanel({
     )
   }
 
+  const total = describeCardTotal(exposure)
+
   return (
     <Card className={className}>
       <CardHeader>
@@ -106,17 +108,11 @@ export function CardExposurePanel({
               Total Owed
             </p>
             <p className="mt-1 font-mono text-2xl font-bold tracking-tight text-foreground">
-              {money(exposure.totalOwed)}
+              {/* Wording comes from the shared describeCardTotal so this panel and the
+                  Cash & Debt tile cannot state the total differently. */}
+              {total.value}
             </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {exposure.totalOwed === null
-                ? `No balance confirmed on ${
-                    exposure.cardCount === 1 ? 'the card' : 'any of the cards'
-                  } yet`
-                : `${exposure.confirmedCount} of ${exposure.cardCount} ${
-                    exposure.cardCount === 1 ? 'card' : 'cards'
-                  } confirmed`}
-            </p>
+            <p className="mt-1 text-xs text-muted-foreground">{total.caveat}</p>
           </div>
           <div>
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
