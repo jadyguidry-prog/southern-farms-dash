@@ -182,6 +182,53 @@ export function nextDueAfterPayment(currentDue: string, frequency: string): stri
     .slice(0, 10)
 }
 
+/**
+ * The next UNPAID due date for a recurring obligation, derived from the schedule
+ * and the payment history rather than by mutating a stored field.
+ *
+ * Why this exists (the bug it replaces): the roll-forward used to do a single
+ * `addInterval(next_due_date)` on every payment. That is only correct when the
+ * stored `next_due_date` is EXACTLY the period being paid. The moment that field
+ * drifted ahead — a bill seeded a month early, a backfilled payment, a manual
+ * admin edit — each payment leapt a full interval past reality and permanently
+ * dropped a period from the forecast (Rent jumped Aug→Oct, skipping September;
+ * the whole month's outflow vanished from the 30-day chart).
+ *
+ * This is instead SELF-CORRECTING: it always starts from the schedule anchor
+ * (`due_date`) and walks forward to the first occurrence strictly after the last
+ * period actually paid. It does not trust the stored `next_due_date` at all, so a
+ * value that has already drifted is repaired the next time a payment is recorded
+ * rather than compounded.
+ *
+ * @param anchorDueDate the schedule anchor (the obligation's `due_date`)
+ * @param frequency     recurrence; unknown values fall back to Monthly
+ * @param paidThrough   the latest non-void payment date, or null when the bill
+ *                      has never been paid — in which case the first unpaid
+ *                      period is the anchor itself, NOT one interval past it
+ */
+export function nextScheduledDueDate(
+  anchorDueDate: string,
+  frequency: string,
+  paidThrough: string | null,
+): string {
+  if (!anchorDueDate) return ''
+  const start = new Date(anchorDueDate + 'T00:00:00')
+  if (Number.isNaN(start.getTime())) return ''
+  // Never paid → the anchor is the next thing owed. Advancing here would recreate
+  // the exact "skip a period" bug for a brand-new obligation.
+  if (!paidThrough) return anchorDueDate
+
+  let due = anchorDueDate
+  // ISO dates are zero-padded, so lexical <= is a correct date comparison. The cap
+  // stops a bad frequency (or a non-advancing step) from ever spinning forever.
+  for (let i = 0; i < 600 && due <= paidThrough; i++) {
+    const next = nextDueAfterPayment(due, frequency)
+    if (!next || next <= due) break
+    due = next
+  }
+  return due
+}
+
 export type ClearingSuggestion = {
   paymentId: string
   transactionId: string

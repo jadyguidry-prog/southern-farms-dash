@@ -17,6 +17,7 @@ import {
   deriveOutstandingCash,
   buildClearingSuggestions,
   nextDueAfterPayment,
+  nextScheduledDueDate,
   CLEAR_WINDOW_DAYS,
   type ObligationPayment,
   type TxnRow,
@@ -167,6 +168,41 @@ ok(
   'the advanced date is always strictly later than the paid one',
   nextDueAfterPayment('2026-07-01', 'Monthly') > '2026-07-01',
 )
+
+console.log('\nSchedule-anchored next due (self-correcting; the skip-a-month bug)')
+// The exact regression: Rent anchored Aug 1, August paid on the 4th. The old
+// single-step from a next_due_date that had drifted to Sep 1 produced Oct 1 and
+// silently dropped September. Anchored on due_date, the answer is Sep 1.
+check(
+  'paying the current period rolls to exactly the next one',
+  nextScheduledDueDate('2026-08-01', 'Monthly', '2026-08-04'),
+  '2026-09-01',
+)
+check(
+  'a never-paid bill is due at its anchor, NOT one interval past it',
+  nextScheduledDueDate('2026-08-01', 'Monthly', null),
+  '2026-08-01',
+)
+check(
+  'the last paid period drives it, not a drifted stored date (Electric)',
+  nextScheduledDueDate('2026-08-28', 'Monthly', '2026-07-28'),
+  '2026-08-28',
+)
+check(
+  'several months of backfill land on the first unpaid period, no skips',
+  nextScheduledDueDate('2026-01-15', 'Monthly', '2026-07-20'),
+  '2026-08-15',
+)
+check(
+  'weekly cadence advances past the paid week only',
+  nextScheduledDueDate('2026-07-01', 'Weekly', '2026-07-01'),
+  '2026-07-08',
+)
+ok(
+  'the result is always strictly after the paid-through date',
+  nextScheduledDueDate('2026-08-28', 'Monthly', '2026-07-28') > '2026-07-28',
+)
+check('a missing anchor yields no date rather than a guess', nextScheduledDueDate('', 'Monthly', '2026-07-01'), '')
 
 console.log('\nBank match suggestions (suggested only, never auto-applied)')
 check('no checks means no suggestions', buildClearingSuggestions([], [txn()]), [])

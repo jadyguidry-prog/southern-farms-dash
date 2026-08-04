@@ -13,7 +13,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
-import { nextDueAfterPayment, getAchReconcileMatches } from '@/lib/bill-pay-service'
+import { nextScheduledDueDate, getAchReconcileMatches } from '@/lib/bill-pay-service'
 import { validatePaymentBasics } from '@/lib/bill-pay-shared'
 
 type ActionResult = { ok: boolean; error?: string; paymentId?: string }
@@ -116,12 +116,30 @@ export async function recordPayment(input: RecordPaymentInput): Promise<ActionRe
   })
 
   // Roll a recurring obligation forward so it stays in the forecast at its next
-  // due date, using the shared pure helper (regression-tested in
-  // scripts/verify-bill-pay.ts) rather than duplicating the date math here.
+  // due date. Derived from the schedule anchor + the full payment history (see
+  // nextScheduledDueDate) rather than by incrementing the stored next_due_date —
+  // the old approach skipped a whole period whenever that field had drifted ahead.
   if (input.rollForward && obligation.recurring) {
-    const current = obligation.next_due_date || obligation.due_date || input.paymentDate
-    const nextDue = nextDueAfterPayment(current, obligation.frequency || 'Monthly')
-    if (nextDue) {
+    // Latest non-void payment INCLUDING the one just inserted, so the schedule
+    // lands on the first genuinely unpaid period no matter what next_due_date says.
+    const { data: paidRows } = await supabase
+      .from('obligation_payments')
+      .select('payment_date')
+      .eq('obligation_id', obligationId)
+      .neq('status', 'void')
+    const paidThrough =
+      (paidRows ?? [])
+        .map((p) => (p.payment_date ?? '').slice(0, 10))
+        .filter(Boolean)
+        .sort()
+        .pop() ?? input.paymentDate
+    const anchor = obligation.due_date || obligation.next_due_date || input.paymentDate
+    const nextDue = nextScheduledDueDate(
+      anchor,
+      obligation.frequency || 'Monthly',
+      paidThrough,
+    )
+    if (nextDue && nextDue !== obligation.next_due_date) {
       const { error: rollErr } = await supabase
         .from('cash_obligations')
         .update({ next_due_date: nextDue })
@@ -230,27 +248,19 @@ export async function reconcileAchFromBank(): Promise<ReconcileResult> {
     if (!prev || m.postedDate > prev) latestPosted.set(m.obligationId, m.postedDate)
   }
 
-  // Advance each bill's next due date past the newest debit we just reconciled —
-  // but only forward. Backfilled past periods (next_due already in the future)
-  // leave the schedule untouched, which is correct: the next unpaid period is
-  // still ahead. Non-fatal if it fails; the payments are already saved.
+  // Advance each bill's next due date past the newest debit we just reconciled.
+  // Uses the same schedule-anchored helper as the manual path, so a next_due_date
+  // that had already drifted ahead is corrected here too rather than left stale.
+  // Non-fatal if it fails; the payments are already saved.
   for (const [obligationId, posted] of latestPosted) {
     const ob = obligationById.get(obligationId)
     if (!ob) continue
-    let due = ob.next_due_date || ob.due_date || ''
-    if (!due) continue
-    let advanced = false
-    // Guard the loop against a bad frequency that never advances the date.
-    for (let i = 0; i < 240 && due <= posted; i++) {
-      const next = nextDueAfterPayment(due, ob.frequency || 'Monthly')
-      if (!next || next <= due) break
-      due = next
-      advanced = true
-    }
-    if (advanced) {
+    const anchor = ob.due_date || ob.next_due_date || ''
+    const nextDue = nextScheduledDueDate(anchor, ob.frequency || 'Monthly', posted)
+    if (nextDue && nextDue !== ob.next_due_date) {
       await supabase
         .from('cash_obligations')
-        .update({ next_due_date: due })
+        .update({ next_due_date: nextDue })
         .eq('id', obligationId)
     }
   }
