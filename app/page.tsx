@@ -403,7 +403,21 @@ export default async function DashboardPage() {
                 <RadialStat
                   value={quotableMonth.marginPct}
                   max={60}
-                  color="var(--chart-2)"
+                  /*
+                    Colored by the verdict, matching the payroll gauge beside it.
+                    It was pinned to a fixed red, so a margin 11.4% ABOVE target
+                    drew as an alarm while the caption underneath read "Above
+                    target" — the dial and the words disagreed.
+                  */
+                  color={
+                    HEALTH_COLOR[
+                      quotableMonth.marginPct >= gpTarget
+                        ? 'green'
+                        : quotableMonth.marginPct >= gpTarget - 5
+                          ? 'yellow'
+                          : 'red'
+                    ]
+                  }
                   label="margin"
                   centerText={formatPercent(quotableMonth.marginPct)}
                 />

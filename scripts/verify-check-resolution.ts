@@ -25,6 +25,8 @@ import {
   isCogsCategory,
   deriveMonthlyCogs,
   grossProfitReadiness,
+  marginWithheldReason,
+  marginWithheldLabel,
 } from '../lib/check-resolution-service'
 import { generateInsights, payrollHealth, type CheckInsightInput } from '../lib/health'
 import { SETTING_DEFAULTS } from '../lib/queries'
@@ -404,6 +406,20 @@ eq(
   'bank guard: incomplete sales outrank the cost-side reasons',
 )
 
+// The predicate is tested directly too, so a caller that assembles a month by
+// hand gets the same verdict the engine's own pass produces.
+eq(
+  marginWithheldReason({
+    netSales: 0,
+    salesComplete: true,
+    bankDataComplete: true,
+    totalCogs: 5000,
+    unresolvedCheckAmount: 0,
+  }),
+  'no-sales',
+  'bank guard: a month with costs but no sales cannot carry a margin',
+)
+
 // Every reason must have a human label — a missing case would render blank.
 for (const reason of [
   'no-sales',
@@ -500,6 +516,37 @@ ok(missing != null, 'advisor: months with sales but no COGS are raised')
 ok(
   /categorization gap/i.test(missing?.detail ?? ''),
   'advisor: names it a categorization gap rather than implying no purchases',
+)
+
+// Months with no bank data imported must raise their OWN insight, separate from
+// the categorization gap. Sending the owner to categorize a month that contains
+// no transactions is work that cannot be done.
+const bankGapInsights = generateInsights({
+  settings,
+  pillars,
+  checks: { ...checkInsight, monthsMissingBankData: ['2026-01', '2026-02', '2026-03'] },
+})
+const bankGap = bankGapInsights.find(
+  (i) => i.id === 'auto-checks-months-missing-bank-data',
+)
+ok(bankGap != null, 'advisor: months without imported bank data are raised')
+ok(
+  /import/i.test(bankGap?.detail ?? ''),
+  'advisor: names importing as the remedy, not categorizing',
+)
+ok(
+  !/categoriz(e|ation) (them|gap)/i.test(bankGap?.detail ?? ''),
+  'advisor: does not tell the owner to categorize a month with no transactions',
+)
+ok(
+  bankGap?.id !== bankGapInsights.find((i) => i.id === 'auto-checks-months-missing-cogs')?.id,
+  'advisor: the import gap and the categorization gap are distinct insights',
+)
+
+// Absent list must produce no insight — never an empty-list warning.
+ok(
+  !insights.some((i) => i.id === 'auto-checks-months-missing-bank-data'),
+  'advisor: no bank-data insight when every month has bank data',
 )
 
 // Below-parity ratio should warn rather than escalate.
@@ -610,7 +657,36 @@ async function reconcile() {
     reviewStatus: (r.review_status ?? '').trim(),
   }))
 
-  const months = deriveMonthlyCogs(prepared, [])
+  /*
+   * The REAL resolutions must be loaded and passed in. This block previously
+   * passed `[]`, which counted all 58 overlay-resolved checks as still open and
+   * made the printed readiness verdict ($73,815 unresolved / 22%) disagree with
+   * what the page actually computes ($51,572 / 15%). A script that re-implements
+   * the page's data assembly drifts from it, and this one drifted far enough to
+   * misstate how much work was left by $22,000.
+   */
+  const liveResRows = await all<Record<string, unknown>>(
+    'check_resolutions',
+    'financial_transaction_id, check_number, resolved_payee, resolved_vendor_id, resolved_category, memo, business_purpose, review_status, confidence, resolution_source, reviewed_by, reviewed_at, bulk_action_id',
+  )
+  const liveResolutions: CheckResolution[] = liveResRows.map((r) => ({
+    financialTransactionId: String(r.financial_transaction_id ?? ''),
+    checkNumber: (r.check_number as string | null) ?? null,
+    resolvedPayee: (r.resolved_payee as string | null) ?? null,
+    resolvedVendorId: (r.resolved_vendor_id as string | null) ?? null,
+    resolvedCategory: (r.resolved_category as string | null) ?? null,
+    memo: (r.memo as string | null) ?? null,
+    businessPurpose: (r.business_purpose as string | null) ?? null,
+    reviewStatus: String(r.review_status ?? ''),
+    confidence: (r.confidence as string | null) ?? null,
+    resolutionSource: (r.resolution_source as string | null) ?? null,
+    reviewedBy: (r.reviewed_by as string | null) ?? null,
+    reviewedAt: (r.reviewed_at as string | null) ?? null,
+    bulkActionId: (r.bulk_action_id as string | null) ?? null,
+  })) as CheckResolution[]
+  const approvedLive = liveResolutions.filter((r) => r.reviewStatus === 'approved')
+
+  const months = deriveMonthlyCogs(prepared, approvedLive)
   const baseTotal = months.reduce((s, m) => s + m.baseCogs, 0)
   const unresolvedTotal = months.reduce((s, m) => s + m.unresolvedCheckAmount, 0)
   const directCogs = prepared
@@ -626,8 +702,9 @@ async function reconcile() {
    * answered. So reconcile against a direct sum of the checks that are genuinely
    * still open, using the shared predicate.
    */
+  const approvedById = new Map(approvedLive.map((r) => [r.financialTransactionId, r]))
   const directUnresolved = liveChecks
-    .filter((r) => checkResolvedVia(r, undefined) === 'unresolved')
+    .filter((r) => checkResolvedVia(r, approvedById.get(r.id)) === 'unresolved')
     .reduce((s, r) => s + r.amount, 0)
   approx(
     unresolvedTotal,
@@ -639,7 +716,7 @@ async function reconcile() {
   // The stronger property: every check dollar is either open or answered, never
   // both and never neither. This is what actually prevents the double-count the
   // old assertion was reaching for.
-  const progress = checkResolutionProgress(liveChecks, [], isCogsCategory)
+  const progress = checkResolutionProgress(liveChecks, liveResolutions, isCogsCategory)
   approx(
     progress.overlayAmount +
       progress.categorizedAmount +
@@ -711,8 +788,11 @@ async function reconcile() {
   const clusters = suggestCheckGroups(liveChecks).filter((s) => s.kind === 'amount-cluster')
   ok(clusters.length > 0, 'live: real repeating amounts are detected')
 
+  // `directChecks` is EVERY check dollar, resolved or not — it was previously
+  // printed as "unattributed", which overstated the backlog by the $249K already
+  // answered. Both figures are now labelled for what they are.
   console.log(
-    `\nLive data: ${liveChecks.length} checks, $${directChecks.toFixed(2)} unattributed against $${directCogs.toFixed(2)} categorized COGS (${(directChecks / directCogs).toFixed(2)}x).`,
+    `\nLive data: ${liveChecks.length} checks totalling $${directChecks.toFixed(2)}, of which $${directUnresolved.toFixed(2)} is still unattributed, against $${directCogs.toFixed(2)} of directly categorized COGS.`,
   )
   console.log(`Resolutions on file: ${resCount ?? 0}. Audit entries: ${auditCount ?? 0}.`)
   console.log(`Top clusters: ${clusters.slice(0, 3).map((c) => `${c.count}x $${(c.total / c.count).toFixed(2)}`).join(', ')}.`)
