@@ -18,6 +18,7 @@ import {
   buildClearingSuggestions,
   nextDueAfterPayment,
   nextScheduledDueDate,
+  buildForecastMovements,
   CLEAR_WINDOW_DAYS,
   type ObligationPayment,
   type TxnRow,
@@ -656,6 +657,66 @@ console.log('\nAutopay/ACH auto-reconcile from the bank feed')
     )
     ok('a future-dated or long-past debit is not reconciled', m.length === 0)
   }
+}
+
+console.log('\nForecast movements (outstanding payments included, never double-counted)')
+{
+  const net = (ms: { amount: number }[]) => ms.reduce((s, m) => s + m.amount, 0)
+
+  // An outstanding payment tied to a recurring bill SUPERSEDES that bill's generic
+  // scheduled outflow — otherwise the rent would be subtracted twice.
+  const noDouble = buildForecastMovements({
+    obligations: [
+      { id: 'rent', name: 'Rent', amount: 2811, effectiveDueDate: '2026-08-15' },
+    ],
+    receivables: [],
+    payments: [
+      { obligationId: 'rent', name: 'Rent', amount: 2811, date: '2026-08-04', status: 'outstanding' },
+    ],
+  })
+  check('a covered obligation is suppressed (one movement, not two)', noDouble.length, 1)
+  check('the surviving movement is the real payment, on its real date', noDouble[0].date, '2026-08-04')
+  check('rent is counted once, not twice', net(noDouble), -2811)
+
+  // A one-off payment (no obligation behind it) can never collide, so it is always added.
+  const oneOff = buildForecastMovements({
+    obligations: [{ id: 'rent', name: 'Rent', amount: 2811, effectiveDueDate: '2026-08-15' }],
+    receivables: [],
+    payments: [
+      { obligationId: null, name: 'Sysco', amount: 5026, date: '2026-08-05', status: 'outstanding' },
+    ],
+  })
+  check('a one-off payment and an unrelated obligation both count', oneOff.length, 2)
+  check('their outflows sum correctly', net(oneOff), -(2811 + 5026))
+
+  // cleared / void payments never reach the forecast; cleared is already in cash-on-hand.
+  const filtered = buildForecastMovements({
+    obligations: [],
+    receivables: [],
+    payments: [
+      { obligationId: null, name: 'Paid', amount: 500, date: '2026-08-06', status: 'cleared' },
+      { obligationId: null, name: 'Voided', amount: 900, date: '2026-08-06', status: 'void' },
+      { obligationId: null, name: 'Live', amount: 200, date: '2026-08-06', status: 'outstanding' },
+    ],
+  })
+  check('only the outstanding payment survives', filtered.length, 1)
+  check('cleared and void contribute nothing', net(filtered), -200)
+
+  // Receivables are positive; a net day mixes both directions.
+  const mixed = buildForecastMovements({
+    obligations: [{ id: 'e', name: 'Electric', amount: 300, effectiveDueDate: '2026-08-28' }],
+    receivables: [{ name: 'Big Customer', outstanding: 1000, date: '2026-08-28' }],
+    payments: [],
+  })
+  check('an inflow and an outflow on one day net out', net(mixed), 700)
+
+  // Undated obligations and non-positive receivables are silently skipped.
+  const skips = buildForecastMovements({
+    obligations: [{ id: 'x', name: 'No date', amount: 999, effectiveDueDate: '' }],
+    receivables: [{ name: 'Fully paid', outstanding: 0, date: '2026-08-10' }],
+    payments: [],
+  })
+  check('undated obligation and zero-balance receivable produce nothing', skips.length, 0)
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`)

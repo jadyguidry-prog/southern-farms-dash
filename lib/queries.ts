@@ -20,7 +20,12 @@ import {
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
 import { getLaborHealthSnapshot } from '@/lib/labor-service'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
-import { getOutstandingCheckSummary, getBillPaySnapshot } from '@/lib/bill-pay-service'
+import {
+  getOutstandingCheckSummary,
+  getBillPaySnapshot,
+  getObligationPayments,
+  buildForecastMovements,
+} from '@/lib/bill-pay-service'
 
 // ---------- Types ----------
 export type KpiRow = {
@@ -129,16 +134,55 @@ export function asTrend(v: string | null): 'up' | 'down' | undefined {
 
 /**
  * A 30-day daily cash projection derived from live records: today's cash on
- * hand, obligations on their resolved due dates (outflows), and receivables on
- * their expected payment dates (inflows). Nothing is stored or hardcoded, so it
- * always reflects the current state of the books.
+ * hand, obligations on their resolved due dates (outflows), scheduled-but-not-yet
+ * cleared payments on their payment dates (outflows), and receivables on their
+ * expected payment dates (inflows). Nothing is stored or hardcoded, so it always
+ * reflects the current state of the books.
+ *
+ * Outstanding payments were previously omitted entirely, so a whole month of
+ * already-committed disbursements (Sysco, Quirch, the rent check, etc.) never
+ * appeared and the line looked deceptively flat. They are included here through
+ * the shared buildForecastMovements helper, which also suppresses an obligation's
+ * generic scheduled outflow when a real payment already covers it — so the two
+ * can never double-count the same money.
+ *
+ * Base is cashOnHand (the raw bank balance), NOT cashAvailable: cashAvailable has
+ * already subtracted outstanding checks, and the forecast subtracts them again as
+ * dated movements. Starting from cashAvailable would double-count every open check.
  */
 export async function getCashForecast() {
-  const summary = await getCashDebtSummary()
+  const [summary, payments] = await Promise.all([
+    getCashDebtSummary(),
+    getObligationPayments(),
+  ])
 
   const now = new Date()
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const dayKey = (d: Date) => d.toISOString().slice(0, 10)
+
+  const forecastMovements = buildForecastMovements({
+    obligations: summary.scheduledObligations.map((o) => ({
+      id: o.id ?? null,
+      name: o.obligationName,
+      amount: o.amount,
+      effectiveDueDate: o.effectiveDueDate,
+    })),
+    receivables: summary.receivables
+      .filter((r) => r.status !== 'Paid')
+      .map((r) => ({
+        name: r.customerName,
+        outstanding: r.amount - r.amountPaid,
+        // Fall back to the invoice due date when no expected date is set.
+        date: r.expectedPaymentDate || r.dueDate,
+      })),
+    payments: payments.map((p) => ({
+      obligationId: p.obligationId,
+      name: p.payeeName || 'Scheduled payment',
+      amount: p.amount,
+      date: p.paymentDate,
+      status: p.status,
+    })),
+  })
 
   // Bucket each dated cash movement onto the day it lands.
   const movements = new Map<string, number>()
@@ -147,16 +191,8 @@ export async function getCashForecast() {
     movements.set(date, (movements.get(date) ?? 0) + amount)
   }
 
-  for (const o of summary.scheduledObligations) {
-    add(o.effectiveDueDate, -o.amount)
-  }
-
-  for (const r of summary.receivables) {
-    if (r.status === 'Paid') continue
-    const outstanding = r.amount - r.amountPaid
-    if (outstanding <= 0) continue
-    // Fall back to the invoice due date when no expected date is set.
-    add(r.expectedPaymentDate || r.dueDate, outstanding)
+  for (const m of forecastMovements) {
+    add(m.date, m.amount)
   }
 
   // Anything already past due is treated as landing today.

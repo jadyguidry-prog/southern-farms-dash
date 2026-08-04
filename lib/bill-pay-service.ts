@@ -229,6 +229,109 @@ export function nextScheduledDueDate(
   return due
 }
 
+/**
+ * A dated cash movement for the forecast: negative for money out, positive for
+ * money in. Kept as a flat list so the daily-balance walk in getCashForecast has
+ * no business logic left in it.
+ */
+export type ForecastMovement = {
+  date: string
+  amount: number
+  label: string
+  kind: 'obligation' | 'payment' | 'receivable'
+}
+
+export type ForecastObligationInput = {
+  id: string | null
+  name: string
+  amount: number
+  /** The resolved next due date; empty when undated (excluded from the forecast). */
+  effectiveDueDate: string
+}
+
+export type ForecastReceivableInput = {
+  name: string
+  outstanding: number
+  date: string
+}
+
+export type ForecastPaymentInput = {
+  obligationId: string | null
+  name: string
+  amount: number
+  date: string
+  status: PaymentStatus
+}
+
+/**
+ * Assemble every dated cash movement for the forecast from live records, WITHOUT
+ * double-counting.
+ *
+ * The trap this is built around: a recurring obligation contributes an outflow on
+ * its next due date, and an `outstanding` payment ALSO contributes an outflow on
+ * its payment date. When a payment is a scheduled disbursement against a recurring
+ * bill, those are two views of the SAME money — counting both would overstate
+ * outflow by the bill's amount.
+ *
+ * Resolution: an outstanding payment is the committed, specific event and always
+ * wins. When such a payment is linked to an obligation, that obligation's
+ * scheduled outflow is suppressed for this window — the payment already represents
+ * it, on the real date it will clear rather than the generic due date. Obligations
+ * with no linked outstanding payment fall through unchanged. One-off payments
+ * (no obligationId) can never collide, so they are added directly.
+ *
+ * Only `outstanding` payments are included. `cleared` ones have already left the
+ * bank and are baked into cash-on-hand; `void` ones never happened.
+ */
+export function buildForecastMovements(input: {
+  obligations: ForecastObligationInput[]
+  receivables: ForecastReceivableInput[]
+  payments: ForecastPaymentInput[]
+}): ForecastMovement[] {
+  const movements: ForecastMovement[] = []
+
+  const outstanding = input.payments.filter((p) => p.status === 'outstanding')
+
+  // Which obligations are already represented by a committed payment, so their
+  // generic scheduled outflow must not ALSO be added.
+  const coveredObligationIds = new Set(
+    outstanding.map((p) => p.obligationId).filter((id): id is string => Boolean(id)),
+  )
+
+  for (const o of input.obligations) {
+    if (!o.effectiveDueDate) continue // undated: reported elsewhere, not projectable
+    if (o.id && coveredObligationIds.has(o.id)) continue // superseded by a real payment
+    movements.push({
+      date: o.effectiveDueDate,
+      amount: -Math.abs(o.amount),
+      label: o.name,
+      kind: 'obligation',
+    })
+  }
+
+  for (const p of outstanding) {
+    if (!p.date) continue
+    movements.push({
+      date: p.date,
+      amount: -Math.abs(p.amount),
+      label: p.name,
+      kind: 'payment',
+    })
+  }
+
+  for (const r of input.receivables) {
+    if (!r.date || r.outstanding <= 0) continue
+    movements.push({
+      date: r.date,
+      amount: Math.abs(r.outstanding),
+      label: r.name,
+      kind: 'receivable',
+    })
+  }
+
+  return movements
+}
+
 export type ClearingSuggestion = {
   paymentId: string
   transactionId: string
