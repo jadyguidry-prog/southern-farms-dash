@@ -87,14 +87,32 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
   // wording. Telling the owner "nothing spare to spend this week" because of a payment
   // due on the 18th would contradict the headline directly above it, which is exactly how
   // two panels using different standards end up looking broken.
-  const breachIsNearTerm = breachesReserve && lowestBalanceDate <= lastNearTermDate
+  //
+  // Comes from the engine, which tracks the two windows separately. Deriving it here by
+  // testing the horizon low point's date against the window was wrong: when cash dipped
+  // under the reserve on day 6 AND fell further weeks later, only the distant warning
+  // rendered and the immediate one vanished.
+  const breachIsNearTerm = capacity.breachesReserveNearTerm
 
   // Dated events beyond the spendable window — the cliff the old 7-day view could not see.
-  const comingUp = days
+  //
+  // Only `kind === 'dated'`. The spread estimate recurs EVERY day, so including it produced
+  // ~23 identical "Day-to-day running costs" rows that buried the single $9,948 payment
+  // this section exists to surface. Largest first, and capped, because the purpose is to
+  // show what could hurt — not to reproduce the whole ledger.
+  const datedAfterWindow = days
     .filter((d) => d.date > lastNearTermDate)
-    .flatMap((d) => d.items.map((i) => ({ ...i, date: d.date, balance: d.cautiousBalance })))
-    .filter((i) => i.amount > 0)
-    .sort((a, b) => (a.date < b.date ? -1 : 1))
+    .flatMap((d) => d.items.map((i) => ({ ...i, date: d.date })))
+    .filter((i) => i.kind === 'dated' && i.amount > 0)
+    .sort((a, b) => b.amount - a.amount)
+
+  const COMING_UP_LIMIT = 6
+  const comingUp = datedAfterWindow.slice(0, COMING_UP_LIMIT)
+  const comingUpHidden = datedAfterWindow.length - comingUp.length
+  // Stated as a total so a truncated list can't imply the hidden rows are trivial.
+  const comingUpHiddenTotal = datedAfterWindow
+    .slice(COMING_UP_LIMIT)
+    .reduce((s, i) => s + i.amount, 0)
 
   // With no reserve configured, this figure is what it takes to run the account to
   // zero. That is a legitimate calculation but reckless advice to present bare, so
@@ -149,20 +167,23 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
               </div>
             </div>
 
-            {breachesReserve && breachIsNearTerm ? (
+            {breachIsNearTerm ? (
               <div className="mt-4 flex gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
                 <TriangleAlert
                   className="size-4 shrink-0 text-destructive"
                   aria-hidden
                 />
+                {/* Near-term figures, not horizon ones: this banner is about the window
+                    the headline covers, so quoting a low point from weeks later would
+                    attach an unrelated date to "this week". */}
                 <p className="text-sm text-foreground text-pretty">
                   On a slow week your cash dips to{' '}
                   <span className="font-medium tabular-nums">
-                    {formatCurrency(lowestBalance)}
+                    {formatCurrency(capacity.nearTermLowestBalance)}
                   </span>{' '}
-                  by {dayLabel(lowestBalanceDate)} &mdash;{' '}
+                  by {dayLabel(capacity.nearTermLowestBalanceDate)} &mdash;{' '}
                   <span className="font-medium tabular-nums">
-                    {formatCurrency(reserveShortfall)}
+                    {formatCurrency(capacity.nearTermReserveShortfall)}
                   </span>{' '}
                   under your {formatCurrency(minCashReserve)} reserve. There is
                   nothing spare to spend this week.
@@ -170,15 +191,19 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
               </div>
             ) : null}
 
-            {breachesReserve && !breachIsNearTerm ? (
+            {/* Shown whenever the horizon gets materially worse than the window already
+                is — not only when the window is clean. Both can be true at once, and
+                suppressing this one in that case hid the larger, later cliff. */}
+            {breachesReserve && lowestBalance < capacity.nearTermLowestBalance ? (
               <div className="mt-4 flex gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
                 <TriangleAlert
                   className="size-4 shrink-0 text-destructive"
                   aria-hidden
                 />
                 <p className="text-sm text-foreground text-pretty">
-                  Spendable today, but not for long: on a slow week your cash falls
-                  to{' '}
+                  {breachIsNearTerm
+                    ? 'It gets worse beyond this week: on a slow week your cash falls to '
+                    : 'Spendable today, but not for long: on a slow week your cash falls to '}
                   <span className="font-medium tabular-nums">
                     {formatCurrency(lowestBalance)}
                   </span>{' '}
@@ -186,13 +211,26 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                   <span className="font-medium tabular-nums">
                     {formatCurrency(reserveShortfall)}
                   </span>{' '}
-                  under your {formatCurrency(minCashReserve)} reserve. The figure
-                  above only looks {nearTermDays} days ahead, so it does not yet
-                  account for that. Hold back at least{' '}
-                  <span className="font-medium tabular-nums">
-                    {formatCurrency(reserveShortfall)}
-                  </span>{' '}
-                  of it.
+                  under your {formatCurrency(minCashReserve)} reserve.{' '}
+                  {/* "Hold back X of it" is only coherent when there is something to hold
+                      back. At $0 spendable the shortfall has to be closed by bringing money
+                      in, so telling the owner to withhold cash they do not have would be
+                      advice they cannot act on. */}
+                  {breachIsNearTerm ? (
+                    <>
+                      Closing that gap needs money coming in, not just spending less
+                      &mdash; there is nothing spare to hold back.
+                    </>
+                  ) : (
+                    <>
+                      The figure above only looks {nearTermDays} days ahead, so it does
+                      not yet account for that. Hold back at least{' '}
+                      <span className="font-medium tabular-nums">
+                        {formatCurrency(reserveShortfall)}
+                      </span>{' '}
+                      of it.
+                    </>
+                  )}
                 </p>
               </div>
             ) : null}
@@ -311,8 +349,9 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                   Coming up after day {nearTermDays}
                 </h4>
                 <p className="mt-1 text-xs text-muted-foreground text-pretty">
-                  Known payments beyond the window above. These are already counted in
-                  the low point, but not in today&apos;s spendable figure.
+                  Known payments beyond the window above, largest first. These are already
+                  counted in the low point, but not in today&apos;s spendable figure. Regular
+                  day-to-day running costs are excluded here since they apply every day.
                 </p>
                 <ul className="mt-2 divide-y divide-border">
                   {comingUp.map((i) => (
@@ -332,6 +371,16 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                     </li>
                   ))}
                 </ul>
+                {comingUpHidden > 0 ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Plus {comingUpHidden} smaller{' '}
+                    {comingUpHidden === 1 ? 'payment' : 'payments'} totalling{' '}
+                    <span className="tabular-nums">
+                      {formatCurrency(comingUpHiddenTotal)}
+                    </span>
+                    , also included in the low point.
+                  </p>
+                ) : null}
               </div>
             ) : null}
 
@@ -340,7 +389,7 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
               {formatCurrency(estimate.cautiousInflow)} coming in per week; a
               typical week is {formatCurrency(estimate.typicalInflow)}. Starting
               cash is {formatCurrency(cashOnHand)} across your operating accounts,
-              and your reserve of {formatCurrency(minCashReserve)} is held back.
+              and your reserve of {formatCurrency(minCashReserve)} is held back.{' '}
               Card balances are not counted as cash, since borrowing is not money you
               have &mdash; but{' '}
               {cardPayments.length > 0

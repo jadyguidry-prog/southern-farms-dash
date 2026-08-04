@@ -289,8 +289,16 @@ export type ForecastDay = {
   typicalIn: number
   /** Everything expected to leave that day. */
   moneyOut: number
-  /** Named items making up `moneyOut`, for the "why" explanation. */
-  items: { label: string; amount: number }[]
+  /**
+   * Named items making up `moneyOut`, for the "why" explanation.
+   *
+   * `kind` separates a KNOWN dated obligation from the spread estimate. The UI needs this
+   * to list real upcoming payments without repeating "Day-to-day running costs" once per
+   * day — 20-odd identical estimate rows bury the one payment that matters. Tagged at the
+   * source rather than matched on the label text in the UI, so renaming the label can
+   * never silently reclassify the estimate as a known payment.
+   */
+  items: { label: string; amount: number; kind: 'dated' | 'estimate' }[]
   /** Running balance on the cautious basis — the one used for the headline. */
   cautiousBalance: number
   /** Running balance on a typical week. */
@@ -351,6 +359,14 @@ export type CapacityResult = {
    * the way a ladder marked "Tight" once sat beside a headline of $0 with no explanation.
    */
   nearTermLowestBalance: number
+  nearTermLowestBalanceDate: string
+  /**
+   * True when the cautious projection dips under the reserve WITHIN the headline window.
+   * Tracked separately from `breachesReserve` (the full horizon) because both can be true
+   * at once and they call for different wording.
+   */
+  breachesReserveNearTerm: boolean
+  nearTermReserveShortfall: number
   /** Days of projection actually produced. */
   horizonDays: number
   /** Days the headline considered. */
@@ -398,13 +414,21 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
   let lowestBalance = Number.POSITIVE_INFINITY
   let lowestBalanceDate = today
   let nearTermLowestBalance = Number.POSITIVE_INFINITY
+  let nearTermLowestBalanceDate = today
 
-  // Always project far enough to include every dated outflow. A known payment sitting one
-  // day past the horizon is invisible, which is the exact failure being fixed here — so
-  // the horizon stretches to cover it rather than trusting the setting to be big enough.
-  const furthestDated = [...dated.keys()].sort().at(-1) ?? today
-  let span = Math.max(1, horizonDays)
-  while (addDays(today, span - 1) < furthestDated && span < 400) span++
+  // The projection is EXACTLY the configured horizon. It deliberately does not stretch to
+  // reach the furthest dated item.
+  //
+  // An earlier version extended the span to cover every known outflow. Because the ledger
+  // holds scheduled obligations months ahead, that silently turned a 30-day forecast into a
+  // 90-day one — and a *median weekly* estimate compounded over 13 weeks produced a
+  // -$10,773 low point and the advice "hold back at least $25,773", which was more than the
+  // business had in the bank. Confidently wrong, and worse than showing less.
+  //
+  // Accuracy decays the further out this runs, so the window stays where it can be
+  // defended. Anything beyond it is still reported as a dated fact via `cardPayments`
+  // rather than folded into a balance projection.
+  const span = Math.max(1, horizonDays)
 
   for (let i = 0; i < span; i++) {
     const date = addDays(today, i)
@@ -414,14 +438,19 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
     const cautiousIn = money(estimate.cautiousInflow * share)
     const typicalIn = money(estimate.typicalInflow * share)
 
-    const items = [...(dated.get(date) ?? [])].map((d) => ({
+    const items: ForecastDay['items'] = [...(dated.get(date) ?? [])].map((d) => ({
       label: d.label,
       amount: money(d.amount),
+      kind: 'dated' as const,
     }))
     const datedTotal = items.reduce((s, it) => s + it.amount, 0)
 
     if (baselineDaily > 0) {
-      items.push({ label: 'Day-to-day running costs', amount: money(baselineDaily) })
+      items.push({
+        label: 'Day-to-day running costs',
+        amount: money(baselineDaily),
+        kind: 'estimate' as const,
+      })
     }
     const moneyOut = money(datedTotal + baselineDaily)
 
@@ -435,6 +464,7 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
 
     if (i < nearTerm && cautiousBalance < nearTermLowestBalance) {
       nearTermLowestBalance = cautiousBalance
+      nearTermLowestBalanceDate = date
     }
 
     days.push({
@@ -478,6 +508,14 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
     breachesReserve: horizonHeadroom < 0,
     reserveShortfall: money(Math.max(0, -horizonHeadroom)),
     nearTermLowestBalance,
+    nearTermLowestBalanceDate,
+    // Judged on the near-term window ALONE, never inferred by comparing the horizon low
+    // point's date against the window. Those are different questions: a dip below the
+    // reserve this week and a deeper dip next month can both be true, and deciding "is the
+    // breach near-term?" from the horizon low date reported only the distant one — hiding
+    // the more urgent problem behind the bigger number.
+    breachesReserveNearTerm: nearTermLowestBalance < minCashReserve,
+    nearTermReserveShortfall: money(Math.max(0, minCashReserve - nearTermLowestBalance)),
     horizonDays: span,
     nearTermDays: nearTerm,
   }
@@ -635,8 +673,30 @@ export function assembleCapacity(input: AssembleInput) {
   // cliff: ~$9.9k becomes ~$300/day, which looks like nothing on the day it actually
   // clears. These are added as dated outflows so the trough is real.
   const cardPlans = planCardPayments(cards, today)
-  const cardPayments = cardPlans.filter((p) => p.blockedReason === null)
-  const blockedCardPayments = cardPlans.filter((p) => p.blockedReason !== null)
+
+  // A payoff due BEYOND the projection cannot be placed on a day, and the horizon is no
+  // longer stretched to reach it (doing so compounded a weekly estimate months out and
+  // produced advice to hold back more cash than the business had).
+  //
+  // It must not simply disappear either — that is the original blind spot. So it is
+  // reported through the SAME "blocked" channel the UI already renders for a card with no
+  // recorded due date: a stated gap, with the date and amount named, rather than a rosier
+  // forecast. The reason text carries the real numbers because "not forecast" alone gives
+  // the owner nothing to act on.
+  const horizonEnd = addDays(today, Math.max(1, horizonDays) - 1)
+  const withHorizon = cardPlans.map((p) => {
+    if (p.blockedReason !== null || p.dueDate <= horizonEnd) return p
+    return {
+      ...p,
+      // Kept as plain data — this module is pure and does no currency formatting. The
+      // panel formats `amount`/`dueDate` itself, which also keeps one formatter in the app.
+      blockedReason: `due beyond this ${horizonDays}-day forecast`,
+      blockedBeyondHorizon: true,
+    }
+  })
+
+  const cardPayments = withHorizon.filter((p) => p.blockedReason === null)
+  const blockedCardPayments = withHorizon.filter((p) => p.blockedReason !== null)
 
   for (const p of cardPayments) {
     datedOutflows.push({

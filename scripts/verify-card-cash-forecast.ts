@@ -392,5 +392,132 @@ check(
   check('omitting cards forecasts no card payments', legacy.cardPayments.length === 0)
 }
 
+// ===========================================================================
+// The horizon is BOUNDED by its setting, and never stretched to reach a far-off bill.
+//
+// Both bugs below shipped and were caught in the browser, not by a script.
+//
+// (1) An earlier version grew the span until it covered the furthest dated outflow. The
+//     real ledger holds obligations months ahead, so a 30-day forecast quietly became a
+//     90-day one, and a median weekly estimate compounded over 13 weeks reported a
+//     -$10,773 low point with the advice "hold back at least $25,773" — more than the
+//     business had in the bank.
+// ===========================================================================
+{
+  const withFarBill = assembleCapacity({
+    ...base,
+    horizonDays: 30,
+    nearTermDays: 7,
+    // A real obligation 120 days out, well past the horizon.
+    obligations: [
+      { id: 'far-1', effectiveDueDate: '2026-12-01', amount: 1500, vendorName: 'Distant bill' },
+    ],
+  })
+
+  check(
+    'a bill beyond the horizon does not extend the projection',
+    withFarBill.result.days.length === 30,
+    `got ${withFarBill.result.days.length} days`,
+  )
+  check(
+    'reported horizonDays matches the days actually produced',
+    withFarBill.result.horizonDays === withFarBill.result.days.length,
+  )
+  check(
+    'the low point stays inside the horizon',
+    withFarBill.result.lowestBalanceDate <= '2026-09-01',
+    `low point ${withFarBill.result.lowestBalanceDate}`,
+  )
+  // The advice must be actionable: never tell the owner to hold back more than exists.
+  check(
+    'reserve shortfall is not larger than starting cash',
+    withFarBill.result.reserveShortfall <= withFarBill.cashOnHand,
+    `shortfall ${withFarBill.result.reserveShortfall} vs cash ${withFarBill.cashOnHand}`,
+  )
+}
+
+// ===========================================================================
+// (2) Near-term and horizon breaches are tracked INDEPENDENTLY.
+//
+//     The panel used to infer "is the breach near-term?" by testing the horizon low
+//     point's DATE against the window. When cash dipped under the reserve inside the week
+//     AND fell further weeks later, that test said "not near-term" and the urgent warning
+//     disappeared behind the distant one.
+// ===========================================================================
+{
+  // A reserve high enough that the ordinary weekly trough breaches it immediately,
+  // combined with the card payoff landing later — so BOTH windows breach.
+  const both = assembleCapacity({
+    ...base,
+    horizonDays: 30,
+    nearTermDays: 7,
+    minCashReserve: 16500,
+  })
+
+  check(
+    'a near-term breach is reported on its own flag',
+    both.result.breachesReserveNearTerm === true,
+    `nearTermLow ${both.result.nearTermLowestBalance}`,
+  )
+  check(
+    'a near-term breach also counts as a horizon breach',
+    both.result.breachesReserve === true,
+  )
+  check(
+    'the near-term low point is dated inside the window',
+    both.result.nearTermLowestBalanceDate <= both.result.days[6].date,
+    `dated ${both.result.nearTermLowestBalanceDate}`,
+  )
+  check(
+    'the near-term shortfall is measured against the near-term low',
+    Math.abs(
+      both.result.nearTermReserveShortfall -
+        (16500 - both.result.nearTermLowestBalance),
+    ) < 0.02,
+  )
+  // The horizon low can only be as low or lower than the window's.
+  check(
+    'horizon low point is never above the near-term low point',
+    both.result.lowestBalance <= both.result.nearTermLowestBalance,
+  )
+
+  // The inverse: a clean week with a later cliff must NOT set the near-term flag, or the
+  // panel would claim "nothing spare to spend this week" while the headline offers money.
+  const laterOnly = assembleCapacity({ ...base, horizonDays: 30, nearTermDays: 7 })
+  check(
+    'a breach only beyond the window leaves the near-term flag clear',
+    laterOnly.result.breachesReserveNearTerm === false,
+    `nearTermLow ${laterOnly.result.nearTermLowestBalance}`,
+  )
+  check(
+    'no near-term breach means no near-term shortfall',
+    laterOnly.result.nearTermReserveShortfall === 0,
+  )
+}
+
+// ===========================================================================
+// Forecast items are TAGGED, so the UI can list real payments without repeating the
+// spread estimate once per day. Matching on the label text instead let a rename silently
+// reclassify the estimate as a known payment.
+// ===========================================================================
+{
+  const tagged = assembleCapacity({ ...base, horizonDays: 30, nearTermDays: 7 })
+  const all = tagged.result.days.flatMap((d) => d.items)
+
+  check('every forecast item carries a kind', all.every((i) => i.kind === 'dated' || i.kind === 'estimate'))
+  check(
+    'the spread baseline is tagged as an estimate',
+    all
+      .filter((i) => i.label === 'Day-to-day running costs')
+      .every((i) => i.kind === 'estimate'),
+  )
+  const cardItems = all.filter((i) => i.label.includes('statement payment'))
+  check('a card payment is tagged as dated', cardItems.length > 0 && cardItems.every((i) => i.kind === 'dated'))
+  // The estimate recurs daily; dated items must be far rarer, which is the whole reason
+  // the UI filters on the tag.
+  const estimates = all.filter((i) => i.kind === 'estimate').length
+  check('the estimate appears on every projected day', estimates === tagged.result.days.length)
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

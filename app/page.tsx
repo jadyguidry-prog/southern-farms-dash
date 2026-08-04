@@ -108,6 +108,39 @@ export default async function DashboardPage() {
           billPay.outstandingCheckCount
         } outstanding ${billPay.outstandingCheckCount === 1 ? 'check' : 'checks'}`
       : undefined
+  // The "Safe to Spend" hint.
+  //
+  // The headline figure only looks at the near-term window, so a card payment due later in
+  // the month is NOT reflected in it. That payment has to be named right here: this tile is
+  // the screen decisions get made on, and an unqualified number (whether a surplus or a
+  // bare $0) hides the single largest thing about to leave the account.
+  const spendHint = (() => {
+    const dueLater = [...capacity.cardPayments]
+      .filter((p) => p.dueDate > capacity.today)
+      .sort((a, b) => b.amount - a.amount)[0]
+    const dueLaterNote = dueLater
+      ? ` · ${formatCurrency(dueLater.amount)} card payment due ${new Date(
+          `${dueLater.dueDate}T00:00:00`,
+        ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+      : ''
+
+    // At or below the reserve there is no allowance to quote, but the upcoming payment is
+    // still the most important fact — arguably more so, since there is no cushion for it.
+    if (capacity.safeToSpendToday <= 0) {
+      return `Cash is at or below your ${formatCurrency(capacity.minCashReserve)} reserve${dueLaterNote}`
+    }
+
+    const pace = `≈ ${formatCurrency(capacity.perDayAllowance)}/day for ${capacity.nearTermDays} days`
+
+    if (capacity.breachesReserve) {
+      return `${pace} · ${formatCurrency(capacity.reserveShortfall)} short of your reserve by ${new Date(
+        `${capacity.lowestBalanceDate}T00:00:00`,
+      ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}${dueLaterNote}`
+    }
+
+    return `${pace} · keeps ${formatCurrency(capacity.minCashReserve)} reserve${dueLaterNote}`
+  })()
+
   const lineOfCredit = kpi(kpis, 'lineOfCredit')
   const accountsReceivable = kpi(kpis, 'accountsReceivable')
   const accountsPayable = kpi(kpis, 'accountsPayable')
@@ -183,18 +216,7 @@ export default async function DashboardPage() {
             label="Safe to Spend Today"
             value={formatCurrency(capacity.safeToSpendToday)}
             icon={PiggyBank}
-            hint={
-              capacity.safeToSpendToday <= 0
-                ? `Cash is at or below your ${formatCurrency(capacity.minCashReserve)} reserve`
-                : // A known payment later in the month must be named here. The headline
-                  // only looks at the near-term window, so without this the tile reads as
-                  // an unqualified surplus on the very screen used to make decisions.
-                  capacity.breachesReserve
-                  ? `≈ ${formatCurrency(capacity.perDayAllowance)}/day for ${capacity.nearTermDays} days · but ${formatCurrency(capacity.reserveShortfall)} short of your reserve by ${new Date(
-                      `${capacity.lowestBalanceDate}T00:00:00`,
-                    ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
-                  : `≈ ${formatCurrency(capacity.perDayAllowance)}/day for ${capacity.nearTermDays} days · keeps ${formatCurrency(capacity.minCashReserve)} reserve`
-            }
+            hint={spendHint}
           />
         )}
         <StatCard
