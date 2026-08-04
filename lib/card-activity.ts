@@ -40,6 +40,53 @@ export function formatOwedAmount(value: number | null | undefined): string {
 }
 
 /**
+ * Freshness of the card spending feed, scoped to cards that STILL EXIST.
+ *
+ * Pure and separated from the database layer specifically so this rule is testable,
+ * because the regression it guards against is silent. A closed card's feed stopping is
+ * the CORRECT outcome, so counting it as "behind" produces a permanent warning telling
+ * the owner to import a statement that will never exist. Noise like that is what trains
+ * someone to ignore the real staleness alert — the one this module exists to raise,
+ * after a stalled feed hid thousands a month of card spending.
+ *
+ * All three outputs are open-scoped TOGETHER so they cannot contradict one another. A
+ * mixed set (a global "newest transaction" date beside an open-scoped months-behind)
+ * would let the UI print "up to date" next to a date eight months old.
+ *
+ * Closed cards are excluded ONLY here. They keep their balance, their history and their
+ * reconciliation notes, because a closed card can still carry a balance.
+ */
+export function summarizeCardFreshness(
+  cards: {
+    closedAt: string | null
+    activity: {
+      monthsBehind: number
+      feedBehind: boolean
+      lastTxnDate: string | null
+    } | null
+  }[],
+): { behindCount: number; monthsBehind: number; lastOpenActivityDate: string | null } {
+  const open = cards.filter((c) => c.closedAt === null)
+
+  return {
+    behindCount: open.filter((c) => c.activity?.feedBehind).length,
+    // Worst case, not an average: if one card is two months behind, the feed is two
+    // months stale however current the others are.
+    monthsBehind: open.reduce(
+      (worst, c) => Math.max(worst, c.activity?.monthsBehind ?? 0),
+      0,
+    ),
+    // ISO dates sort lexicographically, so the last element is the newest.
+    lastOpenActivityDate:
+      open
+        .map((c) => c.activity?.lastTxnDate ?? null)
+        .filter((d): d is string => d !== null)
+        .sort()
+        .at(-1) ?? null,
+  }
+}
+
+/**
  * How a card total and its caveat are worded, in ONE place.
  *
  * Exists because the panel and the Cash & Debt tile each rendered their own version of

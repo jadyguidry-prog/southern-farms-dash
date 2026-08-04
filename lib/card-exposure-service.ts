@@ -25,6 +25,7 @@ import {
 } from '@/lib/card-safety'
 import {
   summarizeCardActivity,
+  summarizeCardFreshness,
   checkCardBalance,
   typicalMonthlyCharges,
   type CardActivity,
@@ -92,6 +93,12 @@ async function readCardLedger(accountNames: string[]): Promise<CardLedgerRow[]> 
 
 export type CardExposureCard = {
   accountName: string
+  /**
+   * Date the card was closed; null means open. A closed card keeps its balance and
+   * history and still counts toward what is owed, but is never reported as having a
+   * stale feed — no further statements will arrive for it.
+   */
+  closedAt: string | null
   /** Amount owed as confirmed by the owner. Null when never confirmed. */
   owed: number | null
   limit: number | null
@@ -150,8 +157,15 @@ export type CardExposure = {
    * credit limit are absent, never treated as having free headroom.
    */
   highUtilization: { accountName: string; utilizationPct: number }[]
-  /** Most recent recorded card transaction across all cards. */
+  /** Most recent recorded card transaction across ALL cards, open or closed. */
   lastActivityDate: string | null
+  /**
+   * Most recent recorded transaction among OPEN cards. Always consistent with
+   * `monthsBehind`; use this for anything describing how stale the feed is.
+   */
+  lastOpenActivityDate: string | null
+  /** Cards that are still open. Closed cards keep their balance but never go "stale". */
+  openCardCount: number
   /** True when at least one card account exists. */
   hasCards: boolean
   /** True when at least one card has recorded transactions. */
@@ -213,6 +227,7 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
 
     return {
       accountName: account.accountName,
+      closedAt: account.closedAt,
       owed,
       limit: limitKnown ? (assessment?.limit ?? null) : null,
       headroom: assessment?.headroom ?? null,
@@ -260,9 +275,20 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
   // ---- Aggregate warnings -------------------------------------------------
   // Ordered most-actionable first. Each one names the specific card and what to do,
   // because "card data is incomplete" is not something the owner can act on.
+  // Freshness questions are asked of OPEN cards only. A closed card's feed stopping is
+  // the correct outcome, not a problem: card 0-72001 was replaced in Dec 2025, so
+  // telling the owner to "import the latest statement" for it is noise — and noise is
+  // what trains someone to ignore the real staleness alert that this whole module
+  // exists to raise.
+  //
+  // Closed cards are excluded ONLY from freshness. They stay in the owed total and keep
+  // their history and their reconciliation notes, because a closed card can still
+  // carry a balance.
+  const openCards = cards.filter((c) => c.closedAt === null)
+
   const warnings: string[] = []
 
-  for (const c of cards) {
+  for (const c of openCards) {
     if (c.activity?.feedBehind) {
       const months = c.activity.monthsBehind
       warnings.push(
@@ -302,17 +328,15 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
     )
   }
 
-  // Worst case across cards, not an average: if any one card's spending is two months
-  // behind, the exposure is two months stale regardless of how current the others are.
-  const monthsBehind = cards.reduce(
-    (worst, c) => Math.max(worst, c.activity?.monthsBehind ?? 0),
-    0,
-  )
+  // One pure, tested definition of feed freshness, shared so `behindCount`,
+  // `monthsBehind` and the quoted date are always scoped the same way.
+  const freshness = summarizeCardFreshness(cards)
 
-  // Pooled across cards so the estimate reflects total card spending, which is what
-  // the owner is actually missing when a feed stalls.
-  const allMonths = cards.flatMap((c) => c.activity?.months ?? [])
-  const typical = typicalMonthlyCharges(allMonths)
+  // Pooled across OPEN cards, because this figure sizes what is still being spent and
+  // not captured. Including the replaced card's December history would blend spending
+  // that has permanently stopped into an estimate of ongoing spending.
+  const openMonths = openCards.flatMap((c) => c.activity?.months ?? [])
+  const typical = typicalMonthlyCharges(openMonths)
 
   // Only cards whose limit is genuinely known can have a utilization. Cards with no
   // recorded limit are left out entirely rather than assumed to have room.
@@ -330,11 +354,16 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
     confirmedSubtotal,
     confirmedCount: confirmed.length,
     cardCount: cardAccounts.length,
-    behindCount: activity.behindCount,
-    monthsBehind,
+    // All three come from `summarizeCardFreshness`, NOT from `activity.behindCount`:
+    // the ledger-derived count has no idea which accounts still exist, so it would
+    // report the replaced card as a problem forever.
+    behindCount: freshness.behindCount,
+    monthsBehind: freshness.monthsBehind,
+    lastOpenActivityDate: freshness.lastOpenActivityDate,
     typicalMonthlyCharges: typical,
     highUtilization,
     lastActivityDate,
+    openCardCount: openCards.length,
     hasCards: cardAccounts.length > 0,
     hasActivity: activity.hasData,
     warnings,

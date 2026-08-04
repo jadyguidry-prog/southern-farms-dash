@@ -14,6 +14,7 @@
  */
 import {
   summarizeCardActivity,
+  summarizeCardFreshness,
   checkCardBalance,
   typicalMonthlyCharges,
   formatOwedAmount,
@@ -418,6 +419,78 @@ console.log('— describeCardTotal: a genuine zero is still reportable —')
   })
   ok('shows money', t.value !== 'Not recorded')
   ok('and is complete', t.isComplete === true)
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n— Freshness ignores closed cards, but only for freshness —')
+{
+  // The live shape: the ACTIVE card is genuinely a month behind, and the card replaced
+  // in Dec 2025 is 8 months "behind" only because it no longer exists.
+  const active = {
+    closedAt: null,
+    activity: { monthsBehind: 1, feedBehind: true, lastTxnDate: '2026-07-03' },
+  }
+  const closed = {
+    closedAt: '2025-12-27',
+    activity: { monthsBehind: 8, feedBehind: true, lastTxnDate: '2025-12-27' },
+  }
+
+  const f = summarizeCardFreshness([active, closed])
+  // The bug: counting the retired card told the owner to import a statement that can
+  // never arrive, and that permanent false alarm is what teaches someone to ignore the
+  // real one.
+  check('only the open card counts as behind', f.behindCount, 1)
+  check('months-behind ignores the closed card', f.monthsBehind, 1)
+  // Must be open-scoped too. If this returned the global newest date it could print a
+  // date that contradicts the months-behind figure sitting beside it.
+  check('date is open-scoped', f.lastOpenActivityDate, '2026-07-03')
+}
+
+{
+  // A closed card is not a licence to stop reporting: when it is the ONLY card, its
+  // history is still the newest thing on file, and nothing is claimed to be behind.
+  const f = summarizeCardFreshness([
+    {
+      closedAt: '2025-12-27',
+      activity: { monthsBehind: 8, feedBehind: true, lastTxnDate: '2025-12-27' },
+    },
+  ])
+  check('no open card is behind', f.behindCount, 0)
+  check('no stale months claimed', f.monthsBehind, 0)
+  // Null, NOT the closed card's date: there is no open feed to describe. The caller
+  // renders "No history" rather than implying a live card recorded through December.
+  check('no open activity date', f.lastOpenActivityDate, null)
+}
+
+{
+  // The inverse guard: closing a card must NOT suppress a real alert on a live one.
+  const f = summarizeCardFreshness([
+    {
+      closedAt: null,
+      activity: { monthsBehind: 3, feedBehind: true, lastTxnDate: '2026-05-01' },
+    },
+    { closedAt: '2025-12-27', activity: null },
+  ])
+  check('open card still flagged', f.behindCount, 1)
+  check('worst case is the open card', f.monthsBehind, 3)
+}
+
+{
+  // An up-to-date open card alongside a closed one reports fully clean — no residue
+  // from the closed card leaking into the headline.
+  const f = summarizeCardFreshness([
+    {
+      closedAt: null,
+      activity: { monthsBehind: 0, feedBehind: false, lastTxnDate: '2026-08-01' },
+    },
+    {
+      closedAt: '2025-12-27',
+      activity: { monthsBehind: 8, feedBehind: true, lastTxnDate: '2025-12-27' },
+    },
+  ])
+  check('nothing behind', f.behindCount, 0)
+  check('zero months behind', f.monthsBehind, 0)
+  check('newest open date wins', f.lastOpenActivityDate, '2026-08-01')
 }
 
 // ---------------------------------------------------------------------------

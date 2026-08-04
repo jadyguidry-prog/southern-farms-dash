@@ -461,6 +461,10 @@ export async function getBankAccounts() {
     // left falsy rather than defaulted to today — defaulting would make an
     // unmaintained figure look freshly confirmed.
     lastUpdated: a.last_updated ?? '',
+    // Null means the account is OPEN. A closed account keeps its balance and history
+    // and still counts toward money owed, but must be excluded from data-freshness
+    // alerts, because no further statements will ever arrive for it.
+    closedAt: a.closed_at ?? null,
     notes: a.notes ?? '',
   }))
 }
@@ -950,7 +954,9 @@ export async function getHealthSnapshot() {
           cardCount: cardExposure.cardCount,
           confirmedCount: cardExposure.confirmedCount,
           monthsBehind: cardExposure.monthsBehind,
-          lastActivityDate: cardExposure.lastActivityDate,
+          // Open-scoped, so the date quoted in the warning cannot contradict the
+          // months-behind figure it appears next to.
+          lastActivityDate: cardExposure.lastOpenActivityDate,
           typicalMonthlyCharges: cardExposure.typicalMonthlyCharges,
           highUtilization: cardExposure.highUtilization,
         }

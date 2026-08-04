@@ -118,9 +118,11 @@ export function CardExposurePanel({
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Spending Recorded Through
             </p>
+            {/* Open-scoped: a closed card's history must not be presented as how
+                current the spending feed is. */}
             <p className="mt-1 font-mono text-2xl font-bold tracking-tight text-foreground">
-              {exposure.lastActivityDate
-                ? friendlyDate(exposure.lastActivityDate)
+              {exposure.lastOpenActivityDate
+                ? friendlyDate(exposure.lastOpenActivityDate)
                 : 'No history'}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
@@ -156,9 +158,19 @@ export function CardExposurePanel({
               <div key={card.accountName} className="rounded-lg border p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="truncate font-medium text-foreground">
-                      {card.accountName}
-                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate font-medium text-foreground">
+                        {card.accountName}
+                      </p>
+                      {/* A closed card is explained, not quietly dropped: its balance
+                          and history still matter, but nobody should chase statements
+                          for it. */}
+                      {card.closedAt !== null && (
+                        <Badge variant="secondary" className="shrink-0">
+                          Closed {friendlyDate(card.closedAt)}
+                        </Badge>
+                      )}
+                    </div>
                     <p className="mt-0.5 text-xs text-muted-foreground">
                       Amount owed {card.balanceLabel}
                     </p>
@@ -283,7 +295,9 @@ export function CardExposurePanel({
                   </p>
                 )}
 
-                {card.activity?.feedBehind && (
+                {/* Only flagged on OPEN cards. A closed card's feed stopping is the
+                    expected outcome, so highlighting it as a problem is noise. */}
+                {card.activity?.feedBehind && card.closedAt === null && (
                   <Badge variant="outline" className="mt-3 text-chart-4">
                     Recorded through {friendlyDate(card.activity.lastTxnDate)}
                   </Badge>
