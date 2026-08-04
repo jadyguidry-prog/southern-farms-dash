@@ -285,13 +285,25 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                 <Info className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                 <div className="text-sm text-muted-foreground text-pretty">
                   <p>
+                    {/* "Not included" rather than "missing": the list mixes cards with no
+                        recorded due date (data genuinely absent) with cards known to fall
+                        past the window (nothing absent). Either way the low point above is
+                        understated, which is the part that matters. */}
                     {blockedCardPayments.length === 1 ? 'A card payment is' : 'Some card payments are'}{' '}
-                    missing from this forecast, so your real low point may be worse:
+                    not included in this forecast, so your real low point may be worse:
                   </p>
                   <ul className="mt-1 list-disc pl-5">
                     {blockedCardPayments.map((p) => (
                       <li key={p.accountName}>
-                        {p.accountName} &mdash; {p.blockedReason}
+                        {p.accountName} &mdash;{' '}
+                        {/* A card that is known but merely due past the horizon gets its
+                            real amount and date. Nothing is missing for it, so repeating
+                            the "not enough information" phrasing used for an unrecorded
+                            card would send the owner off to re-enter data they already
+                            have. */}
+                        {p.blockedBeyondHorizon
+                          ? `${formatCurrency(p.amount)} due ${dayLabel(p.dueDate)}, past this ${horizonDays}-day window`
+                          : p.blockedReason}
                       </li>
                     ))}
                   </ul>

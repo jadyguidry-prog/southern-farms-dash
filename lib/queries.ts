@@ -945,10 +945,16 @@ export async function getHealthSnapshot() {
 
   // Cards carrying a balance that could not be projected. Reported so the forecast's
   // optimism is visible; a silent omission would make the low point look better than it is.
-  const unforecastCards = spendingCapacity.blockedCardPayments.map((p) => ({
-    accountName: p.accountName,
-    reason: p.blockedReason ?? 'not enough information',
-  }))
+  // Only cards blocked by MISSING DATA. A card whose due date simply falls past the end of
+  // the forecast window is excluded: nothing is missing for it, so advising the owner to
+  // "add the statement due date in Admin" would send them to fill in a field already
+  // filled. The forecast panel still lists it, labelled as known-but-further-out.
+  const unforecastCards = spendingCapacity.blockedCardPayments
+    .filter((p) => !p.blockedBeyondHorizon)
+    .map((p) => ({
+      accountName: p.accountName,
+      reason: p.blockedReason ?? 'not enough information',
+    }))
 
   const insights = generateInsights({
     settings,

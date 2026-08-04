@@ -320,7 +320,17 @@ check(
 }
 
 // ===========================================================================
-// 7. Horizon auto-extension: a due date beyond the horizon is still projected.
+// 7. A due date beyond the horizon is REPORTED, not projected.
+//
+// This test used to assert the opposite — that the horizon stretched to reach the payment.
+// That behavior was removed because it turned a 30-day forecast into a 90-day one whenever
+// the ledger held a distant obligation, and compounding a median weekly estimate that far
+// out produced advice to hold back more cash than the business had.
+//
+// The concern the old test protected is still enforced, just differently: the payment must
+// never silently vanish. It now surfaces through the same "blocked" channel the UI renders
+// for a card with no recorded due date, flagged so the UI can say "known, just further out"
+// rather than "not enough information".
 // ===========================================================================
 {
   const far = assembleCapacity({
@@ -329,11 +339,41 @@ check(
     horizonDays: 14,
     nearTermDays: 7,
   })
-  const hit = far.result.days.find((d) => d.date === '2026-09-25')
-  check('horizon stretches to include a distant due date', hit !== undefined)
+
   check(
-    'the distant payoff is charged there',
-    (hit?.items ?? []).some((i) => i.label.includes('statement payment')),
+    'the projection is not stretched to reach the distant due date',
+    far.result.days.length === 14,
+    `got ${far.result.days.length} days`,
+  )
+  check(
+    'no day past the horizon is fabricated',
+    far.result.days.every((d) => d.date <= '2026-08-16'),
+    `last day ${far.result.days.at(-1)?.date}`,
+  )
+
+  // The whole point: it is still reported.
+  const blocked = far.blockedCardPayments.find((p) => p.accountName === card.accountName)
+  check('the distant payoff is reported as blocked, not dropped', blocked !== undefined)
+  check('it is flagged as beyond-horizon rather than missing data', blocked?.blockedBeyondHorizon === true)
+  check(
+    'its real amount and date are preserved for the UI to show',
+    // The fixture balance is 9948.13, not a round 9948 — asserting the rounded figure was
+    // the test being wrong, not the code.
+    blocked?.amount === 9948.13 && blocked?.dueDate === '2026-09-25',
+    `${blocked?.amount} on ${blocked?.dueDate}`,
+  )
+  check(
+    'it is not double-counted as a forecast payment',
+    far.cardPayments.every((p) => p.accountName !== card.accountName),
+  )
+
+  // And a card due INSIDE the horizon must still be forecast normally, so the fix above
+  // cannot quietly suppress the feature this whole module exists for.
+  const near = assembleCapacity({ ...base, cards: [card], horizonDays: 30, nearTermDays: 7 })
+  check(
+    'a due date inside the horizon is still charged on its day',
+    near.cardPayments.some((p) => p.accountName === card.accountName) &&
+      near.blockedCardPayments.every((p) => p.accountName !== card.accountName),
   )
 }
 
@@ -445,13 +485,16 @@ check(
 //     disappeared behind the distant one.
 // ===========================================================================
 {
-  // A reserve high enough that the ordinary weekly trough breaches it immediately,
-  // combined with the card payoff landing later — so BOTH windows breach.
+  // A reserve above the ordinary weekly trough (~$18.3k here) so the window breaches on its
+  // own, PLUS the card attached so the later payoff drags the horizon lower still. Both
+  // windows must breach, with the horizon strictly worse — that is the shape that used to
+  // hide the near-term warning.
   const both = assembleCapacity({
     ...base,
+    cards: [card],
     horizonDays: 30,
     nearTermDays: 7,
-    minCashReserve: 16500,
+    minCashReserve: 20000,
   })
 
   check(
@@ -472,7 +515,7 @@ check(
     'the near-term shortfall is measured against the near-term low',
     Math.abs(
       both.result.nearTermReserveShortfall -
-        (16500 - both.result.nearTermLowestBalance),
+        (20000 - both.result.nearTermLowestBalance),
     ) < 0.02,
   )
   // The horizon low can only be as low or lower than the window's.
@@ -501,7 +544,8 @@ check(
 // reclassify the estimate as a known payment.
 // ===========================================================================
 {
-  const tagged = assembleCapacity({ ...base, horizonDays: 30, nearTermDays: 7 })
+  // Card attached, or there is no dated card item to check the tag on.
+  const tagged = assembleCapacity({ ...base, cards: [card], horizonDays: 30, nearTermDays: 7 })
   const all = tagged.result.days.flatMap((d) => d.items)
 
   check('every forecast item carries a kind', all.every((i) => i.kind === 'dated' || i.kind === 'estimate'))

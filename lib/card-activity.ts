@@ -110,6 +110,16 @@ export type ForecastCardPayment = {
   isEstimatedDate: boolean
   /** Set when this payoff cannot be forecast; explains what is missing. */
   blockedReason: string | null
+  /**
+   * True when the ONLY reason this payoff is not in the projection is that its due date
+   * falls past the end of the forecast window.
+   *
+   * Distinct from every other blocked reason because nothing is missing: the amount and
+   * date are both known. That difference is what the UI needs to say "known, just further
+   * out than this forecast reaches" instead of "we don't have enough information", and to
+   * avoid telling the owner to go fill in data that is already there.
+   */
+  blockedBeyondHorizon?: boolean
 }
 
 /**
