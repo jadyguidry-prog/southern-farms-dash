@@ -239,6 +239,28 @@ eq(
   'unresolved',
   'route: whitespace-only category is not a resolution',
 )
+/*
+ * The unreachable-check regression. The review queue treated a `rejected` overlay
+ * as settled while this predicate called it unresolved, so one real check ($500,
+ * no. 1623) was hidden from every tab yet counted in "still unknown" forever —
+ * the backlog could not reach zero. The route must live here, in the shared
+ * predicate, or the queue and the headline diverge again.
+ */
+eq(
+  checkResolvedVia(row({ id: 'r6', expenseCategory: '', reviewStatus: '' }), undefined, true),
+  'reviewed-not-cogs',
+  'route: a rejected overlay ("reviewed, not COGS") resolves a check',
+)
+eq(
+  checkResolvedVia(row({ id: 'r7', expenseCategory: 'Meat / COGS', reviewStatus: '' }), undefined, true),
+  'categorized',
+  'route: a real category outranks "not COGS" when a row carries both',
+)
+eq(
+  checkResolvedVia(row({ id: 'r8', expenseCategory: '', reviewStatus: '' }), undefined, false),
+  'unresolved',
+  'route: absent rejected overlay leaves a check unresolved',
+)
 
 // Excluded dollars must never reach COGS, even if a category was left behind.
 const exProg = checkResolutionProgress(
@@ -255,10 +277,31 @@ eq(exProg.categorizedCount, 1, 'progress: categorized check counted as categoriz
 eq(exProg.cogsAmount, 200, 'progress: an EXCLUDED check never adds COGS dollars')
 eq(exProg.pendingCount, 0, 'progress: neither check is still an open question')
 eq(
-  exProg.overlayAmount + exProg.categorizedAmount + exProg.excludedAmount + exProg.pendingAmount,
+  exProg.overlayAmount +
+    exProg.categorizedAmount +
+    exProg.excludedAmount +
+    exProg.reviewedNotCogsAmount +
+    exProg.pendingAmount,
   1000,
   'progress: buckets partition total dollars',
 )
+
+/*
+ * "Reviewed, not COGS" must count as resolved, must NOT add COGS dollars, and must
+ * NOT be folded into `excluded` — excluded claims "not business spend", which is a
+ * different statement about the money and would overstate that bucket.
+ */
+const njProg = checkResolutionProgress(
+  [row({ id: 'n1', amount: 500, expenseCategory: '', reviewStatus: '' })],
+  [res({ financialTransactionId: 'n1', reviewStatus: 'rejected' })],
+  isCogsCategory,
+)
+eq(njProg.reviewedNotCogsCount, 1, 'progress: rejected overlay counted as reviewed-not-COGS')
+eq(njProg.reviewedNotCogsAmount, 500, 'progress: its dollars tracked in their own bucket')
+eq(njProg.excludedAmount, 0, 'progress: reviewed-not-COGS is NOT folded into excluded')
+eq(njProg.cogsAmount, 0, 'progress: reviewed-not-COGS never adds COGS dollars')
+eq(njProg.pendingCount, 0, 'progress: the once-unreachable check is no longer open')
+eq(njProg.pendingAmount, 0, 'progress: its $500 no longer blocks the readiness gate')
 
 // ---------- monthly COGS overlay ----------
 
@@ -686,7 +729,14 @@ async function reconcile() {
   })) as CheckResolution[]
   const approvedLive = liveResolutions.filter((r) => r.reviewStatus === 'approved')
 
-  const months = deriveMonthlyCogs(prepared, approvedLive)
+  /*
+   * ALL resolutions, not just approved ones — the page passes the full set and
+   * `deriveMonthlyCogs` filters by status internally. Handing it a pre-filtered
+   * list hid the rejected overlays from it, so it kept counting a reviewed check
+   * as unattributed while the rest of the script did not: the same drift that
+   * once made this file report a different business than the app.
+   */
+  const months = deriveMonthlyCogs(prepared, liveResolutions)
   const baseTotal = months.reduce((s, m) => s + m.baseCogs, 0)
   const unresolvedTotal = months.reduce((s, m) => s + m.unresolvedCheckAmount, 0)
   const directCogs = prepared
@@ -703,8 +753,19 @@ async function reconcile() {
    * still open, using the shared predicate.
    */
   const approvedById = new Map(approvedLive.map((r) => [r.financialTransactionId, r]))
+  // Must pass the rejected overlays too. Omitting them is exactly the drift that
+  // made this script describe a different business than the page.
+  const rejectedLiveIds = new Set(
+    liveResolutions
+      .filter((r) => r.reviewStatus === 'rejected')
+      .map((r) => r.financialTransactionId),
+  )
   const directUnresolved = liveChecks
-    .filter((r) => checkResolvedVia(r, approvedById.get(r.id)) === 'unresolved')
+    .filter(
+      (r) =>
+        checkResolvedVia(r, approvedById.get(r.id), rejectedLiveIds.has(r.id)) ===
+        'unresolved',
+    )
     .reduce((s, r) => s + r.amount, 0)
   approx(
     unresolvedTotal,
@@ -721,6 +782,7 @@ async function reconcile() {
     progress.overlayAmount +
       progress.categorizedAmount +
       progress.excludedAmount +
+      progress.reviewedNotCogsAmount +
       progress.pendingAmount,
     directChecks,
     0.01,
@@ -730,9 +792,25 @@ async function reconcile() {
     progress.overlayCount +
       progress.categorizedCount +
       progress.excludedCount +
+      progress.reviewedNotCogsCount +
       progress.pendingCount,
     liveChecks.length,
     'live: every check falls in exactly one resolution bucket',
+  )
+  /*
+   * The unreachable-check guard, against live data: what the page's own queue
+   * counts as open must equal what the headline calls unknown. A gap of even one
+   * check means some row is impossible to act on, so the backlog can never reach
+   * zero — the bug that hid check 1623.
+   */
+  eq(
+    progress.pendingCount,
+    liveChecks.filter(
+      (r) =>
+        checkResolvedVia(r, approvedById.get(r.id), rejectedLiveIds.has(r.id)) ===
+        'unresolved',
+    ).length,
+    'live: every check the headline calls unknown is reachable in the queue',
   )
   // And the page can never claim more is unknown than is actually unknown.
   ok(

@@ -430,6 +430,13 @@ export function deriveMonthlyCogs(
       .filter((r) => r.reviewStatus === 'approved')
       .map((r) => [r.financialTransactionId, r]),
   )
+  // "Reviewed — not cost of goods" answers this month's COGS question, so such a
+  // check must stop counting as unresolved here exactly as it does in progress.
+  const rejectedIds = new Set(
+    resolutions
+      .filter((r) => r.reviewStatus === 'rejected')
+      .map((r) => r.financialTransactionId),
+  )
   const months = new Map<string, MonthlyCogs>()
   const bucket = (month: string): MonthlyCogs => {
     const existing = months.get(month)
@@ -469,6 +476,7 @@ export function deriveMonthlyCogs(
       const via = checkResolvedVia(
         { expenseCategory: t.expenseCategory, reviewStatus: t.reviewStatus ?? '' },
         res,
+        rejectedIds.has(t.id),
       )
       if (via === 'unresolved') {
         b.unresolvedCheckAmount += amt
@@ -737,10 +745,17 @@ export async function getCheckResolutionSnapshot(): Promise<CheckResolutionSnaps
       .filter((r) => r.reviewStatus === 'approved')
       .map((r) => [r.financialTransactionId, r]),
   )
+  const rejectedIds = new Set(
+    resolutions
+      .filter((r) => r.reviewStatus === 'rejected')
+      .map((r) => r.financialTransactionId),
+  )
   // The same predicate the progress figures use, so the clusters offered for
   // review and the outstanding total can never describe different sets of rows.
   const pendingRows = checkRows.filter(
-    (r) => checkResolvedVia(r, approvedById.get(r.id)) === 'unresolved',
+    (r) =>
+      checkResolvedVia(r, approvedById.get(r.id), rejectedIds.has(r.id)) ===
+      'unresolved',
   )
   const topClusters = suggestCheckGroups(pendingRows)
     .filter((s) => s.kind === 'amount-cluster')

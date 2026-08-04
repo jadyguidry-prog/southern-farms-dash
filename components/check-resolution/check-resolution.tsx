@@ -80,9 +80,13 @@ export function CheckResolution({
 
   // Checks that are no longer an open question. Built from `checkResolvedVia` —
   // the same predicate the progress figures, the COGS roll-up and gross profit
-  // readiness use — so a check the General Ledger already categorized, or one the
-  // owner excluded, disappears from this queue instead of being asked about
-  // again. A `rejected` overlay also settles a check ("I looked, not COGS").
+  // readiness use — so a check the General Ledger already categorized, one the
+  // owner excluded, or one reviewed as "not cost of goods" disappears from this
+  // queue instead of being asked about again.
+  //
+  // The `rejected` case used to be special-cased HERE and nowhere else, which hid
+  // a check from every tab while progress still counted it unknown. It now lives
+  // in the shared predicate so the queue and the headline cannot disagree.
   const settledIds = useMemo(() => {
     const approved = new Map(
       data.resolutions
@@ -96,11 +100,11 @@ export function CheckResolution({
     )
     const out = new Set<string>()
     for (const c of data.checks) {
-      if (rejected.has(c.id)) {
+      if (
+        checkResolvedVia(c, approved.get(c.id), rejected.has(c.id)) !== 'unresolved'
+      ) {
         out.add(c.id)
-        continue
       }
-      if (checkResolvedVia(c, approved.get(c.id)) !== 'unresolved') out.add(c.id)
     }
     return out
   }, [data.resolutions, data.checks])
@@ -115,6 +119,22 @@ export function CheckResolution({
           transactionIds: s.transactionIds.filter((id) => !settledIds.has(id)),
         }))
         .filter((s) => s.transactionIds.length > 0)
+        // A run of consecutive check numbers spread across different days is NOT
+        // evidence of a shared payee — it only means the checkbook was used in
+        // order. Offering "Name this group" for one would tag 8 unrelated payees
+        // with a single name, and the overlay would faithfully record all 8 as
+        // wrong. These are demoted to a per-row HINT below rather than an action,
+        // which also lets their checks reach the one-at-a-time list; previously
+        // they were hidden inside a group that should never be bulk-answered.
+        .filter((s) => !(s.kind === 'sequence' && s.confidence === 'low'))
+        /*
+         * A "group" with one unanswered check left is not a group — its whole
+         * premise (answer once, settle many) no longer holds, and it was still
+         * rendering copy like "naming them once is likely to settle all 14"
+         * above a single row. Dropping it here sends that check to the
+         * one-at-a-time list where it belongs.
+         */
+        .filter((s) => s.transactionIds.length >= 2)
         .map((s) => {
           const count = s.transactionIds.length
           const settledCount = s.count - count
@@ -128,9 +148,20 @@ export function CheckResolution({
             settledCount > 0 && amount != null && Number.isFinite(amount)
               ? `${count} check${count === 1 ? '' : 's'} of exactly ${formatCurrency(amount)}`
               : s.label
+          /*
+           * The label was being restated but the rationale was not, so a
+           * part-answered cluster still promised "the same amount was written 14
+           * times ... naming them once is likely to settle all 14" above 1 row.
+           * The original count is stated as history instead of as the prize.
+           */
+          const rationale =
+            settledCount > 0 && amount != null && Number.isFinite(amount)
+              ? `${formatCurrency(amount)} was written ${s.count} times in total; ${count === 1 ? 'the last one is' : `${count} are`} still unnamed. Answering ${count === 1 ? 'it' : 'them'} here settles only what is listed below.`
+              : s.rationale
           return {
             ...s,
             label,
+            rationale,
             settledCount,
             count,
             total: s.transactionIds.reduce(
@@ -142,13 +173,44 @@ export function CheckResolution({
     [data.suggestions, settledIds, checkById],
   )
 
-  // Checks not covered by any suggestion — the long tail that must still be
-  // reachable, or the backlog could never reach zero.
+  /*
+   * Which consecutive-number run each check belongs to, for the demoted sequence
+   * hints. Kept as context on the row — "part of run 1636–1643" tells the owner
+   * where to look in the checkbook — without implying the run shares a payee.
+   */
+  const runHintById = useMemo(() => {
+    const out = new Map<string, string>()
+    for (const s of data.suggestions) {
+      if (s.kind !== 'sequence' || s.confidence !== 'low') continue
+      for (const id of s.transactionIds) out.set(id, s.label)
+    }
+    return out
+  }, [data.suggestions])
+
+  // Every check not inside a genuinely useful group — the long tail that must
+  // stay reachable, or the backlog could never reach zero.
   const ungroupedChecks = useMemo(() => {
     const grouped = new Set(openSuggestions.flatMap((s) => s.transactionIds))
-    return data.checks
-      .filter((c) => !grouped.has(c.id) && !settledIds.has(c.id))
-      .sort((a, b) => b.amount - a.amount)
+    return (
+      data.checks
+        .filter((c) => !grouped.has(c.id) && !settledIds.has(c.id))
+        /*
+         * Check-number order, because that is the order the physical stubs and
+         * the bank register are in — the owner works down one list instead of
+         * hunting for each row. Numberless checks sort to the end by date, since
+         * they cannot be found in the register by number at all and are better
+         * handled as their own small pass.
+         */
+        .sort((a, b) => {
+          const an = a.checkNumber ? Number(a.checkNumber) : NaN
+          const bn = b.checkNumber ? Number(b.checkNumber) : NaN
+          const aHas = Number.isFinite(an)
+          const bHas = Number.isFinite(bn)
+          if (aHas && bHas) return an - bn
+          if (aHas !== bHas) return aHas ? -1 : 1
+          return a.transactionDate.localeCompare(b.transactionDate)
+        })
+    )
   }, [data.checks, openSuggestions, settledIds])
 
   const selectedIds = useMemo(
@@ -299,6 +361,22 @@ export function CheckResolution({
               {p.overlayCount} resolved on this page
             </dd>
           </div>
+          {/*
+            Shown only when it exists, and worded as the narrow claim it is: these
+            dollars are known NOT to be cost of goods, but no payee was recorded,
+            so they cannot appear in vendor spend.
+          */}
+          {p.reviewedNotCogsCount > 0 ? (
+            <div>
+              <dt className="text-xs text-muted-foreground">Reviewed, not COGS</dt>
+              <dd className="text-sm font-semibold tabular-nums">
+                {formatCurrency(p.reviewedNotCogsAmount)}
+              </dd>
+              <dd className="text-xs text-muted-foreground">
+                {p.reviewedNotCogsCount} with no payee named
+              </dd>
+            </div>
+          ) : null}
           <div>
             <dt className="text-xs text-muted-foreground">Share of dollars done</dt>
             <dd className="text-sm font-semibold tabular-nums">
@@ -343,7 +421,7 @@ export function CheckResolution({
           {openSuggestions.length === 0 ? (
             <EmptyState
               title="No grouped checks left"
-              body="Every repeating-amount and sequential group has been reviewed. Any checks still outstanding are on the Individual checks tab."
+              body="No group of checks shares an amount or a same-day run, so there is no safe group answer left to give. Every outstanding check is on the Individual checks tab."
             />
           ) : (
             <ul className="flex flex-col gap-3">
@@ -414,7 +492,8 @@ export function CheckResolution({
                       <ChevronDown
                         className={`size-3 transition-transform ${isOpen ? 'rotate-180' : ''}`}
                       />
-                      {isOpen ? 'Hide' : 'Show'} the {s.count} checks
+                              {isOpen ? 'Hide' : 'Show'} the {s.count}{' '}
+                              {s.count === 1 ? 'check' : 'checks'}
                     </button>
                     {isOpen ? (
                       <CheckList
@@ -439,9 +518,10 @@ export function CheckResolution({
           ) : (
             <div className="rounded-lg border border-border">
               <p className="border-b border-border p-3 text-xs text-muted-foreground text-pretty">
-                These checks share no amount or numbering pattern with others, so
-                they need naming one at a time. Largest first — those move gross
-                profit most.
+                {ungroupedChecks.length} checks need naming one at a time — no two
+                share an amount, so there is no group answer to give. Listed in
+                check-number order to match your checkbook stubs and bank
+                register; the ones with no number are last.
               </p>
               <ul className="divide-y divide-border">
                 {ungroupedChecks.slice(0, 60).map((c) => (
@@ -457,6 +537,17 @@ export function CheckResolution({
                         {c.transactionDate}
                         {c.accountName ? ` · ${c.accountName}` : ''}
                       </p>
+                      {/*
+                        Context, not a suggestion: knowing this check sits in a
+                        numbered run helps locate the stub, but says nothing about
+                        who was paid.
+                      */}
+                      {runHintById.has(c.id) ? (
+                        <p className="text-xs text-muted-foreground/80">
+                          {runHintById.get(c.id)} — adjacent numbers only, likely
+                          different payees
+                        </p>
+                      ) : null}
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="text-sm font-semibold tabular-nums">
@@ -507,8 +598,8 @@ export function CheckResolution({
               </ul>
               {ungroupedChecks.length > 60 ? (
                 <p className="border-t border-border p-3 text-xs text-muted-foreground">
-                  Showing the 60 largest of {ungroupedChecks.length}. Resolve these
-                  and the next batch appears.
+                  Showing the first 60 of {ungroupedChecks.length} by check number.
+                  Resolve these and the next batch appears.
                 </p>
               ) : null}
             </div>
