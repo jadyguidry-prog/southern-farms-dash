@@ -505,3 +505,59 @@ export async function getKnownAccountNames(): Promise<string[]> {
   }
   return [...set].sort()
 }
+
+export type ImportAccountOption = {
+  name: string
+  /**
+   * True when `bank_accounts` says this is a credit card. Null means the account is
+   * unknown to `bank_accounts` (it exists only as a label on past transactions), so
+   * the convention CANNOT be inferred and the owner must state it.
+   *
+   * Null is deliberately distinct from false. Treating "unknown" as "not a card" is
+   * exactly how a card file gets imported under the bank convention.
+   */
+  isCard: boolean | null
+}
+
+/**
+ * Accounts for the import picker, each carrying whether it is a credit card.
+ *
+ * The importer needs this because the two statement conventions are sign-inverted: a
+ * card export lists purchases as POSITIVE, so importing one under the `bank`
+ * convention books every purchase as INCOME. Deriving the convention from the account
+ * removes the guess rather than relying on the owner to notice a pre-filled dropdown.
+ *
+ * Names come from both `bank_accounts` (authoritative for type) and the transaction
+ * ledger (so historical labels still appear), unioned.
+ */
+export async function getImportAccountOptions(): Promise<ImportAccountOption[]> {
+  const supabase = await createClient()
+
+  const [ledgerNames, accountsResult] = await Promise.all([
+    getKnownAccountNames(),
+    supabase.from('bank_accounts').select('account_name, account_type'),
+  ])
+
+  // Never `?? []` a failed query here: silently returning no types would make every
+  // account look conventionless and quietly reintroduce the guess this function
+  // exists to remove.
+  if (accountsResult.error) {
+    throw new Error(
+      `getImportAccountOptions: could not read bank_accounts — ${accountsResult.error.message}`,
+    )
+  }
+
+  const typeByName = new Map<string, boolean>()
+  for (const row of accountsResult.data ?? []) {
+    const name = String(row.account_name ?? '').trim()
+    if (!name) continue
+    typeByName.set(name, String(row.account_type ?? '').toLowerCase().includes('credit'))
+  }
+
+  const names = new Set<string>([...ledgerNames, ...typeByName.keys()])
+
+  return [...names].sort().map((name) => ({
+    name,
+    isCard: typeByName.has(name) ? (typeByName.get(name) as boolean) : null,
+  }))
+}

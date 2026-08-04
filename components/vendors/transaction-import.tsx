@@ -41,11 +41,13 @@ import {
   parseStatementDirection,
   trustedStatementType,
   canonicalizeSign,
+  summarizeImportDirection,
   AMOUNT_CONVENTIONS,
   AMOUNT_CONVENTION_LABELS,
   type AmountConvention,
   type ColumnRole,
 } from '@/lib/transactions'
+import type { ImportAccountOption } from '@/lib/transaction-queries'
 import { commitImport, previewImport, type StagedRow } from '@/app/vendors/import/actions'
 
 const ROLE_LABELS: Record<ColumnRole, string> = {
@@ -74,12 +76,16 @@ type BuiltRow = StagedRow & {
   error: string | null
 }
 
-export function TransactionImport({ accountNames }: { accountNames: string[] }) {
+export function TransactionImport({ accounts }: { accounts: ImportAccountOption[] }) {
   const fileInput = useRef<HTMLInputElement>(null)
   const [parsed, setParsed] = useState<ParsedFile | null>(null)
   const [roles, setRoles] = useState<Record<string, ColumnRole>>({})
   const [accountName, setAccountName] = useState('')
-  const [convention, setConvention] = useState<AmountConvention>('bank')
+  // Null until the convention is actually established, either by the owner or by the
+  // account they picked. It must NOT default to 'bank': the conventions are
+  // sign-inverted, so a pre-filled wrong answer books every card purchase as income —
+  // and a plausible-looking default is precisely what nobody re-reads.
+  const [conventionChoice, setConventionChoice] = useState<AmountConvention | null>(null)
   const [overrideDuplicates, setOverrideDuplicates] = useState(false)
   const [duplicateKeys, setDuplicateKeys] = useState<Set<string> | null>(null)
   const [isPending, startTransition] = useTransition()
@@ -89,6 +95,27 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
     matched: number
     unmatched: number
   } | null>(null)
+
+  // What `bank_accounts` says about the chosen account. Null when the account is not
+  // on file, in which case the type genuinely cannot be inferred.
+  const selectedAccount = accounts.find((a) => a.name === accountName) ?? null
+  const inferredConvention: AmountConvention | null =
+    selectedAccount?.isCard === true
+      ? 'card'
+      : selectedAccount?.isCard === false
+        ? 'bank'
+        : null
+
+  // An explicit choice always wins, so the owner can still import an odd export from a
+  // known account. Otherwise the account decides.
+  const convention: AmountConvention | null = conventionChoice ?? inferredConvention
+
+  // Stated by the owner AND contradicted by the account record. Worth saying out loud
+  // rather than silently obeying: one of the two is wrong.
+  const conventionConflict =
+    conventionChoice !== null &&
+    inferredConvention !== null &&
+    conventionChoice !== inferredConvention
 
   function handleFile(file: File) {
     Papa.parse<Record<string, string>>(file, {
@@ -113,7 +140,10 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
   // Rows that can't be read are kept with an `error` so they are visible on
   // screen instead of silently disappearing from the import.
   const built = useMemo<BuiltRow[]>(() => {
-    if (!parsed) return []
+    // No rows are built until the convention is known. Every amount and every inferred
+    // type depends on it, so guessing here would put a confident preview on screen that
+    // could be inverted — and the preview is the owner's only chance to catch it.
+    if (!parsed || convention === null) return []
 
     const columnFor = (role: ColumnRole) =>
       parsed.headers.find((h) => roles[h] === role) ?? null
@@ -204,12 +234,19 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
   const validRows = built.filter((r) => r.error === null)
   const errorRows = built.filter((r) => r.error !== null)
 
+  // What this file would actually assert once committed. Checked on the built rows so it
+  // reflects the real mapping and convention, not an assumption about either.
+  const direction = summarizeImportDirection(validRows)
+
   const hasRequiredMapping =
     Object.values(roles).includes('transaction_date') &&
     Object.values(roles).includes('description') &&
     (Object.values(roles).includes('amount') ||
       Object.values(roles).includes('debit') ||
       Object.values(roles).includes('credit'))
+
+  // The convention is as load-bearing as the column mapping, so it gates the same step.
+  const readyToReview = hasRequiredMapping && convention !== null
 
   function runPreview() {
     startTransition(async () => {
@@ -338,20 +375,30 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
                   className="mt-1.5"
                 />
                 <datalist id="known-accounts">
-                  {accountNames.map((n) => (
-                    <option key={n} value={n} />
+                  {accounts.map((a) => (
+                    <option key={a.name} value={a.name} />
                   ))}
                 </datalist>
               </div>
 
               <div>
                 <Label htmlFor="amount-convention">Statement type</Label>
+                {/* Intentionally has NO default. The two conventions are sign-inverted,
+                    so a pre-filled guess that happens to be wrong books every card
+                    purchase as income — silently, because the import still succeeds. */}
                 <Select
-                  value={convention}
-                  onValueChange={(v) => setConvention((v as AmountConvention) ?? 'bank')}
+                  value={convention ?? ''}
+                  onValueChange={(v) => setConventionChoice(v as AmountConvention)}
                 >
-                  <SelectTrigger id="amount-convention" className="mt-1.5">
-                    <SelectValue />
+                  <SelectTrigger id="amount-convention" className="mt-1.5 w-full">
+                    {/* The label is passed explicitly rather than left to SelectValue.
+                        Radix only learns item labels once the menu has been opened, so a
+                        convention derived from the account rendered as a bare "card" —
+                        which does not state the sign convention this field exists to
+                        settle. */}
+                    <SelectValue placeholder="Select the statement type…">
+                      {convention ? AMOUNT_CONVENTION_LABELS[convention] : null}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     {AMOUNT_CONVENTIONS.map((c) => (
@@ -361,12 +408,46 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
                     ))}
                   </SelectContent>
                 </Select>
-                <p className="mt-1.5 text-xs text-muted-foreground">
-                  Credit-card exports list purchases as positive numbers. Pick the
-                  matching type so spend is counted correctly.
-                </p>
+                {conventionChoice === null && inferredConvention !== null ? (
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    Set automatically from {accountName} on file
+                    {inferredConvention === 'card'
+                      ? ' — a credit card, so purchases are read as spending.'
+                      : ' — a bank account, so money out is negative.'}{' '}
+                    Change it only if this export differs.
+                  </p>
+                ) : (
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    Credit-card exports list purchases as positive numbers. Pick the
+                    matching type so spend is counted correctly.
+                  </p>
+                )}
               </div>
             </div>
+
+            {convention === null && (
+              <p className="flex items-start gap-2 text-sm text-muted-foreground">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                Choose the statement type before reviewing. Picking the wrong one does
+                not fail — it books purchases as income — so this is not assumed for
+                you.
+              </p>
+            )}
+
+            {conventionConflict && (
+              <p className="flex items-start gap-2 text-sm text-destructive">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  You picked{' '}
+                  <span className="font-medium">
+                    {AMOUNT_CONVENTION_LABELS[conventionChoice as AmountConvention]}
+                  </span>
+                  , but {accountName} is recorded as{' '}
+                  {inferredConvention === 'card' ? 'a credit card' : 'a bank account'}.
+                  One of the two is wrong — check before importing.
+                </span>
+              </p>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -422,7 +503,7 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
         </Card>
       )}
 
-      {parsed && hasRequiredMapping && (
+      {parsed && readyToReview && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">3. Review before importing</CardTitle>
@@ -432,6 +513,44 @@ export function TransactionImport({ accountNames }: { accountNames: string[] }) 
             </CardDescription>
           </CardHeader>
           <CardContent>
+            {/* States what the file will ASSERT, in money, before it is written. An
+                inverted sign does not fail — it succeeds and turns spending into
+                revenue — so the only defence is showing the claim while it can still
+                be rejected. */}
+            <div className="mb-4 rounded-lg border border-border p-3">
+              <p className="text-sm font-medium text-foreground">
+                This file will record{' '}
+                {formatCurrency(direction.expenseTotal)} of spending
+                {direction.incomeTotal > 0 && (
+                  <> and {formatCurrency(direction.incomeTotal)} of money coming in</>
+                )}
+                .
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {direction.expenseCount}{' '}
+                {direction.expenseCount === 1 ? 'row' : 'rows'} out,{' '}
+                {direction.incomeCount} in.
+              </p>
+            </div>
+
+            {direction.looksInverted && (
+              <div className="mb-4 rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+                <p className="flex items-start gap-2 text-sm font-medium text-destructive">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>
+                    Nearly every row would be recorded as money coming IN. Statements
+                    are almost always mostly spending, so the statement type is
+                    probably wrong{selectedAccount?.isCard === true
+                      ? ' — this account is a credit card, so purchases are positive'
+                      : ''}
+                    . Fix it above before importing, or this file will add{' '}
+                    {formatCurrency(direction.incomeTotal)} of revenue that does not
+                    exist.
+                  </span>
+                </p>
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-3">
               <Button
                 type="button"

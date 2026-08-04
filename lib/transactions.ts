@@ -296,6 +296,57 @@ export function canonicalizeSign(
   return signedAmount
 }
 
+/**
+ * Sanity-check what an import is about to CLAIM before it is written.
+ *
+ * The two statement conventions are sign-inverted, so choosing the wrong one does not
+ * fail — it succeeds and books every purchase as income. A card statement imported as
+ * `bank` would silently inflate revenue by the full value of the file and understate
+ * spending by the same amount, which is far worse than an error.
+ *
+ * This guard is deliberately about the OUTCOME, not the cause: it looks at the rows the
+ * owner is about to commit and asks whether the mix is credible for the account type.
+ * That catches a mis-set dropdown, a mis-mapped debit/credit pair, and a bank that
+ * changed its export format, all with one check.
+ *
+ * Statements are overwhelmingly spending, so a file that is nearly all income is the
+ * signature of an inverted sign. The threshold is high (not 50%) to stay quiet on a
+ * genuine deposit-heavy checking export.
+ */
+export function summarizeImportDirection(
+  rows: { transactionType: string; amount: number }[],
+): {
+  incomeCount: number
+  expenseCount: number
+  incomeTotal: number
+  expenseTotal: number
+  /** Share of rows booked as money IN, 0-1. Null when there are no rows to judge. */
+  incomeShare: number | null
+  /** True when the mix looks like an inverted sign rather than real income. */
+  looksInverted: boolean
+} {
+  const isIncome = (t: string) => t === 'income'
+
+  const income = rows.filter((r) => isIncome(r.transactionType))
+  const expense = rows.filter((r) => !isIncome(r.transactionType))
+
+  const sum = (rs: { amount: number }[]) =>
+    rs.reduce((t, r) => t + Math.abs(r.amount), 0)
+
+  const incomeShare = rows.length === 0 ? null : income.length / rows.length
+
+  return {
+    incomeCount: income.length,
+    expenseCount: expense.length,
+    incomeTotal: sum(income),
+    expenseTotal: sum(expense),
+    incomeShare,
+    // Needs enough rows to be meaningful: a 2-row file that is 100% income is a
+    // plausible pair of deposits, not evidence of an inverted statement.
+    looksInverted: rows.length >= 5 && incomeShare !== null && incomeShare >= 0.9,
+  }
+}
+
 // ---------- Vendor matching ----------
 
 export type VendorMatchRule = {

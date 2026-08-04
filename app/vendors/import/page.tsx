@@ -9,13 +9,16 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { TransactionImport } from '@/components/vendors/transaction-import'
-import { getImportBatches, getKnownAccountNames } from '@/lib/transaction-queries'
+import { getImportBatches, getImportAccountOptions } from '@/lib/transaction-queries'
 
 export const dynamic = 'force-dynamic'
 
 export default async function ImportPage() {
-  const [accountNames, batches] = await Promise.all([
-    getKnownAccountNames(),
+  // Accounts carry their type so the importer can derive the statement convention
+  // instead of defaulting to one. The conventions are sign-inverted, so a wrong default
+  // books purchases as income.
+  const [accounts, batches] = await Promise.all([
+    getImportAccountOptions(),
     getImportBatches(),
   ])
 
@@ -36,7 +39,7 @@ export default async function ImportPage() {
         description="Upload a bank or credit card CSV. Transactions are matched to your vendors automatically, duplicates are flagged, and recurring charges are detected for your review."
       />
 
-      <TransactionImport accountNames={accountNames} />
+      <TransactionImport accounts={accounts} />
 
       <Card className="mt-4">
         <CardHeader>
