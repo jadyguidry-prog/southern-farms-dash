@@ -836,22 +836,41 @@ async function reconcile() {
   const categorizedChecks = liveChecks.filter((r) => r.expenseCategory.length > 0)
   const ledgerAudit = await all<{ transaction_id: string }>(
     'transaction_audit_log',
-    'transaction_id, field, action',
+    // `reverted_at` must be selected, or the filter below reads undefined on every
+    // row and quietly treats reverted categorizations as valid provenance.
+    'transaction_id, field, action, reverted_at',
   )
-  const fromLedger = new Set(
+  /*
+   * This assertion used to require that the 2025 ledger import was the ONLY thing
+   * that had ever written `expense_category` on a check. That held while the
+   * review page was unused, and broke the moment the owner actually resolved a
+   * cluster through it — checks 1608/1594/1600 ($2,677.50 Rent, 2026) were
+   * assigned by an audited `categorize_checks` action, which is the page working
+   * as designed, not corruption.
+   *
+   * Deleting it would have dropped the guard along with the stale expectation. The
+   * concern it really protected is PROVENANCE: no category may appear on a check
+   * without a record of who put it there and why, because such a row is
+   * indistinguishable from a silent mutation. So the test now accepts any
+   * non-reverted `expense_category` audit entry regardless of action, and still
+   * fails on a categorized check with no audit trail at all.
+   */
+  const explained = new Set(
     ledgerAudit
-      .filter(
-        (a) =>
-          (a as unknown as { field?: string }).field === 'expense_category' &&
-          (a as unknown as { action?: string }).action === 'categorize_from_2025_ledger',
-      )
+      .filter((a) => {
+        const r = a as unknown as {
+          field?: string
+          reverted_at?: string | null
+        }
+        return r.field === 'expense_category' && !r.reverted_at
+      })
       .map((a) => String(a.transaction_id)),
   )
-  const unexplained = categorizedChecks.filter((r) => !fromLedger.has(String(r.id)))
+  const unexplained = categorizedChecks.filter((r) => !explained.has(String(r.id)))
   eq(
     unexplained.length,
     0,
-    'live: every categorized CHECK row traces to the 2025 ledger import — none written by the overlay',
+    'live: every categorized CHECK row has an audit entry naming who categorized it',
   )
 
   const { count: resCount } = await db
