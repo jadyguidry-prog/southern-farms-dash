@@ -184,9 +184,16 @@ export default async function DashboardPage() {
             value={formatCurrency(capacity.safeToSpendToday)}
             icon={PiggyBank}
             hint={
-              capacity.safeToSpendToday > 0
-                ? `≈ ${formatCurrency(capacity.perDayAllowance)}/day for 7 days · keeps ${formatCurrency(capacity.minCashReserve)} reserve`
-                : `Cash is at or below your ${formatCurrency(capacity.minCashReserve)} reserve`
+              capacity.safeToSpendToday <= 0
+                ? `Cash is at or below your ${formatCurrency(capacity.minCashReserve)} reserve`
+                : // A known payment later in the month must be named here. The headline
+                  // only looks at the near-term window, so without this the tile reads as
+                  // an unqualified surplus on the very screen used to make decisions.
+                  capacity.breachesReserve
+                  ? `≈ ${formatCurrency(capacity.perDayAllowance)}/day for ${capacity.nearTermDays} days · but ${formatCurrency(capacity.reserveShortfall)} short of your reserve by ${new Date(
+                      `${capacity.lowestBalanceDate}T00:00:00`,
+                    ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+                  : `≈ ${formatCurrency(capacity.perDayAllowance)}/day for ${capacity.nearTermDays} days · keeps ${formatCurrency(capacity.minCashReserve)} reserve`
             }
           />
         )}

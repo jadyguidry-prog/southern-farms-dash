@@ -40,6 +40,8 @@ export type SpendingCapacity = CapacityResult & {
   /** Which accounts were treated as spendable cash, for the UI to disclose. */
   operatingAccounts: string[]
   lastLedgerDate: string
+  /** The date the projection starts from, so the UI never re-reads the clock itself. */
+  today: string
   /** Card payoffs charged on their due date, so the UI can name the cliff. */
   cardPayments: ForecastCardPayment[]
   /** Cards that could NOT be forecast, and why. Shown so a gap is never silent. */
@@ -174,6 +176,7 @@ export const getSpendingCapacity = cache(async (): Promise<SpendingCapacity> => 
     thirtyDay,
     operatingAccounts,
     lastLedgerDate,
+    today,
     cardPayments,
     blockedCardPayments,
   }

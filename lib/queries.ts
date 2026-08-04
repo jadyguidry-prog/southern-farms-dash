@@ -915,6 +915,41 @@ export async function getHealthSnapshot() {
 
   const composite = compositeHealth(pillars)
 
+  // A card payment is only worth advising on when it is BOTH forecast and the thing that
+  // takes cash under the reserve. Deriving it here (rather than in health.ts) keeps the
+  // rules engine pure and free of projection-walking.
+  //
+  // The day is found by looking for the forecast payment inside the projection, so the
+  // balance quoted in the advice is the same balance the forecast table shows on that row.
+  // Recomputing it independently is how two surfaces start disagreeing.
+  const cardCliff = (() => {
+    if (!spendingCapacity.breachesReserve) return undefined
+    const candidates = spendingCapacity.cardPayments
+      .map((p) => {
+        const day = spendingCapacity.days.find((d) => d.date === p.dueDate)
+        if (!day || !day.breachesReserve) return null
+        return {
+          accountName: p.accountName,
+          amount: p.amount,
+          dueDate: p.dueDate,
+          balanceAfter: day.cautiousBalance,
+          shortfall: Math.max(0, spendingCapacity.minCashReserve - day.cautiousBalance),
+        }
+      })
+      .filter((c): c is NonNullable<typeof c> => c !== null && c.shortfall > 0)
+    // Worst first, so a single insight names the payment that hurts most rather than
+    // whichever card happens to sort first.
+    candidates.sort((a, b) => b.shortfall - a.shortfall)
+    return candidates[0]
+  })()
+
+  // Cards carrying a balance that could not be projected. Reported so the forecast's
+  // optimism is visible; a silent omission would make the low point look better than it is.
+  const unforecastCards = spendingCapacity.blockedCardPayments.map((p) => ({
+    accountName: p.accountName,
+    reason: p.blockedReason ?? 'not enough information',
+  }))
+
   const insights = generateInsights({
     settings,
     pillars,
@@ -1094,14 +1129,24 @@ export async function getHealthSnapshot() {
     // Needs 8+ complete weeks of deposits before it will pass judgement on
     // whether the business covers its costs; below that the group is omitted so
     // a thin ledger produces no verdict rather than a wrong one.
+    //
+    // The group is emitted when there are 8+ weeks OR when there is a dated card fact to
+    // report. The weekly-gap verdict has its own `weeksObserved >= 8` gate inside
+    // generateInsights, so passing the group with a thin ledger cannot produce a solvency
+    // claim — but it does let a card payment be reported, which depends on the card's own
+    // balance and due date rather than on history.
     spending:
-      spendingCapacity.estimate.weeksObserved >= 8
+      spendingCapacity.estimate.weeksObserved >= 8 ||
+      cardCliff !== undefined ||
+      unforecastCards.length > 0
         ? {
             typicalWeeklyInflow: spendingCapacity.estimate.typicalInflow,
             typicalWeeklyOutflow: spendingCapacity.estimate.typicalOutflow,
             weeksObserved: spendingCapacity.estimate.weeksObserved,
             safeToSpendToday: spendingCapacity.safeToSpendToday,
             breachesReserve: spendingCapacity.breachesReserve,
+            cardCliff,
+            unforecastCards: unforecastCards.length > 0 ? unforecastCards : undefined,
           }
         : undefined,
   })

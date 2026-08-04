@@ -8,6 +8,17 @@ import { formatCurrency, formatPercent } from '@/lib/data'
  * "unknown" is used when the underlying data hasn't been entered yet, so an
  * empty table never masquerades as a passing (or failing) grade.
  */
+/**
+ * "2026-08-18" -> "Aug 18". Split manually rather than `new Date(iso)`, because that
+ * parses a bare date as UTC midnight and renders the PREVIOUS day west of Greenwich —
+ * which would state the wrong due date for a payment.
+ */
+function formatDateLong(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  if (!y || !m || !d) return iso
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
 export type HealthStatus = 'green' | 'yellow' | 'red' | 'unknown'
 
 export type HealthResult = {
@@ -473,8 +484,30 @@ export type SpendingInsightInput = {
   weeksObserved: number
   /** Cash that could be spent now without breaching the reserve. */
   safeToSpendToday: number
-  /** True when the 7-day projection dips under the owner's reserve. */
+  /**
+   * True when the projection dips under the reserve anywhere in the HORIZON (30 days by
+   * default), which is a longer window than `safeToSpendToday` is solved over. The two
+   * answer different questions on purpose, so any copy using both must say which is which.
+   */
   breachesReserve: boolean
+  /**
+   * A dated card payment that drops cash under the reserve later in the horizon.
+   *
+   * Separate from `breachesReserve` because the cause matters to the advice: a shortfall
+   * caused by a known, dated payment is actionable (move the date, pay part of it, hold
+   * cash back), whereas a general downward drift needs sales or cost changes. Omitted
+   * entirely when no card payment is responsible, so no advice is invented.
+   */
+  cardCliff?: {
+    accountName: string
+    amount: number
+    dueDate: string
+    /** Cash left on the day it clears, on the cautious basis. */
+    balanceAfter: number
+    shortfall: number
+  }
+  /** Cards with a balance that could NOT be forecast, so the gap is stated not hidden. */
+  unforecastCards?: { accountName: string; reason: string }[]
 }
 
 /**
@@ -567,9 +600,53 @@ export function generateInsights({
   const out: Insight[] = []
   const { payroll, cash, sales } = pillars
 
+  // --- A dated card payment that breaks the reserve ---
+  // Placed above the weekly-gap insight because it is a specific amount on a specific
+  // date, which is more actionable than a structural trend. No history threshold applies:
+  // the amount and date come from the card itself, not from an estimate.
+  if (spending?.cardCliff) {
+    const c = spending.cardCliff
+    out.push({
+      id: 'auto-card-payment-breaks-reserve',
+      severity: 'critical',
+      category: 'Cash',
+      title: 'A card payment will take you under your cash reserve',
+      detail:
+        `${c.accountName} has ${formatCurrency(c.amount)} due on ` +
+        `${formatDateLong(c.dueDate)}. On a slow week that payment leaves about ` +
+        `${formatCurrency(c.balanceAfter)} in the bank — ${formatCurrency(c.shortfall)} below ` +
+        `your reserve. Spare cash shown as spendable today is measured over a shorter ` +
+        `window and does not hold this back for you. ` +
+        `Either set aside ${formatCurrency(c.shortfall)} now, plan to pay part of the ` +
+        `balance rather than all of it, or line up the payment behind your next deposit.`,
+      impact: `${formatCurrency(c.shortfall)} short on ${formatDateLong(c.dueDate)}`,
+    })
+  }
+
+  // A card carrying a balance that cannot be forecast is a hole in the number above, so
+  // it is reported rather than left to make the forecast quietly optimistic.
+  if (spending?.unforecastCards?.length) {
+    const cards = spending.unforecastCards
+    out.push({
+      id: 'auto-card-payment-not-forecast',
+      severity: 'warning',
+      category: 'Cash',
+      title:
+        cards.length === 1
+          ? 'A card payment is missing from your cash forecast'
+          : `${cards.length} card payments are missing from your cash forecast`,
+      detail:
+        `${cards.map((c) => `${c.accountName} (${c.reason})`).join('; ')}. ` +
+        `Until that is filled in, the forecast assumes no payment leaves your account for ` +
+        `${cards.length === 1 ? 'it' : 'them'}, so your real low point may be worse than shown. ` +
+        `Add the statement due date in Admin to include ${cards.length === 1 ? 'it' : 'them'}.`,
+      impact: 'Forecast is incomplete',
+    })
+  }
+
   // --- Weekly cash position (bank-derived) ---
-  // Deliberately placed first: whether a typical week covers its own costs
-  // outranks every ratio below it. Requires 8+ complete weeks, so a partially
+  // Deliberately placed first among ESTIMATE-based insights: whether a typical week covers
+  // its own costs outranks every ratio below it. Requires 8+ complete weeks, so a partially
   // imported ledger cannot trigger a solvency verdict.
   if (spending && spending.weeksObserved >= 8) {
     const gap = spending.typicalWeeklyInflow - spending.typicalWeeklyOutflow

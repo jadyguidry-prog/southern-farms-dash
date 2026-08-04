@@ -72,7 +72,29 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
     minCashReserve,
     cashOnHand,
     estimate,
+    nearTermDays,
+    horizonDays,
+    cardPayments,
+    blockedCardPayments,
   } = capacity
+
+  // The table shows the spendable window. Everything beyond it is listed separately as
+  // "coming up", because a 30-row table buries the one row that matters.
+  const nearTermRows = days.slice(0, nearTermDays)
+  const lastNearTermDate = nearTermRows.at(-1)?.date ?? capacity.today
+
+  // A breach INSIDE the spendable window and a breach three weeks out need different
+  // wording. Telling the owner "nothing spare to spend this week" because of a payment
+  // due on the 18th would contradict the headline directly above it, which is exactly how
+  // two panels using different standards end up looking broken.
+  const breachIsNearTerm = breachesReserve && lowestBalanceDate <= lastNearTermDate
+
+  // Dated events beyond the spendable window — the cliff the old 7-day view could not see.
+  const comingUp = days
+    .filter((d) => d.date > lastNearTermDate)
+    .flatMap((d) => d.items.map((i) => ({ ...i, date: d.date, balance: d.cautiousBalance })))
+    .filter((i) => i.amount > 0)
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
 
   // With no reserve configured, this figure is what it takes to run the account to
   // zero. That is a legitimate calculation but reckless advice to present bare, so
@@ -93,7 +115,8 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
             <CardTitle className="text-base">Safe to Spend</CardTitle>
             <CardDescription className="text-pretty">
               What today&apos;s cash can cover after your reserve, bills, and
-              expected costs for the next 7 days
+              expected costs for the next {nearTermDays} days. Card payments due
+              later are checked separately, over {horizonDays} days.
             </CardDescription>
           </div>
           <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -121,12 +144,12 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                   {formatCurrency(perDayAllowance)}
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  a day for 7 days
+                  a day for {nearTermDays} days
                 </p>
               </div>
             </div>
 
-            {breachesReserve ? (
+            {breachesReserve && breachIsNearTerm ? (
               <div className="mt-4 flex gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
                 <TriangleAlert
                   className="size-4 shrink-0 text-destructive"
@@ -143,6 +166,33 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                   </span>{' '}
                   under your {formatCurrency(minCashReserve)} reserve. There is
                   nothing spare to spend this week.
+                </p>
+              </div>
+            ) : null}
+
+            {breachesReserve && !breachIsNearTerm ? (
+              <div className="mt-4 flex gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+                <TriangleAlert
+                  className="size-4 shrink-0 text-destructive"
+                  aria-hidden
+                />
+                <p className="text-sm text-foreground text-pretty">
+                  Spendable today, but not for long: on a slow week your cash falls
+                  to{' '}
+                  <span className="font-medium tabular-nums">
+                    {formatCurrency(lowestBalance)}
+                  </span>{' '}
+                  by {dayLabel(lowestBalanceDate)} &mdash;{' '}
+                  <span className="font-medium tabular-nums">
+                    {formatCurrency(reserveShortfall)}
+                  </span>{' '}
+                  under your {formatCurrency(minCashReserve)} reserve. The figure
+                  above only looks {nearTermDays} days ahead, so it does not yet
+                  account for that. Hold back at least{' '}
+                  <span className="font-medium tabular-nums">
+                    {formatCurrency(reserveShortfall)}
+                  </span>{' '}
+                  of it.
                 </p>
               </div>
             ) : null}
@@ -192,6 +242,25 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
               </div>
             ) : null}
 
+            {blockedCardPayments.length > 0 ? (
+              <div className="mt-4 flex gap-3 rounded-lg border border-border bg-muted/40 p-3">
+                <Info className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                <div className="text-sm text-muted-foreground text-pretty">
+                  <p>
+                    {blockedCardPayments.length === 1 ? 'A card payment is' : 'Some card payments are'}{' '}
+                    missing from this forecast, so your real low point may be worse:
+                  </p>
+                  <ul className="mt-1 list-disc pl-5">
+                    {blockedCardPayments.map((p) => (
+                      <li key={p.accountName}>
+                        {p.accountName} &mdash; {p.blockedReason}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            ) : null}
+
             <div className="mt-5 overflow-x-auto">
               <Table>
                 <TableHeader>
@@ -203,7 +272,7 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {days.map((d) => (
+                  {nearTermRows.map((d) => (
                     <TableRow
                       key={d.date}
                       className={d.breachesReserve ? 'bg-destructive/5' : undefined}
@@ -236,13 +305,47 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
               </Table>
             </div>
 
+            {comingUp.length > 0 ? (
+              <div className="mt-5">
+                <h4 className="text-sm font-medium text-foreground">
+                  Coming up after day {nearTermDays}
+                </h4>
+                <p className="mt-1 text-xs text-muted-foreground text-pretty">
+                  Known payments beyond the window above. These are already counted in
+                  the low point, but not in today&apos;s spendable figure.
+                </p>
+                <ul className="mt-2 divide-y divide-border">
+                  {comingUp.map((i) => (
+                    <li
+                      key={`${i.date}-${i.label}`}
+                      className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 py-2"
+                    >
+                      <span className="text-sm text-foreground">{i.label}</span>
+                      <span className="flex items-baseline gap-3">
+                        <span className="text-xs text-muted-foreground">
+                          {dayLabel(i.date)}
+                        </span>
+                        <span className="text-sm font-medium tabular-nums text-foreground">
+                          {formatCurrency(i.amount)}
+                        </span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
             <p className="mt-3 text-xs text-muted-foreground text-pretty">
               Balances use the cautious (slow-week) estimate of{' '}
               {formatCurrency(estimate.cautiousInflow)} coming in per week; a
               typical week is {formatCurrency(estimate.typicalInflow)}. Starting
               cash is {formatCurrency(cashOnHand)} across your operating accounts,
               and your reserve of {formatCurrency(minCashReserve)} is held back.
-              Credit cards are excluded, since borrowing is not cash on hand.
+              Card balances are not counted as cash, since borrowing is not money you
+              have &mdash; but{' '}
+              {cardPayments.length > 0
+                ? 'the payment due on each card is charged on its due date, so the day it clears is visible above.'
+                : 'no card payment is currently being forecast.'}
             </p>
           </>
         )}
