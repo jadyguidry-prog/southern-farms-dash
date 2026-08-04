@@ -7,6 +7,46 @@ export type FieldDef = {
   required?: boolean
   options?: string[]
   placeholder?: string
+  /**
+   * Write NULL, not 0, when a numeric field is left blank.
+   *
+   * Only valid on columns that are actually nullable. Set it wherever the read path
+   * distinguishes "not recorded" from a real zero — a blank statement balance saved as
+   * `0` claims the card is paid off, which is a specific and expensive lie on an
+   * account that runs five figures a month.
+   *
+   * Deliberately opt-in per field: `credit_limit` and `available_credit` are
+   * `NOT NULL DEFAULT 0` in the database, so forcing NULL there would fail the write
+   * instead of recording the blank.
+   */
+  blankIsNull?: boolean
+}
+
+/**
+ * Coerce a raw form/CSV string to the correct JS type for its column.
+ *
+ * Lives here rather than in the server action so it can be tested directly. The rule it
+ * encodes is easy to regress and expensive when it does: a blank numeric field must not
+ * become 0 where the read path treats NULL as "not recorded". Saving a blank statement
+ * balance as 0 asserts the card is paid off.
+ */
+export function coerceFieldValue(
+  value: string | null,
+  type: FieldType | string,
+  blankIsNull = false,
+): unknown {
+  if (value == null || value === '') {
+    if (type !== 'number') return null
+    return blankIsNull ? null : 0
+  }
+  if (type === 'number') {
+    const n = Number(String(value).replace(/[$,%\s]/g, ''))
+    return Number.isFinite(n) ? n : 0
+  }
+  // Normalize boolean-like values (used by the "recurring" obligation flag).
+  if (value === 'true') return true
+  if (value === 'false') return false
+  return value
 }
 
 export type TableDef = {
@@ -236,6 +276,9 @@ export const ADMIN_TABLES: TableDef[] = [
         name: 'statement_balance',
         label: 'Statement Balance (cards)',
         type: 'number',
+        // Load-bearing. Without this a blank saves as 0, and the whole read path
+        // (queries.ts, card-safety.ts) treats 0 as a confirmed "nothing due".
+        blankIsNull: true,
       },
       {
         name: 'statement_due_date',
