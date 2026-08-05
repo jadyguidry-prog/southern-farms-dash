@@ -627,6 +627,140 @@ export async function voidPayment(paymentId: string, reason?: string): Promise<A
 }
 
 /**
+ * Turn a recorded-but-never-sent payment back into an unpaid invoice due.
+ *
+ * Why this exists: five entries here were logged as payments when they were
+ * really invoices that had ARRIVED but not been paid (they were the only
+ * outstanding rows with no check number). A payment and an invoice make opposite
+ * claims about the bank balance, so the mistake was expensive in both directions
+ * at once: `sumOutstanding` subtracts every outstanding row from spendable cash
+ * (it filters on STATUS, not method, so ACH rows count too), while the invoice
+ * was missing from the payable list and the upcoming-outflow forecast. The money
+ * was treated as already gone AND as not owed.
+ *
+ * Deliberately DELETES the payment row rather than voiding it (owner's choice): a
+ * void leaves a "voided check" in the history that never existed. The audit table
+ * cascades on delete, so provenance is written onto the new invoice's notes —
+ * otherwise the trail would vanish entirely.
+ */
+export async function convertPaymentToInvoice(
+  paymentId: string,
+): Promise<{ ok: boolean; error?: string; obligationId?: string }> {
+  if (!paymentId) return { ok: false, error: 'No payment was specified.' }
+
+  const supabase = await createClient()
+
+  const { data: p, error: readErr } = await supabase
+    .from('obligation_payments')
+    .select(
+      'id, status, obligation_id, amount, payment_date, payment_method, check_number, payee_name, purpose, memo',
+    )
+    .eq('id', paymentId)
+    .maybeSingle()
+  if (readErr) return { ok: false, error: readErr.message }
+  if (!p) return { ok: false, error: 'That payment no longer exists.' }
+
+  // Only an OUTSTANDING payment can become an invoice. A cleared payment has been
+  // seen leaving the bank, so the money is genuinely gone and calling it an unpaid
+  // invoice would overstate cash by its amount. A void is already not counted.
+  if (p.status !== 'outstanding') {
+    return {
+      ok: false,
+      error:
+        p.status === 'cleared'
+          ? 'This payment already cleared the bank, so the money has left the account. Only an uncleared payment can be turned back into an invoice.'
+          : 'This payment is void, so it is not counted as paid or owed. Enter a new invoice instead.',
+    }
+  }
+
+  // A payment attached to a scheduled bill must not be converted: the bill ALREADY
+  // represents the amount owed, so adding an invoice beside it would double-count
+  // the obligation and leave the original bill looking part-paid by a payment that
+  // no longer exists. Voiding is the correct tool there, and it reopens the bill.
+  if (p.obligation_id) {
+    return {
+      ok: false,
+      error:
+        'This payment is attached to a scheduled bill, which already tracks what is owed. Void the payment instead — that reopens the bill without creating a duplicate.',
+    }
+  }
+
+  const payee = (p.payee_name ?? '').trim()
+  const purpose = (p.purpose ?? '').trim()
+  const dueDate = (p.payment_date ?? '').slice(0, 10)
+  if (!dueDate) {
+    return { ok: false, error: 'This payment has no date, so the invoice would have no due date.' }
+  }
+
+  // The invoice needs a name. `purpose` is what the owner actually typed ("Weekly
+  // Bulk COGS"), so prefer it; fall back to the payee so the row is never nameless.
+  const name = purpose || (payee ? `Invoice — ${payee}` : '')
+  if (!name) {
+    return {
+      ok: false,
+      error: 'This payment has no payee or purpose, so there is nothing to name the invoice.',
+    }
+  }
+
+  // Provenance, because deleting the payment cascades its audit rows away.
+  const trail = [
+    `Converted from a recorded ${p.payment_method === 'ach' ? 'ACH' : 'check'} payment dated ${dueDate}`,
+    p.check_number ? `check #${p.check_number}` : null,
+    'the payment had not actually been sent',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  const notes = [(p.memo ?? '').trim() || null, trail].filter(Boolean).join('\n')
+
+  // Reuse createBillDue so a converted invoice is byte-for-byte the same shape as
+  // a hand-entered one — including its deliberate payment_method 'Check', which
+  // keeps the ACH matcher from auto-closing it against an unrelated bank debit.
+  const created = await createBillDue({
+    obligationName: name,
+    vendorName: payee || undefined,
+    amount: Number(p.amount),
+    dueDate,
+    notes,
+  })
+  if (!created.ok || !created.obligationId) {
+    return { ok: false, error: created.error ?? 'Could not create the invoice.' }
+  }
+
+  // Insert BEFORE delete, then compensate on failure. The reverse order risks
+  // destroying the record with nothing to replace it; this order's worst case is a
+  // duplicate we immediately remove. Leaving both would double-count the money.
+  const { error: delErr } = await supabase
+    .from('obligation_payments')
+    .delete()
+    .eq('id', paymentId)
+
+  if (delErr) {
+    const { error: rollbackErr } = await supabase
+      .from('cash_obligations')
+      .delete()
+      .eq('id', created.obligationId)
+    if (rollbackErr) {
+      // Both writes failed to settle. Say so loudly with the ids: the books are
+      // now double-counting this amount and a human has to pick one.
+      console.log('[v0] convertPaymentToInvoice: rollback FAILED', {
+        paymentId,
+        obligationId: created.obligationId,
+        delErr: delErr.message,
+        rollbackErr: rollbackErr.message,
+      })
+      return {
+        ok: false,
+        error: `Serious problem: the invoice was created but the old payment could not be removed, and undoing the invoice also failed. This amount is now counted twice. Invoice id ${created.obligationId}, payment id ${paymentId}.`,
+      }
+    }
+    return { ok: false, error: `Could not remove the old payment record: ${delErr.message}` }
+  }
+
+  revalidateAll()
+  return { ok: true, obligationId: created.obligationId }
+}
+
+/**
  * Manually clear an outstanding check (owner saw it on the statement) without a
  * matched Plaid row. Suggested Plaid matches use a separate confirm path.
  */

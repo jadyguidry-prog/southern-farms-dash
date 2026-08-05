@@ -54,6 +54,7 @@ import {
   recordPayment,
   recordOneOffPayment,
   voidPayment,
+  convertPaymentToInvoice,
   clearPayment,
   confirmClearWithMatch,
   reconcileAchFromBank,
@@ -419,6 +420,9 @@ function OutstandingRow({
   label: string
 }) {
   const [pending, startTransition] = useTransition()
+  // Confirmation is required because the conversion DELETES the payment record and
+  // moves money from "already spent" back to "still owed".
+  const [confirmConvert, setConfirmConvert] = useState(false)
 
   const onClear = () => {
     startTransition(async () => {
@@ -434,6 +438,19 @@ function OutstandingRow({
       else toast.error(res.error ?? 'Could not void the payment.')
     })
   }
+  const onConvert = () => {
+    setConfirmConvert(false)
+    startTransition(async () => {
+      const res = await convertPaymentToInvoice(payment.id)
+      if (res.ok) toast.success('Moved to invoices due. It is no longer counted as paid.')
+      else toast.error(res.error ?? 'Could not convert this payment.')
+    })
+  }
+
+  // A payment WITH a check number means a physical check exists, so converting it
+  // is a much stronger claim than for a row that was never sent. Both are allowed
+  // (a check can be written and never mailed) but the confirm text differs.
+  const hasCheckNumber = Boolean(payment.checkNumber)
 
   return (
     <Card>
@@ -464,6 +481,20 @@ function OutstandingRow({
             <Check className="size-4" aria-hidden="true" />
             Cleared
           </Button>
+          {/* For the case this panel can't distinguish on its own: the entry was
+              logged as a payment but the money never left. Icon-only to keep the
+              row readable; the label is on the tooltip and the confirm dialog. */}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-11"
+            onClick={() => setConfirmConvert(true)}
+            disabled={pending}
+            title="Not paid yet — move to invoices due"
+            aria-label="Not paid yet — move to invoices due"
+          >
+            <FileClock className="size-4" aria-hidden="true" />
+          </Button>
           <Button
             size="sm"
             variant="ghost"
@@ -476,6 +507,45 @@ function OutstandingRow({
           </Button>
         </div>
       </CardContent>
+
+      <Dialog open={confirmConvert} onOpenChange={setConfirmConvert}>
+        <DialogContent className="max-w-md grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>Move to invoices due?</DialogTitle>
+            <DialogDescription>
+              {label} · {formatCurrency(payment.amount)}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="-mx-1 min-h-0 space-y-3 overflow-y-auto px-1 text-sm leading-relaxed">
+            <p className="text-muted-foreground">
+              This treats the money as{' '}
+              <span className="font-semibold text-foreground">still owed</span> rather
+              than already spent. Your spendable cash goes up by{' '}
+              {formatCurrency(payment.amount)}, and the invoice appears in your payable
+              list and cash forecast, due {payment.paymentDate}.
+            </p>
+            <p className="text-muted-foreground">
+              The payment record is deleted, so this won&apos;t show as a voided check.
+            </p>
+            {hasCheckNumber && (
+              <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-foreground">
+                Check #{payment.checkNumber} is recorded against this payment. Only do
+                this if that check was never actually sent.
+              </p>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmConvert(false)}>
+              Cancel
+            </Button>
+            <Button onClick={onConvert} disabled={pending}>
+              {pending ? 'Moving…' : 'Move to invoices due'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }
