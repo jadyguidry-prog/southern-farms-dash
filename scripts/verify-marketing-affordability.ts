@@ -686,5 +686,146 @@ console.log('\nRecommendation wording')
   ok('the reasons cite real drivers', grow.reasons.length >= 2, JSON.stringify(grow.reasons))
 }
 
+/* ------------------------------------------------------------------ */
+/* The baseline note — "reduce" that is really an increase             */
+/* ------------------------------------------------------------------ */
+{
+  console.log('\nBaseline note')
+
+  // The live shape: a $1,045/mo long-run rate, a $586 recommendation, but only
+  // $355/mo recorded over the recent window. "Reduce by $459" is arithmetically
+  // right against the long-run rate and reads as a cut when the target is in fact
+  // ABOVE recent recorded spend.
+  const misleading = buildRecommendation({
+    band: 'Healthy',
+    currentMonthlyMarketing: 1_045,
+    recommended: 586,
+    additionalSafe: 14_000,
+    reserveCoverage: 2,
+    revenueTrendPct: -27.9,
+    seasonalIndex: 0.81,
+    seasonalLabel: 'September',
+    payrollPct: 29,
+    targetPayrollPct: 15,
+    obligationsDue: 20_224,
+    boundBy: 'none',
+    recentMonthlyRecorded: 355,
+    monthsSinceLastSpend: 1,
+    measurementGap: true,
+  })
+  check('the direction word is still reduce', misleading.action, 'reduce')
+  ok('a contradiction produces a note', misleading.baselineNote !== null, 'note was null')
+  ok(
+    'the note says the target is above recent spend',
+    /above what the books show/i.test(misleading.baselineNote ?? ''),
+    misleading.baselineNote ?? '',
+  )
+  ok(
+    'the note names the long-run baseline being compared against',
+    (misleading.baselineNote ?? '').includes('1,045'),
+    misleading.baselineNote ?? '',
+  )
+  ok(
+    'the note quotes recent recorded spend',
+    (misleading.baselineNote ?? '').includes('355'),
+    misleading.baselineNote ?? '',
+  )
+  ok(
+    'a measurement gap sends the owner to Check Resolution, not to cut spend',
+    /Check Resolution/.test(misleading.baselineNote ?? ''),
+    misleading.baselineNote ?? '',
+  )
+
+  // Same contradiction, but nothing is missing from the feed. The remedy differs:
+  // the recent decline is REAL, so there is nothing to go and identify.
+  const noGap = buildRecommendation({
+    band: 'Healthy',
+    currentMonthlyMarketing: 1_045,
+    recommended: 586,
+    additionalSafe: 14_000,
+    reserveCoverage: 2,
+    revenueTrendPct: 0,
+    seasonalIndex: 1,
+    seasonalLabel: null,
+    payrollPct: 20,
+    targetPayrollPct: 25,
+    obligationsDue: 5_000,
+    boundBy: 'none',
+    recentMonthlyRecorded: 355,
+    monthsSinceLastSpend: 2,
+    measurementGap: false,
+  })
+  ok(
+    'with no data gap the note does not send the owner to Check Resolution',
+    !/Check Resolution/.test(noGap.baselineNote ?? ''),
+    noGap.baselineNote ?? '',
+  )
+
+  // The note must STAY SILENT when the wording already matches reality, or it
+  // becomes noise on every single recommendation.
+  const consistent = buildRecommendation({
+    band: 'Healthy',
+    currentMonthlyMarketing: 1_045,
+    recommended: 586,
+    additionalSafe: 14_000,
+    reserveCoverage: 2,
+    revenueTrendPct: 0,
+    seasonalIndex: 1,
+    seasonalLabel: null,
+    payrollPct: 20,
+    targetPayrollPct: 25,
+    obligationsDue: 5_000,
+    boundBy: 'none',
+    // Recent spend is ABOVE the recommendation, so "reduce" is honest.
+    recentMonthlyRecorded: 900,
+    monthsSinceLastSpend: 0,
+    measurementGap: true,
+  })
+  check('an honest reduce carries no note', consistent.baselineNote, null)
+
+  // Inverse direction: "increase" toward a figure BELOW recent recorded spend is
+  // the same lie mirrored, and must also be caught.
+  const mirrored = buildRecommendation({
+    band: 'Excellent',
+    currentMonthlyMarketing: 200,
+    recommended: 400,
+    additionalSafe: 40_000,
+    reserveCoverage: 3,
+    revenueTrendPct: 8,
+    seasonalIndex: 1,
+    seasonalLabel: null,
+    payrollPct: 20,
+    targetPayrollPct: 25,
+    obligationsDue: 5_000,
+    boundBy: 'none',
+    recentMonthlyRecorded: 900,
+    monthsSinceLastSpend: 0,
+    measurementGap: false,
+  })
+  check('the mirrored case is an increase', mirrored.action, 'increase')
+  ok(
+    'an increase below recent spend is flagged as below',
+    /below what the books show/i.test(mirrored.baselineNote ?? ''),
+    mirrored.baselineNote ?? '',
+  )
+
+  // Callers that pass no recent figure must not get a fabricated note.
+  const noRecent = buildRecommendation({
+    band: 'Healthy',
+    currentMonthlyMarketing: 1_045,
+    recommended: 586,
+    additionalSafe: 14_000,
+    reserveCoverage: 2,
+    revenueTrendPct: 0,
+    seasonalIndex: 1,
+    seasonalLabel: null,
+    payrollPct: 20,
+    targetPayrollPct: 25,
+    obligationsDue: 5_000,
+    boundBy: 'none',
+  })
+  check('no recent figure means no note', noRecent.baselineNote, null)
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 if (fail > 0) process.exit(1)

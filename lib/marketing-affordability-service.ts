@@ -391,6 +391,9 @@ export function summarizeCurrentMarketingSpend(
   // Averages run over a fixed window of CALENDAR months, not over the months
   // that happen to contain rows. Dividing by the number of active months would
   // report a $200 average for a business that advertised once all year.
+  //
+  // RECENT_WINDOW_MONTHS drives both the `avg3Month` arithmetic and the wording
+  // that quotes it, so the label can never claim a window the maths didn't use.
   const windowSum = (months: number) => {
     let total = 0
     for (let i = 0; i < months; i += 1) {
@@ -442,7 +445,7 @@ export function summarizeCurrentMarketingSpend(
   return {
     currentMonth: byMonth.get(thisMonthKey) ?? 0,
     currentMonthKey: latestWithSpend?.monthKey ?? null,
-    avg3Month: windowSum(3) / 3,
+    avg3Month: windowSum(RECENT_WINDOW_MONTHS) / RECENT_WINDOW_MONTHS,
     avg12Month: annualTotal / 12,
     typicalMonthly,
     activeMonthsSpanned,
@@ -1344,6 +1347,19 @@ export type MarketingRecommendation = {
   reasons: string[]
   /** Safety rules that actively bound the answer. */
   blockers: string[]
+  /**
+   * States which baseline the direction word ("reduce"/"increase") is measured
+   * against — but ONLY when recent recorded spend contradicts that word, so the
+   * note appears exactly when it is needed and stays silent otherwise.
+   *
+   * Why: the baseline is the stale-proof long-run rate, deliberately not a
+   * trailing window. That is right for the arithmetic and misleading in the copy.
+   * Against a $1,045/mo long-run rate the page said "Reduce marketing by $459, to
+   * $586" while the last 3 recorded months averaged $355 and the last active month
+   * was $0 — so the "cut" was really close to a doubling of recent behaviour. Both
+   * figures are correct; only the unqualified word "reduce" was wrong.
+   */
+  baselineNote: string | null
 }
 
 export function buildRecommendation(input: {
@@ -1360,6 +1376,20 @@ export function buildRecommendation(input: {
   obligationsDue: number
   unscheduledObligations?: number
   boundBy: RecommendedBudget['boundBy']
+  /**
+   * Average monthly marketing RECORDED over the last RECENT_WINDOW_MONTHS. Used
+   * only to detect a misleading direction word — never as the baseline.
+   */
+  recentMonthlyRecorded?: number
+  /** Calendar months since the last recorded marketing charge, if any. */
+  monthsSinceLastSpend?: number | null
+  /**
+   * True when marketing is known to be arriving by a route the feed cannot
+   * attribute (lapsed channels, payee-less checks). Changes the REMEDY: with a
+   * gap the recent figure is a floor to be investigated, without one it is a real
+   * slowdown. Merging the two would send the owner to the wrong screen.
+   */
+  measurementGap?: boolean
 }): MarketingRecommendation {
   const reasons: string[] = []
   const blockers: string[] = []
@@ -1449,7 +1479,37 @@ export function buildRecommendation(input: {
     summary = `Maintain current marketing at ${formatMoney(input.currentMonthlyMarketing)} a month.`
   }
 
-  return { action, amount: roundCents(delta), summary, reasons, blockers }
+  // The note fires on CONTRADICTION, not on a size threshold: a "reduce" whose
+  // target sits above recent recorded spend, or an "increase" whose target sits
+  // below it. No arbitrary "materially diverges" cutoff to calibrate, and it stays
+  // silent whenever the word already matches recent behaviour.
+  let baselineNote: string | null = null
+  const recent = input.recentMonthlyRecorded
+  if (recent !== undefined && (action === 'reduce' || action === 'increase')) {
+    const contradicts =
+      action === 'reduce' ? input.recommended > recent : input.recommended < recent
+    if (contradicts) {
+      const lastSpend =
+        input.monthsSinceLastSpend === null || input.monthsSinceLastSpend === undefined
+          ? null
+          : input.monthsSinceLastSpend === 0
+            ? 'this month'
+            : input.monthsSinceLastSpend === 1
+              ? 'last month'
+              : `${input.monthsSinceLastSpend} months ago`
+      const direction = action === 'reduce' ? 'above' : 'below'
+      baselineNote =
+        `That change is measured against your ${formatMoney(input.currentMonthlyMarketing)}/month long-run rate. ` +
+        `Recorded marketing over the last ${RECENT_WINDOW_MONTHS} months averaged ${formatMoney(recent)}/month` +
+        (lastSpend ? `, with the last charge ${lastSpend}` : '') +
+        `, so ${formatMoney(input.recommended)} is actually ${direction} what the books show you spending lately. ` +
+        (input.measurementGap
+          ? 'Treat that recent figure as a floor, not the truth: marketing is also arriving by routes this feed cannot attribute, so identifying those on Check Resolution is what would settle it.'
+          : 'The long-run rate is used on purpose, so a lagging bank feed cannot argue you into a cut you never made.')
+    }
+  }
+
+  return { action, amount: roundCents(delta), summary, reasons, blockers, baselineNote }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1560,6 +1620,16 @@ export type MarketingAffordability = {
 
 /** Scenario increments offered by the slider, smallest first. */
 export const SCENARIO_INCREMENTS = [250, 500, 1000, 2000, 3000]
+
+/**
+ * Width of the "what have we spent lately" window, in calendar months.
+ *
+ * Deliberately NOT the baseline for any recommendation — a trailing window
+ * collapses toward zero whenever the bank feed lags, which is what produced the
+ * old "$16/month" figure. It is only used to warn when the recommendation's
+ * direction word disagrees with recent recorded spend.
+ */
+export const RECENT_WINDOW_MONTHS = 3
 
 async function fetchTransactions(): Promise<CashFlowInputRow[]> {
   const supabase = await createClient()
@@ -1900,6 +1970,13 @@ export async function getMarketingAffordability(
     obligationsDue: cash.obligations30,
     unscheduledObligations: cash.unscheduledObligations,
     boundBy: budget.boundBy,
+    recentMonthlyRecorded: spend.avg3Month,
+    monthsSinceLastSpend: spend.monthsSinceLastSpend,
+    // A gap exists if either channel has dropped out of the feed OR payee-less
+    // rows remain unidentified. Both mean recorded recent spend understates
+    // reality, and both are resolved on the same screen.
+    measurementGap:
+      reconciliation.lapsed.length > 0 || reconciliation.unattributable.count > 0,
   })
 
   // ---- Confidence ----
