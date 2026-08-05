@@ -17,7 +17,8 @@ import { saveBusinessSettings } from '@/app/admin/actions'
 type FieldDef = {
   key: string
   label: string
-  unit: 'percent' | 'currency'
+  // 'days' is a plain integer count, so it takes neither the $ prefix nor the % suffix.
+  unit: 'percent' | 'currency' | 'days'
   hint: string
 }
 
@@ -64,13 +65,29 @@ const FIELDS: FieldDef[] = [
     unit: 'currency',
     hint: 'Typical monthly wholesale revenue.',
   },
+  {
+    key: 'bill_reminder_lead_days',
+    label: 'Bill Reminder Lead Time',
+    unit: 'days',
+    hint: 'How many days ahead a bill starts showing in "Bills to pay".',
+  },
 ]
 
 // Accepts the whole settings object (which also carries a `rows` array) and
 // pulls just the numeric target for each field.
+//
+// A missing value becomes an EMPTY string, never "0". Showing 0 for an absent setting
+// makes a failed read look like a deliberate choice — and for a lead time specifically, a
+// silent 0 would mean "only warn me on the due date itself", quietly removing all the
+// advance notice while appearing to work. Empty renders as a blank box the owner can see
+// needs filling in.
 function toFormState(values: Record<string, unknown>) {
   return Object.fromEntries(
-    FIELDS.map((f) => [f.key, String(Number(values[f.key] ?? 0))]),
+    FIELDS.map((f) => {
+      const raw = values[f.key]
+      const n = Number(raw)
+      return [f.key, raw == null || !Number.isFinite(n) ? '' : String(n)]
+    }),
   ) as Record<string, string>
 }
 
@@ -134,7 +151,9 @@ export function FinancialTargetsForm({
                     className={
                       f.unit === 'currency'
                         ? 'pl-7 font-mono'
-                        : 'pr-7 font-mono'
+                        : f.unit === 'percent'
+                          ? 'pr-7 font-mono'
+                          : 'pr-12 font-mono'
                     }
                   />
                   {f.unit === 'percent' && (
@@ -143,6 +162,14 @@ export function FinancialTargetsForm({
                       aria-hidden="true"
                     >
                       %
+                    </span>
+                  )}
+                  {f.unit === 'days' && (
+                    <span
+                      className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground"
+                      aria-hidden="true"
+                    >
+                      days
                     </span>
                   )}
                 </div>

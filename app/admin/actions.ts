@@ -143,6 +143,9 @@ const SETTING_LABELS: Record<string, { label: string; unit: string }> = {
   preferred_weekly_sales: { label: 'Preferred Weekly Sales', unit: 'currency' },
   minimum_weekly_sales: { label: 'Minimum Weekly Sales', unit: 'currency' },
   avg_monthly_wholesale: { label: 'Average Monthly Wholesale Sales', unit: 'currency' },
+  // Must be registered HERE as well as in the form: this whitelist is what the save
+  // action iterates, so a field added only to the UI would silently never persist.
+  bill_reminder_lead_days: { label: 'Bill reminder lead time', unit: 'days' },
 }
 
 export async function saveBusinessSettings(formData: FormData) {

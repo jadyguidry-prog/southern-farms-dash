@@ -86,6 +86,11 @@ export const SETTING_DEFAULTS = {
   // Seeded as a real row by migration `card_staleness_setting`; this mirror exists
   // only so a fresh database returns a number instead of `undefined`.
   account_data_stale_days: 14,
+  // How many days before its due date a bill starts appearing in reminders. Seeded as a
+  // real row by migration `bill_reminders_and_self_scheduled`; this mirror exists both to
+  // guard a fresh database AND because getBusinessSettings only surfaces keys present
+  // here — without it the Settings field would render blank and never save.
+  bill_reminder_lead_days: 3,
   // How far ahead the cash forecast projects when hunting for the low point. Must be long
   // enough to contain a card statement due date (~15 days out here) — a known payment
   // beyond the last projected day is invisible however large it is. Seeded as a real row
