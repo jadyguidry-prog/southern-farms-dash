@@ -109,6 +109,37 @@ export function BillPayClient({
 
   return (
     <div className="space-y-8">
+      {/* Both "record something new" entry points, together and ABOVE THE FOLD.
+          Each of these previously sat beside a small uppercase section label
+          further down the page, which made them read as minor table controls —
+          the owner went looking for "where do I enter an invoice?" and could not
+          find it even though the feature was live. Wording matters as much as
+          placement here: this bar says "invoice" and "check", the words actually
+          used for the paper on the desk, rather than internal terms like
+          "obligation" or "bill due". */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">
+        <div>
+          <p className="text-sm font-semibold text-foreground">Add something new</p>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+            An invoice you owe but haven&apos;t paid yet, or a check you already wrote.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button className="h-11" onClick={() => setBillDueOpen(true)}>
+            <FileClock className="size-4" aria-hidden="true" />
+            Enter an Invoice
+          </Button>
+          <Button
+            variant="outline"
+            className="h-11"
+            onClick={() => setOneOffOpen(true)}
+          >
+            <Plus className="size-4" aria-hidden="true" />
+            Write a Check
+          </Button>
+        </div>
+      </div>
+
       {/* Autopay bills a bank debit already paid — one tap records them cleared on
           the real posted date. This is the only place an ACH bill needs the owner,
           and even then it's confirm-once, not data entry. */}
@@ -116,24 +147,11 @@ export function BillPayClient({
 
       {/* Scheduled bills — each row can be paid */}
       <section>
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-            Scheduled Bills
-          </h3>
-          {/* An invoice that has ARRIVED but isn't paid yet. It writes the same
-              cash_obligations row Cash & Debt writes, so it lands in the payable
-              list, the 30-day forecast and the advisor immediately — the owner
-              no longer has to leave Bill Pay to record a bill they just opened. */}
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-11"
-            onClick={() => setBillDueOpen(true)}
-          >
-            <FileClock className="size-4" aria-hidden="true" />
-            Enter a bill due
-          </Button>
-        </div>
+        {/* Entry point for a new invoice lives in the action bar at the top of the
+            page, not here — beside this de-emphasized label it was undiscoverable. */}
+        <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+          Scheduled Bills
+        </h3>
         {obligations.length === 0 ? (
           <Card>
             <CardContent className="p-6 text-sm text-muted-foreground">
@@ -238,20 +256,11 @@ export function BillPayClient({
           the float number is silently optimistic, since most checks the owner
           writes are not against the recurring obligations. */}
       <section>
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-            One-Off Payment
-          </h3>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-11"
-            onClick={() => setOneOffOpen(true)}
-          >
-            <Plus className="size-4" aria-hidden="true" />
-            Write a check
-          </Button>
-        </div>
+        {/* "Write a Check" now lives in the top action bar alongside the invoice
+            entry point, so both ways of recording something new are in one place. */}
+        <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+          One-Off Payment
+        </h3>
         <Card>
           <CardContent className="p-4 text-sm text-muted-foreground">
             For a check that isn&apos;t one of the bills above — a seed supplier, a
@@ -757,7 +766,7 @@ function BillDueDialog({
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Enter a Bill Due</DialogTitle>
+          <DialogTitle>Enter an Invoice</DialogTitle>
           <DialogDescription>
             An invoice you owe but haven&apos;t paid. It counts against your cash
             forecast right away, then clears when you pay it here.
@@ -861,7 +870,7 @@ function BillDueDialog({
             Cancel
           </Button>
           <Button className="h-11" onClick={submit} disabled={pending || problem !== null}>
-            {pending ? 'Saving…' : 'Save Bill'}
+            {pending ? 'Saving…' : 'Save Invoice'}
           </Button>
         </DialogFooter>
       </DialogContent>

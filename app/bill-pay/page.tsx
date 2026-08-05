@@ -72,7 +72,7 @@ export default async function BillPayPage() {
     <div>
       <PageHeader
         title="Bill Payments"
-        description="Record payments against scheduled bills. Written checks stay outstanding until they clear the bank, so your spendable cash reflects money already committed."
+        description="Enter invoices you owe, then record payments against them. Written checks stay outstanding until they clear the bank, so your spendable cash reflects money already committed."
       />
 
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
