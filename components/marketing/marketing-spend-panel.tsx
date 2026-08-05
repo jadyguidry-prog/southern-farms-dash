@@ -178,15 +178,25 @@ export function MarketingSpendPanel({
 
           {commitmentMismatch && (
             <div className="flex flex-col gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4">
+              {/* The gap fires in BOTH directions (the service uses Math.abs), so the
+                  wording must follow the direction. This previously hardcoded the
+                  underspend phrasing — "a commitment you are not actually paying",
+                  "but only $X is leaving the bank" — and printed it against
+                  $1,045 actual vs $750 committed, i.e. it called OVERspending an
+                  unpaid commitment and told the owner to suspect a stale bill when
+                  the truth was the opposite. */}
               <p className="text-sm font-semibold text-foreground text-pretty">
-                Your recurring bills list a marketing commitment you are not actually paying
+                {commitmentMismatch.actual > commitmentMismatch.committed
+                  ? 'You are spending more on marketing than your recurring bills budget for'
+                  : 'Your recurring bills list a marketing commitment you are not actually paying'}
               </p>
               <p className="text-sm leading-relaxed text-foreground text-pretty">
                 Cash obligations budget{' '}
                 <span className="font-mono font-semibold">
                   {formatCurrency(commitmentMismatch.committed)}
                 </span>{' '}
-                a month for marketing, but only{' '}
+                a month for marketing, but{' '}
+                {commitmentMismatch.actual > commitmentMismatch.committed ? '' : 'only '}
                 <span className="font-mono font-semibold">
                   {formatCurrency(commitmentMismatch.actual)}
                 </span>{' '}
@@ -195,7 +205,9 @@ export function MarketingSpendPanel({
                     $1,192/mo of ads exists, the other that only $16 is spent. */}
                 {understated
                   ? 'The uncategorized advertising above almost certainly accounts for this, so fix those categories first and then re-check this figure.'
-                  : 'Either the commitment is stale and is making every cash forecast look worse than reality, or marketing is being paid from somewhere these books do not see.'}
+                  : commitmentMismatch.actual > commitmentMismatch.committed
+                    ? 'The obligation is understating what marketing really costs, so your cash forecast is more optimistic than reality. Raise the obligation to match what you are actually spending.'
+                    : 'Either the commitment is stale and is making every cash forecast look worse than reality, or marketing is being paid from somewhere these books do not see.'}
               </p>
             </div>
           )}
