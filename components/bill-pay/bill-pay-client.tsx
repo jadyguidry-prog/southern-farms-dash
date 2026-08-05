@@ -606,7 +606,9 @@ function RecordPaymentDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md">
+      {/* Same pinned-footer grid as the invoice form — see the note there. This one
+          grew taller when the partial-payment balance block was added. */}
+      <DialogContent className="max-w-md grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
         <DialogHeader>
           <DialogTitle>Record Payment</DialogTitle>
           <DialogDescription>
@@ -618,7 +620,7 @@ function RecordPaymentDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="-mx-1 min-h-0 space-y-4 overflow-y-auto px-1">
           {/* Only shown once a partial payment exists, so the owner can see WHY the
               amount below is less than the invoice total. Without this the reduced
               default would look like the bill had been entered wrong. */}
@@ -835,7 +837,11 @@ function BillDueDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md">
+      {/* Three grid rows — header / scrolling body / footer — so Save Invoice stays
+          pinned and visible no matter how short the window is. Without this the
+          form ran past the bottom of a 552px-tall viewport and the submit button
+          couldn't be reached at all. */}
+      <DialogContent className="max-w-md grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
         <DialogHeader>
           <DialogTitle>Enter an Invoice</DialogTitle>
           <DialogDescription>
@@ -844,7 +850,8 @@ function BillDueDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        {/* -mx-1 px-1 keeps focus rings from being clipped by the scroll edge. */}
+        <div className="-mx-1 min-h-0 space-y-4 overflow-y-auto px-1">
           <div>
             <Label htmlFor="bd-name">What is this bill for?</Label>
             <Input
@@ -1014,7 +1021,8 @@ function OneOffPaymentDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md">
+      {/* Same pinned-footer grid as the invoice form — see the note there. */}
+      <DialogContent className="max-w-md grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
         <DialogHeader>
           <DialogTitle>One-Off Payment</DialogTitle>
           <DialogDescription>
@@ -1022,7 +1030,7 @@ function OneOffPaymentDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="-mx-1 min-h-0 space-y-4 overflow-y-auto px-1">
           <div>
             <Label htmlFor="oo-payee">Pay to</Label>
             <Input
