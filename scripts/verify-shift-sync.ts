@@ -108,20 +108,64 @@ async function main() {
   /* ---------------------------------------------------------------- */
 
   console.log('Completeness')
-  const missing = apiShifts
+
+  // This used to assert that EVERY shift the API returns is already in the DB,
+  // which fails during normal operation for two reasons that need no action:
+  //   - a shift still in progress (no end_at) has no hours yet, so there is
+  //     nothing meaningful to store; the employee simply hasn't clocked out.
+  //   - a shift that ended minutes ago just hasn't been picked up by the next
+  //     scheduled sync run yet.
+  // Both were reported identically to a shift that ended days ago and never
+  // arrived — which is the only one of the three that means the sync is BROKEN.
+  // Lumping them together made a healthy system look failing every single day,
+  // and a suite that is always red stops being read.
+  //
+  // So: only a CLOSED shift that has had time to sync counts as missing. The
+  // other two are printed as context, never as failures.
+  const SYNC_SETTLE_HOURS = 24
+  const settleCutoff = Date.now() - SYNC_SETTLE_HOURS * 3_600_000
+
+  const absent = apiShifts.filter((s) => s.id && !byId.has(s.id as string))
+  const stillOpen = absent.filter((s) => !s.end_at)
+  const closed = absent.filter((s) => s.end_at)
+  const tooRecent = closed.filter((s) => new Date(s.end_at as string).getTime() > settleCutoff)
+  const missing = closed
+    .filter((s) => new Date(s.end_at as string).getTime() <= settleCutoff)
     .map((s) => s.id as string)
-    .filter((id) => id && !byId.has(id))
+
+  if (stillOpen.length || tooRecent.length) {
+    console.log(
+      `  note: ${stillOpen.length} shift(s) still clocked in and ${tooRecent.length} closed within the last ${SYNC_SETTLE_HOURS}h are not expected in the DB yet — not counted as missing.`,
+    )
+  }
+
   check(
-    'every API shift is stored',
+    `every closed API shift older than ${SYNC_SETTLE_HOURS}h is stored`,
     missing.length === 0,
-    missing.length ? `${missing.length} missing, e.g. ${missing.slice(0, 3).join(', ')}` : `all ${apiShifts.length}`,
+    missing.length
+      ? `${missing.length} missing, e.g. ${missing.slice(0, 3).join(', ')} — the sync is not keeping up`
+      : `all ${apiShifts.length - stillOpen.length - tooRecent.length} settled shift(s)`,
   )
 
+  // Was `live.length === apiShifts.length`, which failed for the same reason the
+  // completeness check did: the API total includes shifts still clocked in that
+  // cannot be in the DB yet, so a healthy 2,828-vs-2,833 was reported as wrongly
+  // tombstoned rows. A count comparison is also weak on its own — one wrongly
+  // tombstoned shift plus one extra row nets to zero and passes.
+  //
+  // Tests the real concern directly instead: any shift Square still returns is by
+  // definition not deleted, so if we hold that shift it must not be tombstoned.
+  // Immune to sync lag because it only looks at shifts we actually have.
   const live = rows.filter((r) => !r.is_deleted)
+  const wronglyTombstoned = apiShifts
+    .map((s) => s.id as string)
+    .filter((id) => id && byId.get(id)?.is_deleted)
   check(
     'no stored shift is wrongly tombstoned',
-    live.length === apiShifts.length,
-    `${live.length} live vs ${apiShifts.length} from API`,
+    wronglyTombstoned.length === 0,
+    wronglyTombstoned.length
+      ? `${wronglyTombstoned.length} shift(s) marked deleted but still live in Square, e.g. ${wronglyTombstoned.slice(0, 3).join(', ')}`
+      : `all ${live.length} stored live shift(s) still present in Square`,
   )
 
   /* ---------------------------------------------------------------- */
