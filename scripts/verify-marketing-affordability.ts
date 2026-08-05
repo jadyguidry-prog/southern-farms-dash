@@ -587,6 +587,62 @@ console.log('\nSpend reconciliation (why the average disagrees with reality)')
     JSON.stringify(r.lapsed),
   )
   check('neither resolved check is counted as unknown', r.unattributable.total, 0)
+  // A single IDENTIFIED check is not evidence of a one-off: only the checks the
+  // owner has got to so far are visible, so it must stay in the chased list.
+  ok(
+    'a lone resolved check is not dismissed as a one-off purchase',
+    r.oneOffPurchases.length === 0,
+    JSON.stringify(r.oneOffPurchases),
+  )
+  ok(
+    'and it is marked as reconstructed from checks',
+    r.lapsed[0]?.identifiedFromChecks === true,
+    JSON.stringify(r.lapsed),
+  )
+}
+{
+  // One-off vs lapsed, on the CARD-fed path where the feed is complete.
+  const r = reconcileKnownSpend(
+    [
+      // Single purchase, one month — genuinely finished.
+      { id: 'a', transactionDate: '2025-12-21', description: 'BT*CARDBOARD CUTOUT STANDEES', amount: -222, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: 'Marketing', vendorId: null },
+      // Same payee twice across two months — a real recurring channel.
+      { id: 'b', transactionDate: '2025-11-05', description: 'LAMAR BILLBOARD CO', amount: -535, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: 'Marketing', vendorId: null },
+      { id: 'c', transactionDate: '2025-12-05', description: 'LAMAR BILLBOARD CO', amount: -535, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: 'Marketing', vendorId: null },
+    ] as never,
+    new Set<string>(),
+    new Date('2026-08-05T00:00:00'),
+    2,
+    {},
+    new Map(),
+  )
+  ok(
+    'a card-fed single-month payee is classed as a one-off purchase',
+    r.oneOffPurchases.some((o) => o.channel.includes('CARDBOARD') && o.activeMonths === 1),
+    JSON.stringify(r.oneOffPurchases),
+  )
+  ok(
+    'a one-off is kept OUT of the lapsed list that gets chased',
+    !JSON.stringify(r.lapsed).includes('CARDBOARD'),
+    JSON.stringify(r.lapsed),
+  )
+  ok(
+    'a payee billing across two months is genuinely lapsed',
+    r.lapsed.some((l) => l.activeMonths === 2 && l.chargeCount === 2),
+    JSON.stringify(r.lapsed),
+  )
+  ok(
+    'a card-fed channel is not marked as reconstructed from checks',
+    r.lapsed.every((l) => l.identifiedFromChecks === false),
+    JSON.stringify(r.lapsed),
+  )
+  // The one-off's amount is a single purchase, so it must never be presented as
+  // an ongoing monthly rate the owner might still be committed to.
+  ok(
+    'the one-off reports its purchase amount, not an invented rate',
+    r.oneOffPurchases.some((o) => o.typicalMonthly === 222 && o.chargeCount === 1),
+    JSON.stringify(r.oneOffPurchases),
+  )
 }
 {
   // With no overlay supplied, every payee-less row stays unknown. Nothing is

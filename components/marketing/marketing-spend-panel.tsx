@@ -117,20 +117,30 @@ export function MarketingSpendPanel({
           {/* Channels that billed regularly and then vanished from the feed. The
               averages above treat them as stopped, which is wrong if the owner is
               still paying them by a route the export carries no payee for. */}
-          {reconciliation.lapsed.length > 0 && (
+          {/* Gated on ALL THREE, not just `lapsed`. The unattributable disclosure
+              below is the largest number on this panel ($263k) and used to be
+              nested inside `lapsed.length > 0` — so reclassifying every channel as
+              a one-off would have silently taken the payee-less total off the page
+              with it. */}
+          {(reconciliation.lapsed.length > 0 ||
+            reconciliation.oneOffPurchases.length > 0 ||
+            reconciliation.unattributable.count > 0) && (
             <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/40 p-4">
-              <div className="flex flex-col gap-1.5">
-                <p className="text-pretty text-sm font-semibold text-foreground">
-                  These channels stopped appearing in the bank feed
-                </p>
-                <p className="text-pretty text-sm leading-relaxed text-muted-foreground">
-                  Each billed for a while and then stopped. If you are still paying them,
-                  the charges are arriving by a route this feed cannot identify — most
-                  likely a check — so they are missing from every figure above. Each
-                  amount is the average for the months that channel actually billed;
-                  they cover different periods, so they do not add up to a monthly total.
-                </p>
-              </div>
+              {reconciliation.lapsed.length > 0 && (
+                <div className="flex flex-col gap-1.5">
+                  <p className="text-pretty text-sm font-semibold text-foreground">
+                    These channels stopped appearing in the bank feed
+                  </p>
+                  <p className="text-pretty text-sm leading-relaxed text-muted-foreground">
+                    Each billed across several months and then stopped. If you are still
+                    paying them, the charges are arriving by a route this feed cannot
+                    identify — most likely a check — so they are missing from every figure
+                    above. Each amount is the average for the months that channel actually
+                    billed; they cover different periods, so they do not add up to a
+                    monthly total.
+                  </p>
+                </div>
+              )}
               <ul className="flex flex-col gap-1.5">
                 {reconciliation.lapsed.map((l) => (
                   <li
@@ -139,8 +149,11 @@ export function MarketingSpendPanel({
                   >
                     <span className="min-w-0 flex-1 font-medium text-foreground">
                       {l.channel}
+                      {/* State the evidence for calling it recurring. A "/mo" rate
+                          drawn from 2 months is a much weaker claim than one drawn
+                          from 12, and the owner should be able to see which. */}
                       <span className="ml-2 whitespace-nowrap font-normal text-muted-foreground">
-                        last seen {l.lastDate}
+                        last seen {l.lastDate} · billed in {l.activeMonths} months
                       </span>
                     </span>
                     <span className="shrink-0 font-mono font-semibold tabular-nums text-foreground">
@@ -152,6 +165,37 @@ export function MarketingSpendPanel({
                   </li>
                 ))}
               </ul>
+              {/* Deliberately a separate, quieter block. These were single
+                  purchases, so there is no subscription to chase and no missing
+                  check to hunt — the opposite remedy from the list above. Merging
+                  them in printed a one-time $222 standee order as "$222/mo" and
+                  told the owner it might still be billing them. */}
+              {reconciliation.oneOffPurchases.length > 0 && (
+                <div className="flex flex-col gap-1.5 border-t border-border pt-2">
+                  <p className="text-pretty text-sm leading-relaxed text-muted-foreground">
+                    {reconciliation.oneOffPurchases.length === 1
+                      ? 'One other quiet payee charged in only a single month, so it was a one-time purchase rather than a channel that stopped. Nothing to chase:'
+                      : `${reconciliation.oneOffPurchases.length} other quiet payees charged in only a single month each, so they were one-time purchases rather than channels that stopped. Nothing to chase:`}
+                  </p>
+                  <ul className="flex flex-col gap-1">
+                    {reconciliation.oneOffPurchases.map((o) => (
+                      <li
+                        key={o.channel}
+                        className="flex items-baseline justify-between gap-x-3 text-sm text-muted-foreground"
+                      >
+                        <span className="min-w-0 flex-1 truncate">
+                          {o.channel}
+                          <span className="ml-2 whitespace-nowrap">({o.lastDate})</span>
+                        </span>
+                        {/* No "/mo" suffix here: a single charge has no rate. */}
+                        <span className="shrink-0 font-mono tabular-nums">
+                          {formatCurrency(o.typicalMonthly)} once
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {reconciliation.unattributable.count > 0 && (
                 <p className="text-pretty border-t border-border pt-2 text-sm leading-relaxed text-muted-foreground">
                   Separately,{' '}

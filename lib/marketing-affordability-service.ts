@@ -97,7 +97,34 @@ export type LapsedChannel = {
   monthsSinceLastCharge: number
   /** Mean per active month while the channel WAS running. */
   typicalMonthly: number
+  /** Distinct calendar months this channel ever charged in. */
+  activeMonths: number
+  /** Individual charges recorded, so a single purchase is visible as such. */
+  chargeCount: number
+  /**
+   * True when any of this channel's charges came from a payee-less row the owner
+   * identified on Check Resolution.
+   *
+   * This decides whether a single active month is TRUSTWORTHY evidence of a
+   * one-off. For a card-fed channel it is: the feed carries every card charge, so
+   * one month means one purchase. For a check-resolved payee it is not — we only
+   * know about the checks that have been identified so far, so silence is
+   * unfinished work rather than proof the payee never recurred.
+   */
+  identifiedFromChecks: boolean
 }
+
+/**
+ * Minimum distinct months of activity before a quiet channel counts as
+ * "lapsed".
+ *
+ * Two is not a tuned threshold — it is the smallest number that can establish
+ * recurrence at all. One month of activity cannot lapse, because nothing was
+ * ever repeating. Below this a quiet payee is a ONE-OFF PURCHASE, which needs a
+ * different message: a lapsed retainer means "find the check or call them", a
+ * finished purchase means "nothing to do".
+ */
+export const MIN_MONTHS_FOR_RECURRENCE = 2
 
 export type SpendReconciliation = {
   /**
@@ -106,6 +133,17 @@ export type SpendReconciliation = {
    * (usually a check), not stopping.
    */
   lapsed: LapsedChannel[]
+  /**
+   * Quiet payees that never recurred — a single purchase, or charges confined to
+   * one month. Kept OUT of `lapsed` because the remedy differs: there is no
+   * subscription to chase and no missing check to hunt for.
+   *
+   * They were previously listed as channels that "billed for a while and then
+   * stopped", with their one purchase amount printed as a `/mo` rate. A single
+   * $222 cardboard-standee order was reported as "$222/mo" alongside advice to
+   * suspect it was still being paid by check.
+   */
+  oneOffPurchases: LapsedChannel[]
   /**
    * Outflows whose description carries no payee at all — `CHECK`, `DEPOSIT` and
    * friends. Structurally unattributable: the bank export has no payee, memo or
@@ -144,7 +182,17 @@ export function reconcileKnownSpend(
   resolutions: Map<string, ResolvedPayee> = new Map(),
 ): SpendReconciliation {
   const thisMonthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`
-  const perChannel = new Map<string, { last: string; months: Set<string>; total: number }>()
+  const perChannel = new Map<
+    string,
+    {
+      last: string
+      months: Set<string>
+      total: number
+      charges: number
+      /** Charges that came from an owner-identified payee-less row. */
+      fromChecks: number
+    }
+  >()
   let unTotal = 0
   let unCount = 0
   const unMonths = new Set<string>()
@@ -180,11 +228,15 @@ export function reconcileKnownSpend(
         MARKETING_PATTERNS.some((p) => p.confident && p.test.test(description.toUpperCase()))
       if (!resolvedIsMarketing) continue
       const resolvedName = marketingChannelName(description)
-      const re = perChannel.get(resolvedName) ?? { last: '', months: new Set<string>(), total: 0 }
+      const re =
+        perChannel.get(resolvedName) ??
+        { last: '', months: new Set<string>(), total: 0, charges: 0, fromChecks: 0 }
       const resolvedDate = r.transactionDate.slice(0, 10)
       if (resolvedDate > re.last) re.last = resolvedDate
       re.months.add(monthKey)
       re.total += Math.abs(r.amount)
+      re.charges += 1
+      re.fromChecks += 1
       perChannel.set(resolvedName, re)
       continue
     }
@@ -197,11 +249,14 @@ export function reconcileKnownSpend(
     if (!isMarketing) continue
 
     const name = marketingChannelName(description)
-    const e = perChannel.get(name) ?? { last: '', months: new Set<string>(), total: 0 }
+    const e =
+      perChannel.get(name) ??
+      { last: '', months: new Set<string>(), total: 0, charges: 0, fromChecks: 0 }
     const date = r.transactionDate.slice(0, 10)
     if (date > e.last) e.last = date
     e.months.add(monthKey)
     e.total += Math.abs(r.amount)
+    e.charges += 1
     perChannel.set(name, e)
   }
 
@@ -216,20 +271,34 @@ export function reconcileKnownSpend(
   }
 
   const lapsed: LapsedChannel[] = []
+  const oneOffPurchases: LapsedChannel[] = []
   for (const [channel, e] of perChannel) {
     const gap = monthsBetween(monthKeyOf(e.last), thisMonthKey)
     if (gap < lapsedAfterMonths) continue
-    lapsed.push({
+    const entry: LapsedChannel = {
       channel,
       lastDate: e.last,
       monthsSinceLastCharge: gap,
       typicalMonthly: e.total / Math.max(1, e.months.size),
-    })
+      activeMonths: e.months.size,
+      chargeCount: e.charges,
+      identifiedFromChecks: e.fromChecks > 0,
+    }
+    // Recurrence decides the bucket, but only where the evidence can support the
+    // call. A single month is proof of a one-off ONLY for a channel the feed sees
+    // in full; for a payee reconstructed from identified checks it just means one
+    // check has been identified so far, so it stays in the list that gets chased.
+    const provenOneOff =
+      e.months.size < MIN_MONTHS_FOR_RECURRENCE && e.fromChecks === 0
+    if (provenOneOff) oneOffPurchases.push(entry)
+    else lapsed.push(entry)
   }
   lapsed.sort((a, b) => b.typicalMonthly - a.typicalMonthly)
+  oneOffPurchases.sort((a, b) => b.typicalMonthly - a.typicalMonthly)
 
   return {
     lapsed,
+    oneOffPurchases,
     unattributable: {
       total: unTotal,
       count: unCount,
