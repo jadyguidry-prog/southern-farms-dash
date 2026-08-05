@@ -934,9 +934,10 @@ export function generateInsights({
       mistypedCategoryCount = 0,
     } = cashFlow
 
-    // Net movement for the newest trustworthy month. A card-only month is
-    // deliberately excluded upstream, since it shows spending with no deposits
-    // and would read as a total loss.
+    // Net movement for the newest trustworthy month. Upstream this is both
+    // FINISHED and deposit-bearing, so neither a card-only month (spending with
+    // no deposits, reading as a total loss) nor a month that is still running
+    // (a few days reading as an overspend) can reach this verdict.
     if (latestCompleteMonth) {
       const { month, inflow, outflow, net } = latestCompleteMonth
       if (net < 0) {

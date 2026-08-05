@@ -87,7 +87,12 @@ export default async function DashboardPage() {
           complete: m.complete,
         }))
       : cashFlowMonthly
+  // Last FINISHED month, so the headline is a real month's result. The
+  // still-running month is shown alongside it rather than hidden, because
+  // dropping it would leave the owner wondering where the current month went —
+  // but it is labelled "so far" so it can't be read as a monthly outcome.
   const latestComplete = cashFlow.monthly.latestCompleteMonth
+  const monthInProgress = cashFlow.monthly.monthInProgress
 
   const cashOnHand = kpi(kpis, 'cashOnHand')
   // When checks are written but not yet cleared, the bank balance overstates
@@ -251,15 +256,20 @@ export default async function DashboardPage() {
           trend={asTrend(inventoryValue.trend)}
           hint="at cost"
         />
-        {/* Actual money in vs out for the last month with a full picture.
-            Rendered only when real transactions exist — a month missing its
-            deposit account would read as a loss rather than as missing data. */}
+        {/* Actual money in vs out for the last FINISHED month with a full
+            picture. Rendered only when real transactions exist — a month
+            missing its deposit account would read as a loss rather than as
+            missing data, and an in-progress month as an overspend. */}
         {latestComplete && (
           <StatCard
             label={`Net Cash Movement — ${latestComplete.month}`}
             value={formatCurrency(latestComplete.net)}
             icon={Scale}
-            hint={`${formatCurrency(latestComplete.inflow, { compact: true })} in · ${formatCurrency(latestComplete.outflow, { compact: true })} out`}
+            hint={`${formatCurrency(latestComplete.inflow, { compact: true })} in · ${formatCurrency(latestComplete.outflow, { compact: true })} out${
+              monthInProgress
+                ? ` · ${monthInProgress.month} so far ${formatCurrency(monthInProgress.net, { compact: true })}`
+                : ''
+            }`}
           />
         )}
         <Card className="gap-0 py-0">

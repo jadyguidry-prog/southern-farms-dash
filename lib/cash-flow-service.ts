@@ -115,10 +115,24 @@ export type MonthlyCashFlowResult = {
   series: MonthlyCashFlow[]
   latestMonth: MonthlyCashFlow | null
   /**
-   * Newest month with both deposits and spending. Summary tiles use this so a
-   * card-only month can't be reported as a catastrophic loss.
+   * Newest FINISHED month that has deposits. Summary tiles and the advisor use
+   * this to state a month's net cash movement as a verdict, so the month must
+   * actually be over: on 4 Aug 2026 this selected Aug '26 itself — four days
+   * holding one $249.67 deposit against $1,372.73 of spending — and the advisor
+   * warned that the month "spent $1,123 more than it took in". The month wasn't
+   * overspent, it had barely started.
+   *
+   * `complete` alone is not enough here, because it only asks whether any
+   * deposit exists (see MonthlyCashFlow.complete); a single early deposit passes
+   * it. Any figure presented as a whole-month result needs BOTH tests.
    */
   latestCompleteMonth: MonthlyCashFlow | null
+  /**
+   * The current, still-running month, when it has any activity. Kept separate
+   * from `latestCompleteMonth` so a partial month can be shown as progress
+   * without ever being mistaken for a finished month's result.
+   */
+  monthInProgress: MonthlyCashFlow | null
   /** Months present but missing their deposit account. */
   incompleteMonths: string[]
   /** Calendar months inside the range with no transactions imported at all. */
@@ -155,9 +169,18 @@ function monthsBetween(startKey: string, endKey: string): string[] {
  */
 export function deriveMonthlyCashFlow(
   rows: CashFlowInputRow[],
-  options: { months?: number } = {},
+  options: { months?: number; todayISO?: string } = {},
 ): MonthlyCashFlowResult {
   const months = options.months ?? 12
+  // Defaulted rather than required so every existing caller gets the
+  // month-has-ended guard automatically. An optional flag that callers had to
+  // opt into would let one surface keep selecting the in-progress month while
+  // another excluded it, and two surfaces reading the same rows would disagree.
+  // Tests pass an explicit date.
+  const currentMonthKey = (options.todayISO ?? new Date().toISOString()).slice(
+    0,
+    7,
+  )
   const buckets = new Map<
     string,
     MonthlyCashFlow & { accountSet: Set<string> }
@@ -228,12 +251,21 @@ export function deriveMonthlyCashFlow(
         )
       : []
 
-  const complete = series.filter((m) => m.complete)
+  // `complete` (has deposits) AND finished (the month is over). Only the
+  // combination supports a whole-month verdict. Note this deliberately does not
+  // change the per-month `complete` flag itself: that flag also feeds bank
+  // coverage for COGS/margin withholding, and redefining it here would silently
+  // change which months can quote a margin.
+  const complete = series.filter(
+    (m) => m.complete && m.monthKey < currentMonthKey,
+  )
 
   return {
     series,
     latestMonth: series.length > 0 ? series[series.length - 1] : null,
     latestCompleteMonth: complete.length > 0 ? complete[complete.length - 1] : null,
+    monthInProgress:
+      series.find((m) => m.monthKey === currentMonthKey) ?? null,
     incompleteMonths: series.filter((m) => !m.complete).map((m) => m.monthKey),
     gapMonths,
     excluded: { transfersAndPayments: excludedTotal, count: excludedCount },
