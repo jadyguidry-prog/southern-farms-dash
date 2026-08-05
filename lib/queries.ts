@@ -22,6 +22,8 @@ import { getCashFlowInsight } from '@/lib/cash-flow-service'
 import { getGrowthPlannerSnapshot } from '@/lib/growth-planner-service'
 import { getSavedProposalReviews } from '@/lib/growth-proposal-review'
 import { getCardExposure } from '@/lib/card-exposure-service'
+import { getBillReminders } from '@/lib/bill-reminders-service'
+import type { BillReminderResult } from '@/lib/bill-reminders'
 import { getLaborHealthSnapshot } from '@/lib/labor-service'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
 import { getOutstandingCheckSummary, getBillPaySnapshot } from '@/lib/bill-pay-service'
@@ -534,6 +536,9 @@ export async function getCashObligations() {
     nextDueDate: o.next_due_date ?? '',
     recurring: Boolean(o.recurring),
     frequency: o.frequency ?? '',
+    // True when the invoice carries no due date, so the date is the owner's own payment
+    // plan. Such a bill must never be reported as overdue — there is no deadline to miss.
+    selfScheduled: Boolean(o.self_scheduled),
     paymentMethod: o.payment_method ?? '',
     active: o.active ?? true,
     status: o.status ?? 'Pending',
@@ -831,6 +836,7 @@ export async function getHealthSnapshot() {
   growthPlanner,
   proposalReviews,
   cardExposure,
+  billReminders,
   ] = await Promise.all([
   getKpis(),
   getCashDebtSummary(),
@@ -848,6 +854,9 @@ export async function getHealthSnapshot() {
   // Also `cache`-wrapped, and the same loader the dashboard, Cash & Debt and the
   // report call, so a card figure in an advisor warning always matches the panel.
   getCardExposure(),
+  // `cache`-wrapped and the same loader the dashboard card calls, so the advisor
+  // cannot name a bill or amount the panel disagrees with.
+  getBillReminders(),
   ])
   const settings = summary.settings
 
@@ -1060,6 +1069,14 @@ export async function getHealthSnapshot() {
           highUtilization: cardExposure.highUtilization,
         }
       : undefined,
+    // Bill reminders, read from the SAME shared loader the dashboard card uses, so the
+    // advisor can never name a different bill or amount than the one on screen.
+    // Omitted entirely when nothing is due and nothing is stale, so a tidy week
+    // generates no advice rather than four "0 bills" items.
+    bills:
+      billReminders.due.length > 0 || billReminders.staleChecks.length > 0
+        ? billsInsightFrom(billReminders, settings)
+        : undefined,
     // Same guard as cash flow: with no timecards there is nothing to advise on,
     // so the group is omitted rather than passed as zeros.
     labor: labor.hasData

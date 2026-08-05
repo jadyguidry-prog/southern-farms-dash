@@ -35,6 +35,8 @@ import {
 import { getSpendingCapacity } from '@/lib/spending-capacity-data'
 import { getCardExposure } from '@/lib/card-exposure-service'
 import { CardExposurePanel } from '@/components/cards/card-exposure-panel'
+import { getBillReminders } from '@/lib/bill-reminders-service'
+import { BillRemindersCard } from '@/components/dashboard/bill-reminders-card'
 import { HEALTH_COLOR, HEALTH_TEXT } from '@/lib/health'
 // Reused rather than adding a second month formatter, so the Gross Profit card
 // labels months identically to the cash-flow chart beside it.
@@ -47,13 +49,15 @@ const severityStyles: Record<string, string> = {
 }
 
 export default async function DashboardPage() {
-  const [snapshot, capacity, cashFlowMonthly, saved, cardExposure] = await Promise.all([
-    getHealthSnapshot(),
-    getSpendingCapacity(),
-    getCashFlowMonthly(),
-    getRecommendations(),
-    getCardExposure(),
-  ])
+  const [snapshot, capacity, cashFlowMonthly, saved, cardExposure, billReminders] =
+    await Promise.all([
+      getHealthSnapshot(),
+      getSpendingCapacity(),
+      getCashFlowMonthly(),
+      getRecommendations(),
+      getCardExposure(),
+      getBillReminders(),
+    ])
 
   const {
     kpis,
@@ -357,6 +361,12 @@ export default async function DashboardPage() {
           which this page never displayed. Card spend running $3.3k-$11.2k/month
           was therefore absent from the dashboard entirely. */}
       <CardExposurePanel exposure={cardExposure} className="mt-4" />
+
+      {/* Bills needing action. Placed with the money-owed panels rather than the health
+          ratios, because this is a do-something list, not a measurement. */}
+      <div className="mt-4">
+        <BillRemindersCard reminders={billReminders} />
+      </div>
 
       {/* Health / ratios */}
       <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">

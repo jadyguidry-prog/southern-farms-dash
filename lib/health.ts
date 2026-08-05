@@ -481,8 +481,34 @@ type InsightInput = {
    * produces no card advice.
    */
   cards?: CardInsightInput
+  /**
+   * Bills needing action and checks outstanding too long. Omit when nothing is due and
+   * nothing is stale, so a tidy week produces no nagging.
+   */
+  bills?: BillsInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
+}
+
+export type BillsInsightInput = {
+  /** Bills past a real vendor due date. Self-scheduled bills are NEVER counted here. */
+  overdueCount: number
+  overdueTotal: number
+  /**
+   * Bills whose owner-chosen payment date has passed. Not late — no vendor deadline —
+   * but still needing a check. Kept separate so the advice can use the right word.
+   */
+  unpaidPlannedCount: number
+  unpaidPlannedTotal: number
+  /** Bills inside the reminder lead time. */
+  dueSoonCount: number
+  dueSoonTotal: number
+  /** Owner-set lead time, quoted in the advice so the number is never a mystery. */
+  leadDays: number
+  /** Checks outstanding beyond the staleness threshold. Still counted as owed. */
+  staleCheckCount: number
+  staleCheckTotal: number
+  staleAfterDays: number
 }
 
 /**
@@ -611,6 +637,7 @@ export function generateInsights({
   spending,
   growth,
   cards,
+  bills,
   now,
 }: InsightInput): Insight[] {
   const out: Insight[] = []
@@ -1402,6 +1429,78 @@ export function generateInsights({
     }
   }
 
+  // --- Bills needing action ------------------------------------------------
+  // Three separate messages on purpose, because the REMEDY differs. A genuinely late
+  // bill is a problem; a self-scheduled bill past its planned date just needs a check
+  // written; a stale check needs confirming, not paying again. Merging them into one
+  // "bills need attention" item would tell the owner the wrong thing about all three.
+  if (bills) {
+    if (bills.overdueCount > 0) {
+      out.push({
+        id: 'auto-bills-overdue',
+        severity: 'critical',
+        category: 'Cash Flow',
+        title:
+          bills.overdueCount === 1
+            ? 'A bill is past its due date'
+            : `${bills.overdueCount} bills are past their due dates`,
+        detail:
+          `${formatCurrency(bills.overdueTotal)} is past due against dates the vendors set. ` +
+          `These are real deadlines, not planned payment dates, so late fees or holds are possible.`,
+        impact: `${formatCurrency(bills.overdueTotal)} past due`,
+      })
+    }
+
+    if (bills.unpaidPlannedCount > 0) {
+      out.push({
+        id: 'auto-bills-unpaid-planned',
+        severity: 'warning',
+        category: 'Cash Flow',
+        title:
+          bills.unpaidPlannedCount === 1
+            ? 'A bill is waiting on a check'
+            : `${bills.unpaidPlannedCount} bills are waiting on checks`,
+        // Deliberately avoids "late"/"overdue": these invoices carry no vendor due date,
+        // so there is no deadline to have missed. Calling them late would be false.
+        detail:
+          `${formatCurrency(bills.unpaidPlannedTotal)} is past the date you planned to pay it. ` +
+          `No vendor deadline applies to these, so nothing is late — they just still need paying.`,
+        impact: `${formatCurrency(bills.unpaidPlannedTotal)} to pay`,
+      })
+    }
+
+    if (bills.dueSoonCount > 0) {
+      out.push({
+        id: 'auto-bills-due-soon',
+        severity: 'opportunity',
+        category: 'Cash Flow',
+        title: `${bills.dueSoonCount} ${bills.dueSoonCount === 1 ? 'bill is' : 'bills are'} due within ${bills.leadDays} days`,
+        detail:
+          `${formatCurrency(bills.dueSoonTotal)} comes due inside your ${bills.leadDays}-day ` +
+          `reminder window. Confirm the cash is there before writing the checks.`,
+        impact: `${formatCurrency(bills.dueSoonTotal)} due soon`,
+      })
+    }
+
+    if (bills.staleCheckCount > 0) {
+      out.push({
+        id: 'auto-bills-stale-checks',
+        severity: 'warning',
+        category: 'Cash Flow',
+        title:
+          bills.staleCheckCount === 1
+            ? 'A written check has not cleared'
+            : `${bills.staleCheckCount} written checks have not cleared`,
+        detail:
+          `${formatCurrency(bills.staleCheckTotal)} in checks has been outstanding more than ` +
+          `${bills.staleAfterDays} days. This is still counted as money you owe, because it has ` +
+          `not left the account. Confirm whether these cleared and mark them in Bill Pay — if ` +
+          `one already cleared, it is inflating today's outflow every day it stays open.`,
+        impact: `${formatCurrency(bills.staleCheckTotal)} unconfirmed`,
+      })
+    }
+  }
+
   // --- Growth commitments -------------------------------------------------
   // Every figure here is the STRESSED recommendation from the Growth Planner, so
   // the advisor and the planner page can never headline different numbers.
@@ -1565,6 +1664,19 @@ export function generateInsights({
  * Advance a date by one recurrence interval. Used to project the next due date
  * for recurring obligations.
  */
+/**
+ * A Date -> "YYYY-MM-DD" using its LOCAL calendar fields.
+ *
+ * `toISOString().slice(0,10)` converts to UTC first, so a date built at local midnight
+ * reports the PREVIOUS day in any positive-offset timezone. Every due date in this app is
+ * a plain calendar day with no time component, so it must be read off local fields.
+ */
+function toLocalISO(d: Date): string {
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${m}-${day}`
+}
+
 export function addInterval(date: Date, frequency: string): Date {
   const d = new Date(date)
   switch (frequency) {
@@ -1595,14 +1707,23 @@ export function resolveNextDueDate(
   o: { dueDate: string; nextDueDate?: string; recurring: boolean; frequency: string },
   today: Date,
 ): string {
-  if (o.nextDueDate) return o.nextDueDate
-  if (!o.dueDate) return ''
-  if (!o.recurring) return o.dueDate
+  // An explicit next_due_date is the authority for WHICH DAY of the cycle this bill
+  // falls on, but it is not frozen in time. Nothing in the app advances that column, so
+  // returning it unconditionally pinned recurring bills in the past permanently: they
+  // read as more overdue every day, forever, even once paid. Roll it forward on the same
+  // frequency instead, which keeps the chosen day (the 15th stays the 15th) while
+  // tracking the calendar.
+  //
+  // A ONE-OFF is different: a non-recurring bill that is past due really is late, and
+  // advancing it would hide a genuine problem. So only recurring bills roll.
+  const anchor = o.nextDueDate || o.dueDate
+  if (!anchor) return ''
+  if (!o.recurring) return anchor
 
-  let d = new Date(o.dueDate + 'T00:00:00')
+  let d = new Date(anchor + 'T00:00:00')
   // Cap iterations so a bad frequency can never spin forever.
   for (let i = 0; i < 400 && d < today; i++) {
     d = addInterval(d, o.frequency || 'Monthly')
   }
-  return d.toISOString().slice(0, 10)
+  return toLocalISO(d)
 }
