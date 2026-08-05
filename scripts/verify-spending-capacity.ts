@@ -337,6 +337,70 @@ function est(o: Partial<FlowEstimate> = {}): FlowEstimate {
     baselineWeeklyOutflow: 0,
   })
   check('an overdue item lands today', r.days[0]?.cautiousBalance, 8_000)
+
+  // Landing it on today is right, but the ORIGINAL date must survive. Without it a
+  // months-stale bill is indistinguishable from one genuinely due today, and today's
+  // total reads as a big spending day when it is really a backlog.
+  const overdue = r.days[0]?.items.find((i) => i.label === 'Overdue bill')
+  check('the original due date is preserved', overdue?.dueDate, '2026-07-01')
+  check('and how overdue it is, is stated', overdue?.daysOverdue, 33)
+}
+
+{
+  // An item due on the day it appears must NOT be labelled overdue, or the warning
+  // becomes noise and gets ignored on the days it matters.
+  const r = deriveSpendingCapacity({
+    cashOnHand: 10_000,
+    minCashReserve: 0,
+    today: '2026-08-03',
+    estimate: est({ cautiousInflow: 0, typicalInflow: 0 }),
+    shares: evenShares,
+    datedOutflows: [
+      { date: '2026-08-03', amount: 500, label: 'Due today' },
+      { date: '2026-07-31', amount: 250, label: 'Late bill' },
+    ],
+    baselineWeeklyOutflow: 700,
+  })
+  const items = r.days[0]?.items ?? []
+  const dueToday = items.find((i) => i.label === 'Due today')
+  const late = items.find((i) => i.label === 'Late bill')
+  check('an item due today is not overdue', dueToday?.daysOverdue, 0)
+  check('its due date is still recorded', dueToday?.dueDate, '2026-08-03')
+  check('a late item is marked overdue', late?.daysOverdue, 3)
+
+  // The spread estimate is not a bill. Giving it a due date would let the UI present an
+  // average as though it were a specific invoice.
+  const estimateItem = items.find((i) => i.kind === 'estimate')
+  ok('the estimate carries no due date', estimateItem?.dueDate === null)
+  check('and is never overdue', estimateItem?.daysOverdue, 0)
+
+  // The breakdown must reconcile to the displayed total, or the expander contradicts
+  // the row it explains.
+  const sum = items.reduce((s, i) => s + i.amount, 0)
+  ok(
+    'the itemised breakdown sums to the day total',
+    Math.abs(sum - (r.days[0]?.moneyOut ?? 0)) < 0.005,
+  )
+}
+
+{
+  // Day counts must hold across a DST boundary (US DST ends 1 Nov 2026). A local
+  // timestamp subtraction gives 25 hours for one of these days and truncates to the
+  // wrong number of days.
+  const r = deriveSpendingCapacity({
+    cashOnHand: 10_000,
+    minCashReserve: 0,
+    today: '2026-11-03',
+    estimate: est({ cautiousInflow: 0, typicalInflow: 0 }),
+    shares: evenShares,
+    datedOutflows: [{ date: '2026-10-30', amount: 100, label: 'Across DST' }],
+    baselineWeeklyOutflow: 0,
+  })
+  check(
+    'days overdue is exact across a DST change',
+    r.days[0]?.items.find((i) => i.label === 'Across DST')?.daysOverdue,
+    4,
+  )
 }
 
 {

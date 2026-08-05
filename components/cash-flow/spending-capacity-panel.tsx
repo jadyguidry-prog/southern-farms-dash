@@ -14,18 +14,12 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { formatCurrency } from '@/lib/data'
+import { formatCurrency, formatDayLabel } from '@/lib/data'
 import type { SpendingCapacity } from '@/lib/spending-capacity-data'
+import { DayOutflowRows } from './day-outflow-rows'
 
-/** "2026-08-03" -> "Mon 3 Aug", parsed as a local date so the day never shifts. */
-function dayLabel(iso: string): string {
-  const [y, m, d] = iso.split('-').map(Number)
-  return new Date(y, m - 1, d).toLocaleDateString('en-US', {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'short',
-  })
-}
+/** Local alias for the shared formatter, kept so existing call sites read the same. */
+const dayLabel = formatDayLabel
 
 function confidenceNote(c: SpendingCapacity['confidence']): string | null {
   switch (c.level) {
@@ -311,7 +305,12 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
               </div>
             ) : null}
 
-            <div className="mt-5 overflow-x-auto">
+            <p className="mt-5 text-xs text-muted-foreground text-pretty">
+              Tap a day to see exactly what makes up its total. Bills that were due
+              earlier and have not cleared are charged to today, so today can look
+              larger than a normal day.
+            </p>
+            <div className="mt-2 overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -323,33 +322,7 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                 </TableHeader>
                 <TableBody>
                   {nearTermRows.map((d) => (
-                    <TableRow
-                      key={d.date}
-                      className={d.breachesReserve ? 'bg-destructive/5' : undefined}
-                    >
-                      <TableCell className="whitespace-nowrap font-medium">
-                        {dayLabel(d.date)}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums text-muted-foreground">
-                        {d.cautiousIn > 0 ? formatCurrency(d.cautiousIn) : '—'}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {d.moneyOut > 0 ? (
-                          <span title={d.items.map((i) => i.label).join(', ')}>
-                            {formatCurrency(d.moneyOut)}
-                          </span>
-                        ) : (
-                          '—'
-                        )}
-                      </TableCell>
-                      <TableCell
-                        className={`text-right tabular-nums font-medium ${
-                          d.breachesReserve ? 'text-destructive' : 'text-foreground'
-                        }`}
-                      >
-                        {formatCurrency(d.cautiousBalance)}
-                      </TableCell>
-                    </TableRow>
+                    <DayOutflowRows key={d.date} day={d} />
                   ))}
                 </TableBody>
               </Table>

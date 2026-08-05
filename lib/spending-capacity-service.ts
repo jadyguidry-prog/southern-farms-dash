@@ -153,6 +153,21 @@ export function addDays(dateStr: string, days: number) {
   return formatDate(d)
 }
 
+/**
+ * Whole days from `from` to `to` (negative when `from` is later).
+ *
+ * Counts calendar days via UTC midnights rather than subtracting local timestamps:
+ * across a DST boundary a local difference is 23 or 25 hours, which truncates to the
+ * wrong number of days and would misreport how overdue a bill is by one day.
+ */
+export function daysBetweenDates(from: string, to: string) {
+  const a = parseDate(from)
+  const b = parseDate(to)
+  const utcA = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate())
+  const utcB = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate())
+  return Math.round((utcB - utcA) / 86_400_000)
+}
+
 /** Monday of the week containing `dateStr`, used to bucket weekly totals. */
 export function weekStart(dateStr: string) {
   return addDays(dateStr, -(isoDayOfWeek(dateStr) - 1))
@@ -298,7 +313,24 @@ export type ForecastDay = {
    * source rather than matched on the label text in the UI, so renaming the label can
    * never silently reclassify the estimate as a known payment.
    */
-  items: { label: string; amount: number; kind: 'dated' | 'estimate' }[]
+  items: {
+    label: string
+    amount: number
+    kind: 'dated' | 'estimate'
+    /**
+     * The date the item was ORIGINALLY due, which is not always the day it appears on.
+     * Anything overdue is charged to today (the money is still owed), so without this
+     * a months-stale bill sitting on today's row is indistinguishable from one
+     * genuinely due today — and today's total looks like a fresh cost when it is
+     * really a backlog. Null for the spread estimate, which has no due date.
+     */
+    dueDate: string | null
+    /**
+     * Whole days between `dueDate` and the day this item is charged on. 0 for
+     * anything due on the day it appears, so a non-zero value means "rolled forward".
+     */
+    daysOverdue: number
+  }[]
   /** Running balance on the cautious basis — the one used for the headline. */
   cautiousBalance: number
   /** Running balance on a typical week. */
@@ -442,6 +474,11 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
       label: d.label,
       amount: money(d.amount),
       kind: 'dated' as const,
+      // `d.date` is the date the item was actually due. It differs from `date` only
+      // when the item was overdue and rolled onto today, which is exactly the case
+      // the owner cannot otherwise see.
+      dueDate: d.date,
+      daysOverdue: Math.max(0, daysBetweenDates(d.date, date)),
     }))
     const datedTotal = items.reduce((s, it) => s + it.amount, 0)
 
@@ -450,6 +487,10 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
         label: 'Day-to-day running costs',
         amount: money(baselineDaily),
         kind: 'estimate' as const,
+        // An estimate has no due date. Null rather than `date` so it can never be
+        // mistaken for a real dated obligation.
+        dueDate: null,
+        daysOverdue: 0,
       })
     }
     const moneyOut = money(datedTotal + baselineDaily)
