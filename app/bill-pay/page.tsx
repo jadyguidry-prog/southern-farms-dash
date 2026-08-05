@@ -46,6 +46,10 @@ export default async function BillPayPage() {
       nextDueDate: o.nextDueDate || o.dueDate || '',
       recurring: o.recurring,
       frequency: o.frequency,
+      // Shown on one-time bills so the owner can tie a row back to the paper
+      // invoice. '' means none was recorded, which the UI omits rather than
+      // rendering an empty label.
+      invoiceNumber: o.invoiceNumber,
       // Drives the Autopay/Check badge and whether the row shows a manual Pay button.
       isAutopay: (o.paymentMethod || '').toUpperCase() === 'ACH',
     }))

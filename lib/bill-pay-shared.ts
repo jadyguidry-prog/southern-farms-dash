@@ -59,6 +59,76 @@ export function validatePaymentBasics(input: {
   return null
 }
 
+/**
+ * The rules a pending bill (an invoice that is DUE but not yet paid) must satisfy.
+ *
+ * Deliberately separate from validatePaymentBasics: a bill has no payment date,
+ * no method and no check number, because nothing has been paid yet. Reusing the
+ * payment validator here would demand a check number for an unpaid invoice.
+ *
+ * Returns an error message, or null when the input is acceptable.
+ */
+export function validateBillDueBasics(input: {
+  obligationName: string
+  amount: number
+  dueDate: string
+}): string | null {
+  if (!(input.obligationName ?? '').trim()) {
+    return 'Enter what this bill is for.'
+  }
+  const amount = Number(input.amount)
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return 'Enter a bill amount greater than zero.'
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.dueDate ?? '')) {
+    return 'Choose a valid due date.'
+  }
+  return null
+}
+
+/**
+ * Cent tolerance when deciding whether a bill is fully covered. Amounts are
+ * numeric in Postgres but arrive through JS floats, so an exact `>=` can leave a
+ * bill a hundredth of a cent short and permanently "unpaid".
+ */
+export const BILL_COVERAGE_TOLERANCE = 0.01
+
+/**
+ * Is this bill fully covered by what has been paid against it?
+ *
+ * Used to decide whether a ONE-TIME bill should close. Partial payments must NOT
+ * close it: paying $400 of a $1,000 invoice leaves $600 genuinely owed, and
+ * closing the bill would erase that from every payable total. This is the reason
+ * the check is on the SUM of payments rather than on "a payment happened".
+ *
+ * Callers must pass the total of NON-VOID payments only — a voided check never
+ * left the account, so counting it would close a bill nobody paid.
+ */
+export function billFullyCovered(amount: number, paidTotal: number): boolean {
+  const owed = Number(amount)
+  const paid = Number(paidTotal)
+  if (!Number.isFinite(owed) || !Number.isFinite(paid)) return false
+  // A zero/negative bill amount is not a bill; refuse to call it covered rather
+  // than closing something whose real amount was never recorded.
+  if (owed <= 0) return false
+  return paid + BILL_COVERAGE_TOLERANCE >= owed
+}
+
+/**
+ * The status a one-time bill should hold after its payments are totalled.
+ *
+ * Recurring bills are NEVER routed through here — they roll their due date
+ * forward instead of closing, so that a monthly bill never vanishes from the
+ * forecast (see recordPayment). Passing a recurring bill in would silently
+ * delete it from the payable list after its first payment.
+ */
+export function resolveOneTimeBillStatus(
+  amount: number,
+  paidTotal: number,
+): 'Paid' | 'Pending' {
+  return billFullyCovered(amount, paidTotal) ? 'Paid' : 'Pending'
+}
+
 // ---------------------------------------------------------------------------
 // Automatic reconciliation of autopay/ACH bills from the checking feed.
 //

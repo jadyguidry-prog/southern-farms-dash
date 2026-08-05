@@ -14,7 +14,11 @@
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
 import { nextScheduledDueDate, getAchReconcileMatches } from '@/lib/bill-pay-service'
-import { validatePaymentBasics } from '@/lib/bill-pay-shared'
+import {
+  validatePaymentBasics,
+  validateBillDueBasics,
+  resolveOneTimeBillStatus,
+} from '@/lib/bill-pay-shared'
 
 type ActionResult = { ok: boolean; error?: string; paymentId?: string }
 
@@ -76,7 +80,11 @@ export async function recordPayment(input: RecordPaymentInput): Promise<ActionRe
   // Confirm the obligation is real before writing a payment that references it.
   const { data: obligation, error: obErr } = await supabase
     .from('cash_obligations')
-    .select('id, obligation_name, recurring, frequency, next_due_date, due_date')
+    // `amount` and `status` are needed to decide whether a ONE-TIME bill is now
+    // fully covered and should close (see the closing block below).
+    .select(
+      'id, obligation_name, recurring, frequency, next_due_date, due_date, amount, status',
+    )
     .eq('id', obligationId)
     .maybeSingle()
   if (obErr) return { ok: false, error: obErr.message }
@@ -157,8 +165,121 @@ export async function recordPayment(input: RecordPaymentInput): Promise<ActionRe
     }
   }
 
+  // A ONE-TIME bill has no next period to roll to, so it closes instead — but
+  // only once its payments actually COVER it.
+  //
+  // The bug this fixes: recordPayment previously only ever advanced recurring
+  // bills and never touched status. Bill Pay lists obligations where
+  // `status !== 'Paid'`, so a one-time invoice stayed on the payable list forever
+  // after being paid, counting the same money twice — once as still owed and
+  // once as paid. It had never been hit because all 10 existing obligations are
+  // recurring; it would have fired on the very first invoice entered.
+  //
+  // Summing NON-VOID payments (rather than closing on this single payment) is
+  // what makes a partial payment safe: $400 against a $1,000 invoice leaves the
+  // bill open with $600 still genuinely owed.
+  if (!obligation.recurring) {
+    const { data: paidRows, error: paidErr } = await supabase
+      .from('obligation_payments')
+      .select('amount')
+      .eq('obligation_id', obligationId)
+      .neq('status', 'void')
+    if (!paidErr) {
+      const paidTotal = (paidRows ?? []).reduce(
+        (sum, r) => sum + (Number(r.amount) || 0),
+        0,
+      )
+      const nextStatus = resolveOneTimeBillStatus(Number(obligation.amount), paidTotal)
+      if (nextStatus !== obligation.status) {
+        const { error: closeErr } = await supabase
+          .from('cash_obligations')
+          .update({ status: nextStatus })
+          .eq('id', obligationId)
+        if (closeErr) {
+          // The payment itself succeeded, so this is reported rather than thrown —
+          // but it must be reported, because a bill that failed to close keeps
+          // inflating what the owner appears to owe.
+          revalidateAll()
+          return {
+            ok: true,
+            paymentId: inserted.id,
+            error: `Payment saved, but the bill wasn't marked paid: ${closeErr.message}`,
+          }
+        }
+      }
+    }
+  }
+
   revalidateAll()
   return { ok: true, paymentId: inserted.id }
+}
+
+/**
+ * Save an invoice that is DUE but not yet paid.
+ *
+ * Writes the same `cash_obligations` row that Cash & Debt's obligation editor
+ * writes, so a bill entered here is the identical kind of record — it appears in
+ * the payable list, the 30-day cash forecast and the advisor without any
+ * special-casing. Bill Pay only needed an entry point, not a parallel table.
+ *
+ * Always one-time (`recurring: false`): a recurring bill belongs in Cash & Debt
+ * where the frequency and schedule anchor can be set properly, and the dialog
+ * links there for that case.
+ */
+export type CreateBillDueInput = {
+  obligationName: string
+  vendorName?: string
+  amount: number
+  dueDate: string
+  invoiceNumber?: string
+  category?: string
+  notes?: string
+}
+
+export async function createBillDue(
+  input: CreateBillDueInput,
+): Promise<{ ok: boolean; error?: string; obligationId?: string }> {
+  const invalid = validateBillDueBasics(input)
+  if (invalid) return { ok: false, error: invalid }
+
+  const supabase = await createClient()
+  const name = input.obligationName.trim()
+  const invoiceNumber = (input.invoiceNumber ?? '').trim()
+
+  // Empty optional text is stored as NULL, never '', so "not recorded" stays
+  // distinguishable from a recorded blank.
+  const { data, error } = await supabase
+    .from('cash_obligations')
+    .insert({
+      obligation_name: name,
+      vendor_name: (input.vendorName ?? '').trim() || null,
+      amount: Number(input.amount),
+      due_date: input.dueDate,
+      // Seeded equal to due_date so the forecast has a date to work from; for a
+      // one-time bill the two never diverge, since nothing rolls it forward.
+      next_due_date: input.dueDate,
+      recurring: false,
+      frequency: 'One-time',
+      status: 'Pending',
+      active: true,
+      // Paid by check unless the owner says otherwise. NOT 'ACH': an ACH bill is
+      // auto-reconciled from the bank feed, so mislabelling a one-off invoice as
+      // ACH would let the matcher close it against an unrelated debit.
+      payment_method: 'Check',
+      invoice_number: invoiceNumber || null,
+      category: (input.category ?? '').trim() || null,
+      // No created_by: cash_obligations has no such column (obligation_payments
+      // does, which is easy to conflate). Attribution for the bill lives on the
+      // payment rows and in the payment audit trail.
+      notes: (input.notes ?? '').trim() || null,
+    })
+    .select('id')
+    .single()
+
+  if (error) return { ok: false, error: error.message }
+
+  revalidateAll()
+  return { ok: true, obligationId: data.id }
 }
 
 export type ReconcileResult = {
@@ -443,7 +564,8 @@ export async function voidPayment(paymentId: string, reason?: string): Promise<A
 
   const { data: existing, error: readErr } = await supabase
     .from('obligation_payments')
-    .select('id, status')
+    // obligation_id is needed to REOPEN a one-time bill this void un-pays.
+    .select('id, status, obligation_id')
     .eq('id', paymentId)
     .maybeSingle()
   if (readErr) return { ok: false, error: readErr.message }
@@ -455,6 +577,43 @@ export async function voidPayment(paymentId: string, reason?: string): Promise<A
     .update({ status: 'void' })
     .eq('id', paymentId)
   if (updErr) return { ok: false, error: updErr.message }
+
+  // Voiding is the exact inverse of the closing logic in recordPayment, so it must
+  // re-run the same test: a voided check never left the account, so that money is
+  // owed again and a bill it had closed has to REOPEN.
+  //
+  // Without this, voiding the payment that closed a one-time bill left the bill
+  // marked Paid — off the payable list, out of the forecast — while the invoice
+  // was genuinely still outstanding. That is the same double-count as the
+  // never-closing bug, just pointing the other way (money owed and invisible,
+  // which is the more expensive direction to be wrong in).
+  if (existing.obligation_id) {
+    const { data: ob } = await supabase
+      .from('cash_obligations')
+      .select('id, amount, status, recurring')
+      .eq('id', existing.obligation_id)
+      .maybeSingle()
+    // Recurring bills are excluded for the same reason as in recordPayment: they
+    // track periods by due date, not by a Paid status.
+    if (ob && !ob.recurring) {
+      const { data: paidRows } = await supabase
+        .from('obligation_payments')
+        .select('amount')
+        .eq('obligation_id', existing.obligation_id)
+        .neq('status', 'void')
+      const paidTotal = (paidRows ?? []).reduce(
+        (sum, r) => sum + (Number(r.amount) || 0),
+        0,
+      )
+      const nextStatus = resolveOneTimeBillStatus(Number(ob.amount), paidTotal)
+      if (nextStatus !== ob.status) {
+        await supabase
+          .from('cash_obligations')
+          .update({ status: nextStatus })
+          .eq('id', existing.obligation_id)
+      }
+    }
+  }
 
   await supabase.from('obligation_payment_audit').insert({
     payment_id: paymentId,

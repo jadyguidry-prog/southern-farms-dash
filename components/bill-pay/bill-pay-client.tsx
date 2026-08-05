@@ -2,7 +2,18 @@
 
 import { useMemo, useState, useTransition } from 'react'
 import { toast } from 'sonner'
-import { CalendarClock, Plus, Check, X, Repeat, Link2, Landmark, Zap } from 'lucide-react'
+import {
+  CalendarClock,
+  Plus,
+  Check,
+  X,
+  Repeat,
+  Link2,
+  Landmark,
+  Zap,
+  FileClock,
+  Hash,
+} from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -29,8 +40,13 @@ import { formatCurrency } from '@/lib/data'
 // module would (and did) break the build.
 import type { ObligationPayment, ClearingSuggestion } from '@/lib/bill-pay-service'
 // Pure display helper + type, kept in a server-free module for the reason noted above.
-import { paymentLabel, type AchReconcileMatch } from '@/lib/bill-pay-shared'
 import {
+  paymentLabel,
+  validateBillDueBasics,
+  type AchReconcileMatch,
+} from '@/lib/bill-pay-shared'
+import {
+  createBillDue,
   recordPayment,
   recordOneOffPayment,
   voidPayment,
@@ -47,6 +63,7 @@ type Obligation = {
   nextDueDate: string
   recurring: boolean
   frequency: string
+  invoiceNumber: string
   isAutopay: boolean
 }
 type Bank = { id: string; label: string }
@@ -71,6 +88,7 @@ export function BillPayClient({
 }) {
   const [activeObligation, setActiveObligation] = useState<Obligation | null>(null)
   const [oneOffOpen, setOneOffOpen] = useState(false)
+  const [billDueOpen, setBillDueOpen] = useState(false)
   // Locally dismissed suggestions — hidden without a write, so an owner who
   // knows a match is wrong isn't nagged on every load of this session.
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
@@ -98,9 +116,24 @@ export function BillPayClient({
 
       {/* Scheduled bills — each row can be paid */}
       <section>
-        <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-          Scheduled Bills
-        </h3>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Scheduled Bills
+          </h3>
+          {/* An invoice that has ARRIVED but isn't paid yet. It writes the same
+              cash_obligations row Cash & Debt writes, so it lands in the payable
+              list, the 30-day forecast and the advisor immediately — the owner
+              no longer has to leave Bill Pay to record a bill they just opened. */}
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-11"
+            onClick={() => setBillDueOpen(true)}
+          >
+            <FileClock className="size-4" aria-hidden="true" />
+            Enter a bill due
+          </Button>
+        </div>
         {obligations.length === 0 ? (
           <Card>
             <CardContent className="p-6 text-sm text-muted-foreground">
@@ -141,6 +174,15 @@ export function BillPayClient({
                         <span className="inline-flex items-center gap-1">
                           <CalendarClock className="size-3" aria-hidden="true" />
                           {o.nextDueDate}
+                        </span>
+                      )}
+                      {/* Only rendered when one was actually recorded — an empty
+                          invoice label would imply a missing number rather than a
+                          bill (rent, a draw) that never had one. */}
+                      {o.invoiceNumber && (
+                        <span className="inline-flex items-center gap-1">
+                          <Hash className="size-3" aria-hidden="true" />
+                          {o.invoiceNumber}
                         </span>
                       )}
                     </p>
@@ -249,6 +291,15 @@ export function BillPayClient({
         obligation={activeObligation}
         banks={banks}
         onClose={() => setActiveObligation(null)}
+      />
+
+      {/* Remounted per open, same as the payment dialogs, so a previous invoice's
+          number can never be saved onto the next bill. */}
+      <BillDueDialog
+        key={billDueOpen ? 'bill-due-open' : 'bill-due-closed'}
+        open={billDueOpen}
+        vendors={vendors}
+        onClose={() => setBillDueOpen(false)}
       />
 
       {/* Remounted per open so a previous entry never bleeds into the next check. */}
@@ -632,6 +683,185 @@ function RecordPaymentDialog({
           </Button>
           <Button className="h-11" onClick={submit} disabled={pending}>
             {pending ? 'Saving…' : 'Record Payment'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
+ * Enter an invoice that is DUE but not yet paid.
+ *
+ * The distinction this screen has to hold: RecordPaymentDialog says "money left
+ * the account", this says "money is owed". Conflating them is what makes a cash
+ * forecast wrong in the expensive direction — an unrecorded bill makes the
+ * balance look better than it is right up until the check is written.
+ *
+ * Validation runs client-side with the SAME shared predicate the server action
+ * uses (validateBillDueBasics), so the two cannot disagree about what a valid
+ * bill is; the server still re-validates because a client check is not a guard.
+ */
+function BillDueDialog({
+  open,
+  vendors,
+  onClose,
+}: {
+  open: boolean
+  vendors: VendorOption[]
+  onClose: () => void
+}) {
+  const [pending, startTransition] = useTransition()
+  const [name, setName] = useState('')
+  const [vendorName, setVendorName] = useState('')
+  const [amount, setAmount] = useState('')
+  const [dueDate, setDueDate] = useState(todayStr())
+  const [invoiceNumber, setInvoiceNumber] = useState('')
+  const [notes, setNotes] = useState('')
+
+  // Same pattern as the one-off payee: picking a known vendor fills the text but
+  // leaves it editable, so a brand-new supplier is never blocked.
+  // Accepts null because the Select can emit a cleared value; an unknown or
+  // cleared id leaves the typed name alone rather than blanking it.
+  const pickVendor = (id: string | null) => {
+    const v = vendors.find((x) => x.id === id)
+    if (v) setVendorName(v.name)
+  }
+
+  const problem = validateBillDueBasics({
+    obligationName: name,
+    amount: Number(amount),
+    dueDate,
+  })
+
+  const submit = () => {
+    startTransition(async () => {
+      const res = await createBillDue({
+        obligationName: name,
+        vendorName,
+        amount: Number(amount),
+        dueDate,
+        invoiceNumber,
+        notes,
+      })
+      if (res.ok) {
+        toast.success('Bill recorded. It now shows as owed and is ready to pay.')
+        onClose()
+      } else {
+        toast.error(res.error ?? 'Could not save the bill.')
+      }
+    })
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Enter a Bill Due</DialogTitle>
+          <DialogDescription>
+            An invoice you owe but haven&apos;t paid. It counts against your cash
+            forecast right away, then clears when you pay it here.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div>
+            <Label htmlFor="bd-name">What is this bill for?</Label>
+            <Input
+              id="bd-name"
+              className="mt-1 h-11 text-base"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Feed delivery"
+            />
+          </div>
+
+          <div>
+            <Label htmlFor="bd-vendor">Vendor</Label>
+            <Input
+              id="bd-vendor"
+              className="mt-1 h-11 text-base"
+              value={vendorName}
+              onChange={(e) => setVendorName(e.target.value)}
+              placeholder="Who you owe"
+            />
+            {vendors.length > 0 && (
+              <Select value="" onValueChange={pickVendor}>
+                <SelectTrigger className="mt-2 h-11">
+                  <SelectValue placeholder="Or pick an existing vendor" />
+                </SelectTrigger>
+                <SelectContent>
+                  {vendors.map((v) => (
+                    <SelectItem key={v.id} value={v.id}>
+                      {v.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label htmlFor="bd-amount">Amount</Label>
+              <Input
+                id="bd-amount"
+                inputMode="decimal"
+                className="mt-1 h-11 text-base"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="0.00"
+              />
+            </div>
+            <div>
+              <Label htmlFor="bd-due">Due date</Label>
+              <Input
+                id="bd-due"
+                type="date"
+                className="mt-1 h-11 text-base"
+                value={dueDate}
+                onChange={(e) => setDueDate(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div>
+            <Label htmlFor="bd-invoice">Invoice # (optional)</Label>
+            <Input
+              id="bd-invoice"
+              className="mt-1 h-11 text-base"
+              value={invoiceNumber}
+              onChange={(e) => setInvoiceNumber(e.target.value)}
+              placeholder="From the vendor's invoice"
+            />
+          </div>
+
+          <div>
+            <Label htmlFor="bd-notes">Notes (optional)</Label>
+            <Input
+              id="bd-notes"
+              className="mt-1 h-11 text-base"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Anything worth remembering"
+            />
+          </div>
+
+          {/* One-time only. A recurring bill needs a frequency and a schedule
+              anchor, which belong in Cash & Debt — offering "recurring" here
+              would create a bill with no schedule that silently never repeats. */}
+          <p className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+            This saves a one-time bill. For a bill that repeats every month, add it
+            in Cash &amp; Debt so its schedule is set correctly.
+          </p>
+        </div>
+
+        <DialogFooter className="mt-2 gap-2 sm:gap-2">
+          <Button variant="outline" className="h-11" onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button className="h-11" onClick={submit} disabled={pending || problem !== null}>
+            {pending ? 'Saving…' : 'Save Bill'}
           </Button>
         </DialogFooter>
       </DialogContent>

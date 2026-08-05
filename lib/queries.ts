@@ -567,6 +567,9 @@ export async function getCashObligations() {
     paymentMethod: o.payment_method ?? '',
     active: o.active ?? true,
     status: o.status ?? 'Pending',
+    // '' means "no invoice number recorded". The write path stores NULL rather
+    // than '' for a blank, so there is no ambiguous third state to represent.
+    invoiceNumber: o.invoice_number ?? '',
     notes: o.notes ?? '',
   }))
 }
