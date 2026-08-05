@@ -1,9 +1,45 @@
 'use client'
 
-import { useId, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { TableCell, TableRow } from '@/components/ui/table'
 import { formatCurrency, formatDayLabel } from '@/lib/data'
+
+/**
+ * Width of the horizontally-scrollable area the table sits in, but only when the table
+ * is actually wider than it (i.e. on a narrow screen). Returns null otherwise.
+ *
+ * On a phone the table overflows, so a breakdown laid out to the full table width has
+ * its amounts sitting off-screen — the reader sees vendor names with no figures unless
+ * they scroll sideways. Pinning the breakdown to the visible width fixes that, but doing
+ * it unconditionally would break the desktop case, where the amounts are deliberately
+ * aligned under the "Out" column. Measured at runtime rather than hardcoded so it stays
+ * correct at any screen size and if the card padding ever changes.
+ */
+function useOverflowWidth(el: HTMLElement | null) {
+  const [width, setWidth] = useState<number | null>(null)
+
+  const measure = useCallback(() => {
+    const scroller = el?.closest<HTMLElement>('[class*="overflow-x-auto"]')
+    if (!scroller) return setWidth(null)
+    // 1px tolerance: sub-pixel layout can make these differ by a hair with no real overflow.
+    setWidth(
+      scroller.scrollWidth > scroller.clientWidth + 1 ? scroller.clientWidth : null,
+    )
+  }, [el])
+
+  useEffect(() => {
+    if (!el) return
+    measure()
+    const scroller = el.closest<HTMLElement>('[class*="overflow-x-auto"]')
+    if (!scroller || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measure)
+    ro.observe(scroller)
+    return () => ro.disconnect()
+  }, [el, measure])
+
+  return width
+}
 
 /**
  * Structural prop type rather than an import of the engine's `ForecastDay`.
@@ -37,6 +73,10 @@ export type DayOutflowRow = {
 export function DayOutflowRows({ day }: { day: DayOutflowRow }) {
   const [open, setOpen] = useState(false)
   const detailId = useId()
+  // State rather than useRef: a ref assignment does not re-render, so the measurement
+  // would stay null forever on first paint.
+  const [anchor, setAnchor] = useState<HTMLTableCellElement | null>(null)
+  const visibleWidth = useOverflowWidth(anchor)
 
   // Only dated items are worth itemising. A day whose entire outflow is the spread
   // estimate has nothing to reveal, so it must not offer an empty expander.
@@ -53,7 +93,7 @@ export function DayOutflowRows({ day }: { day: DayOutflowRow }) {
   return (
     <>
       <TableRow className={day.breachesReserve ? 'bg-destructive/5' : undefined}>
-        <TableCell className="whitespace-nowrap font-medium">
+        <TableCell ref={setAnchor} className="whitespace-nowrap font-medium">
           {expandable ? (
             <button
               type="button"
@@ -108,14 +148,29 @@ export function DayOutflowRows({ day }: { day: DayOutflowRow }) {
               the "Out" heading it belongs to. Spanning all four pushed the amounts under
               "Balance", which read as running balances rather than components of Out. */}
           <TableCell colSpan={3} className="p-0">
-            <div id={detailId} className="bg-muted/40 px-4 py-3">
+            <div
+              id={detailId}
+              className={`bg-muted/40 px-4 py-3 ${
+                visibleWidth === null ? '' : 'sticky left-0'
+              }`}
+              // When the table overflows (phones), pin the panel to the visible area so
+              // every amount is readable without scrolling sideways. When it fits, leave
+              // layout untouched so amounts stay aligned under the "Out" column.
+              style={visibleWidth === null ? undefined : { width: visibleWidth }}
+            >
               <ul className="flex flex-col gap-2">
                 {datedItems.map((item, idx) => (
                   <li
                     key={`${item.label}-${item.dueDate}-${idx}`}
-                    className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5"
+                    // No wrapping: the label flexes and the amount stays fixed, so every
+                    // amount lines up in one column. Allowing wrap put some amounts on
+                    // their own line and broke the vertical alignment that makes a list
+                    // of figures scannable.
+                    className="flex items-baseline justify-between gap-x-4"
                   >
-                    <span className="text-sm text-foreground">
+                    {/* whitespace-normal because TableCell sets nowrap: without it a long
+                        vendor name runs straight under its own amount. */}
+                    <span className="min-w-0 whitespace-normal text-sm text-foreground">
                       {item.label}
                       {/* The whole point of the feature: say plainly that this was due
                           earlier and is only sitting here because it has not cleared. */}
@@ -127,15 +182,15 @@ export function DayOutflowRows({ day }: { day: DayOutflowRow }) {
                         </span>
                       ) : null}
                     </span>
-                    <span className="text-sm tabular-nums text-foreground">
+                    <span className="shrink-0 text-sm tabular-nums text-foreground">
                       {formatCurrency(item.amount)}
                     </span>
                   </li>
                 ))}
 
                 {estimate ? (
-                  <li className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5 border-t border-border pt-2">
-                    <span className="text-sm text-muted-foreground">
+                  <li className="flex items-baseline justify-between gap-x-4 border-t border-border pt-2">
+                    <span className="min-w-0 whitespace-normal text-sm text-muted-foreground">
                       {estimate.label}
                       {/* Kept visually distinct from the named bills above. Presenting an
                           average as though it were a specific invoice would make the
@@ -144,7 +199,7 @@ export function DayOutflowRows({ day }: { day: DayOutflowRow }) {
                         Estimated from your typical week, not a specific bill
                       </span>
                     </span>
-                    <span className="text-sm tabular-nums text-muted-foreground">
+                    <span className="shrink-0 text-sm tabular-nums text-muted-foreground">
                       {formatCurrency(estimate.amount)}
                     </span>
                   </li>
