@@ -13,6 +13,7 @@ import {
   type BillReminderInput,
   type UnclearedCheckInput,
 } from '../lib/bill-reminders'
+import { resolveNextDueDate } from '../lib/health'
 
 let pass = 0
 let fail = 0
@@ -182,6 +183,111 @@ function run(
   const r = run([bill({ dueDate: '' })])
   check('an undated bill produces no reminder', r.due.length, 0)
   check('and is not silently added to upcoming', r.upcoming.length, 0)
+}
+
+// ---------------------------------------------------------------------------
+// resolveNextDueDate: the MediaRite bug. An explicit next_due_date used to be
+// returned unconditionally, and nothing in the app ever advances that column, so a
+// recurring bill stayed pinned in the past forever and read as more overdue each day.
+// ---------------------------------------------------------------------------
+{
+  const today = new Date('2026-08-05T00:00:00')
+
+  // The exact failing case: monthly bill, explicit date months behind.
+  check(
+    'a stale next_due_date rolls forward to the coming cycle',
+    resolveNextDueDate(
+      {
+        dueDate: '2026-01-15',
+        nextDueDate: '2026-06-15',
+        recurring: true,
+        frequency: 'Monthly',
+      },
+      today,
+    ),
+    '2026-08-15',
+  )
+
+  // The chosen DAY must survive the roll-forward: the 15th stays the 15th.
+  check(
+    'rolling forward preserves the day of the month',
+    resolveNextDueDate(
+      { dueDate: '', nextDueDate: '2026-08-15', recurring: true, frequency: 'Monthly' },
+      today,
+    ),
+    '2026-08-15',
+  )
+
+  // A future date must be left exactly alone, not advanced past itself.
+  check(
+    'a future next_due_date is untouched',
+    resolveNextDueDate(
+      { dueDate: '', nextDueDate: '2026-09-15', recurring: true, frequency: 'Monthly' },
+      today,
+    ),
+    '2026-09-15',
+  )
+
+  // A ONE-OFF that is past due is genuinely late. Advancing it would hide a real
+  // problem, so non-recurring bills must NOT roll.
+  check(
+    'a one-off past due stays past due',
+    resolveNextDueDate(
+      { dueDate: '2026-07-01', nextDueDate: '', recurring: false, frequency: '' },
+      today,
+    ),
+    '2026-07-01',
+  )
+
+  // Regression guard for the timezone bug in the old `toISOString().slice(0,10)`:
+  // a date built at local midnight must not report the previous day.
+  const rolled = resolveNextDueDate(
+    { dueDate: '2026-01-01', nextDueDate: '', recurring: true, frequency: 'Monthly' },
+    today,
+  )
+  ok(`a rolled date keeps its day-of-month (got ${rolled})`, rolled.endsWith('-01'))
+}
+
+// ---------------------------------------------------------------------------
+// Inherited guard: the hardcoded 30-day `auto-billpay-stale-check` advisor item was
+// removed in favour of the owner-set threshold. The concern it protected — a
+// long-uncleared check MUST still be surfaced — is enforced here so deleting that item
+// did not quietly drop the protection along with the stale threshold.
+// ---------------------------------------------------------------------------
+{
+  const r = buildBillReminders({
+    bills: [],
+    unclearedChecks: [
+      { checkNumber: '900', payee: 'Lost Co', amount: 500, paymentDate: '2026-06-22' },
+    ],
+    today: TODAY,
+    leadDays: 3,
+    staleCheckAfterDays: 14,
+  })
+  check('a 44-day-old check is still flagged', r.staleChecks.length, 1)
+  check('and reports its real age', r.staleChecks[0]?.daysOutstanding, 44)
+  // The whole point: the flag must move with the owner's setting, not a constant.
+  const strict = buildBillReminders({
+    bills: [],
+    unclearedChecks: [
+      { checkNumber: '900', payee: 'Lost Co', amount: 500, paymentDate: '2026-07-28' },
+    ],
+    today: TODAY,
+    leadDays: 3,
+    staleCheckAfterDays: 5,
+  })
+  check('an 8-day check is stale at a 5-day threshold', strict.staleChecks.length, 1)
+  const lenient = buildBillReminders({
+    bills: [],
+    unclearedChecks: [
+      { checkNumber: '900', payee: 'Lost Co', amount: 500, paymentDate: '2026-07-28' },
+    ],
+    today: TODAY,
+    leadDays: 3,
+    staleCheckAfterDays: 30,
+  })
+  check('but not at a 30-day threshold', lenient.staleChecks.length, 0)
+  check('the threshold is echoed back for display', lenient.staleCheckAfterDays, 30)
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

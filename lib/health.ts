@@ -1416,17 +1416,15 @@ export function generateInsights({
       })
     }
 
-    // A check uncleared for a month is worth chasing — it may be lost.
-    if (billPay.oldestOutstandingDays != null && billPay.oldestOutstandingDays >= 30) {
-      out.push({
-        id: 'auto-billpay-stale-check',
-        severity: 'warning',
-        category: 'Cash',
-        title: 'A written check has been uncleared for weeks',
-        detail: `The oldest outstanding check was written ${billPay.oldestOutstandingDays} days ago and still has not cleared. Confirm the payee received it before it is stale-dated, and reissue if it was lost.`,
-        impact: `Uncleared ${billPay.oldestOutstandingDays} days`,
-      })
-    }
+    // A stale-check warning used to live here with a HARDCODED 30-day threshold, keyed off
+    // only the single oldest check. It has been replaced by `auto-bills-stale-checks`
+    // below, which uses the owner's `account_data_stale_days` setting and reports every
+    // stale check with its amount.
+    //
+    // Deliberately removed rather than kept: two items describing the same check at two
+    // different thresholds (a hardcoded 30 vs the owner's 14) would contradict each other,
+    // and the owner would have no way to tell which threshold governed. One concept, one
+    // message, one owner-set number.
   }
 
   // --- Bills needing action ------------------------------------------------

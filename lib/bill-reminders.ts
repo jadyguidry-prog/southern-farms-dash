@@ -91,6 +91,12 @@ export type BillReminderResult = {
   staleChecks: StaleCheck[]
   /** Total still owed across `due`. */
   dueTotal: number
+  /**
+   * The owner-set thresholds this result was computed with, echoed back so every consumer
+   * quotes the same numbers instead of re-reading settings and risking a mismatch.
+   */
+  leadDays: number
+  staleCheckAfterDays: number
 }
 
 const URGENCY_ORDER: Record<BillUrgency, number> = {
@@ -177,6 +183,8 @@ export function buildBillReminders(input: {
     upcoming: classified.filter((c) => c.urgency === 'upcoming'),
     staleChecks,
     dueTotal: due.reduce((s, c) => s + c.amount, 0),
+    leadDays,
+    staleCheckAfterDays,
   }
 }
 

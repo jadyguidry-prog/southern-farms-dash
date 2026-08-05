@@ -494,9 +494,24 @@ const pillars = {
       minCashReserve: 10_000,
     },
   })
+  // Inverted, not deleted. `auto-billpay-stale-check` used a HARDCODED 30-day threshold
+  // and was replaced by `auto-bills-stale-checks`, which uses the owner's
+  // `account_data_stale_days` setting. The concern the original test protected — a
+  // long-uncleared check must still get flagged — is now enforced in
+  // verify-bill-reminders.ts against that setting.
+  //
+  // What this asserts now is the thing that would actually be a bug: the retired item must
+  // not come back, because two stale-check warnings at two different thresholds would
+  // contradict each other with no way to tell which one governed.
   ok(
-    'a long-uncleared check is flagged as possibly lost',
-    insights.some((i) => i.id === 'auto-billpay-stale-check'),
+    'the hardcoded 30-day stale-check item is gone (owner-set threshold governs instead)',
+    !insights.some((i) => i.id === 'auto-billpay-stale-check'),
+  )
+  // The rest of the bill-pay advice must survive the removal — this block should still
+  // produce the outstanding-checks item, so the whole group was not lost with it.
+  ok(
+    'outstanding checks are still reported',
+    insights.some((i) => i.id === 'auto-billpay-outstanding'),
   )
 }
 
@@ -512,9 +527,11 @@ const pillars = {
       minCashReserve: 10_000,
     },
   })
+  // Still meaningful after the swap: a recent check must not be called stale by ANY item,
+  // so this now checks the whole insight set rather than one retired id.
   ok(
-    'a recent check is not called stale',
-    !insights.some((i) => i.id === 'auto-billpay-stale-check'),
+    'a recent check is not called stale by any item',
+    !insights.some((i) => /stale/i.test(i.id) || /stale/i.test(i.title)),
   )
 }
 

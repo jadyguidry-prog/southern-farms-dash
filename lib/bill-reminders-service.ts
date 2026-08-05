@@ -83,7 +83,12 @@ export const getBillReminders = cache(async (): Promise<BillReminderResult> => {
   // requireSetting, never `?? 0`: a failed settings read must fail loudly rather than
   // silently become a plausible-looking wrong threshold.
   const leadDays = requireSetting(settings, 'bill_reminder_lead_days')
-  const staleCheckAfterDays = requireSetting(settings, 'card_statement_cycle_stale_days')
+  // Reuses the owner's existing staleness setting rather than inventing a second one.
+  // `account_data_stale_days` (14) not `card_statement_cycle_stale_days` (35): the latter
+  // is the length of a credit-card statement cycle, an unrelated concept, and 35 days is
+  // far too permissive for a check — most clear inside two weeks, so a month-old
+  // outstanding check is exactly the case worth flagging.
+  const staleCheckAfterDays = requireSetting(settings, 'account_data_stale_days')
 
   // Read the clock exactly once and pass it down.
   const now = new Date()

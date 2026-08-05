@@ -24,6 +24,7 @@ import { getSavedProposalReviews } from '@/lib/growth-proposal-review'
 import { getCardExposure } from '@/lib/card-exposure-service'
 import { getBillReminders } from '@/lib/bill-reminders-service'
 import type { BillReminderResult } from '@/lib/bill-reminders'
+import type { BillsInsightInput } from '@/lib/health'
 import { getLaborHealthSnapshot } from '@/lib/labor-service'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
 import { getOutstandingCheckSummary, getBillPaySnapshot } from '@/lib/bill-pay-service'
@@ -547,6 +548,41 @@ export async function getCashObligations() {
     invoiceNumber: o.invoice_number ?? '',
     notes: o.notes ?? '',
   }))
+}
+
+/**
+ * Collapse bill reminders into the advisor's input shape.
+ *
+ * Overdue and unpaid-planned are counted SEPARATELY and never summed: one is a missed
+ * vendor deadline, the other is a bill with no deadline that simply has not had a check
+ * written yet. Adding them together would report bills as late that have nothing to be
+ * late against — the exact error this whole feature exists to avoid.
+ *
+ * Thresholds come from the result itself rather than a fresh settings read, so the advice
+ * can never quote a different lead time than the panel it sits beside.
+ */
+function billsInsightFrom(r: BillReminderResult): BillsInsightInput {
+  const sum = (xs: { amount: number }[]) => xs.reduce((s, x) => s + x.amount, 0)
+  // 'due-today' groups with overdue: against a real vendor deadline, today is the last
+  // moment to act, so it belongs with the pressing items rather than the advisory ones.
+  const overdue = r.due.filter(
+    (d) => d.urgency === 'overdue' || d.urgency === 'due-today',
+  )
+  const planned = r.due.filter((d) => d.urgency === 'unpaid-planned')
+  const soon = r.due.filter((d) => d.urgency === 'due-soon')
+
+  return {
+    overdueCount: overdue.length,
+    overdueTotal: sum(overdue),
+    unpaidPlannedCount: planned.length,
+    unpaidPlannedTotal: sum(planned),
+    dueSoonCount: soon.length,
+    dueSoonTotal: sum(soon),
+    leadDays: r.leadDays,
+    staleCheckCount: r.staleChecks.length,
+    staleCheckTotal: sum(r.staleChecks),
+    staleAfterDays: r.staleCheckAfterDays,
+  }
 }
 
 // Raw rows (snake_case columns) for the management tables + edit forms.
@@ -1075,7 +1111,7 @@ export async function getHealthSnapshot() {
     // generates no advice rather than four "0 bills" items.
     bills:
       billReminders.due.length > 0 || billReminders.staleChecks.length > 0
-        ? billsInsightFrom(billReminders, settings)
+        ? billsInsightFrom(billReminders)
         : undefined,
     // Same guard as cash flow: with no timecards there is nothing to advise on,
     // so the group is omitted rather than passed as zeros.

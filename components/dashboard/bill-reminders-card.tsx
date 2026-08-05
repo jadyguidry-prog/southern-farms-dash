@@ -75,10 +75,13 @@ export function BillRemindersCard({ reminders }: { reminders: BillReminderResult
               aria-hidden
             />
             <div className="min-w-0">
+              {/* Quotes the actual owner-set threshold rather than a vague "a long time",
+                  so the flag is explainable and tunable instead of feeling arbitrary. */}
               <p className="text-xs text-muted-foreground text-pretty">
                 {staleChecks.length}{' '}
                 {staleChecks.length === 1 ? 'check has' : 'checks have'} been outstanding
-                a long time. Still counted as owed — confirm whether they cleared.
+                over {reminders.staleCheckAfterDays} days. Still counted as money owed —
+                confirm whether they cleared and mark them in Bill Pay.
               </p>
               <ul className="mt-1.5 flex flex-col gap-1">
                 {staleChecks.slice(0, 3).map((c, i) => (
