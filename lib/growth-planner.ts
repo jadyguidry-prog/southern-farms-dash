@@ -302,17 +302,62 @@ export function evaluateRung(
     actual: number | null,
     required: number,
     label: string,
+    monthlyCost: number,
   ): void => {
     if (actual === null) return
+
+    // A coverage gate is not really a "months" rule -- it is a demand for
+    // `required x monthlyCost` of low-point cash. Left uncapped that demand can
+    // quietly exceed `min_cash_reserve`, and then IT, not the owner's own setting,
+    // becomes the binding constraint on every rung: the planner answers "$0,
+    // committing to nothing already breaks your limits" while silently overriding
+    // a number the owner explicitly chose.
+    //
+    // Worse, it is a MULTIPLIER on a figure that moves. This gate was recalibrated
+    // to 1 month when payroll was ~$12k/mo; payroll has since grown to ~$19.5k/mo,
+    // so the demand climbed back over the $15,000 floor entirely on its own. Tuning
+    // the number again would just restart that drift.
+    //
+    // So the DEMAND is capped at the reserve: a coverage gate may be as strict as
+    // the owner's full cash reserve, never stricter.
+    const demanded = round2(required * monthlyCost)
+    if (cov.minCashReserve > 0 && demanded > cov.minCashReserve) {
+      // The reserve gate above already enforces the binding threshold, so failing
+      // here too would report the same constraint twice under two different names.
+      // It is still surfaced as a tradeoff when it would otherwise have fired, so
+      // the cap is visible rather than a silent loosening.
+      if (actual < required) {
+        tradeoffs.push(
+          `Coverage for ${label} sits at ${actual.toFixed(1)} months, under the ${required}-month guideline for ${mode.label}. That guideline would require ${money(demanded)} of cash at the low point, more than the ${money(cov.minCashReserve)} reserve you set, so the reserve is the limit being applied instead.`,
+        )
+      }
+      return
+    }
+
     if (actual < required) {
       failures.push(
         `Would leave ${actual.toFixed(1)} months of ${label} covered, under the ${required}-month minimum for ${mode.label}.`,
       )
     }
   }
-  coverageGate(payrollCoverageMonths, mode.minPayrollCoverageMonths, 'payroll')
-  coverageGate(vendorCoverageMonths, mode.minVendorCoverageMonths, 'critical vendor spend')
-  coverageGate(debtCoverageMonths, mode.minDebtCoverageMonths, 'loan payments')
+  coverageGate(
+    payrollCoverageMonths,
+    mode.minPayrollCoverageMonths,
+    'payroll',
+    cov.monthlyPayroll,
+  )
+  coverageGate(
+    vendorCoverageMonths,
+    mode.minVendorCoverageMonths,
+    'critical vendor spend',
+    cov.monthlyCriticalVendors,
+  )
+  coverageGate(
+    debtCoverageMonths,
+    mode.minDebtCoverageMonths,
+    'loan payments',
+    cov.monthlyDebtService,
+  )
 
   // --- Classification ----------------------------------------------------
   let classification: Classification

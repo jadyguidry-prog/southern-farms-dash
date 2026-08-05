@@ -543,13 +543,60 @@ console.log('\nCoverage gates must not override the owner-set reserve')
     !r.failures.some((f) => /payroll/i.test(f)),
   )
 
-  // The gate must still fire when payroll genuinely outgrows the reserve.
+  // INVERTED. This used to assert the OPPOSITE -- that the gate "still fires once one
+  // month of payroll exceeds the reserve" -- which contradicts this block's own title.
+  // That assertion is what let the original bug back in. The 1-month gate was
+  // calibrated safely against ~$12k payroll, but it is a MULTIPLIER on a figure that
+  // moves: when payroll reached ~$19.5k the demand crossed $15,000, the gate became
+  // strictly tighter than the owner's reserve again, and it bound every rung down to
+  // a $0 headline -- and this test *required* that outcome. A gate demanding more cash
+  // than the owner's own floor is the override this block forbids, whatever payroll
+  // happens to be. Re-tuning the number would only restart the drift; the cap ends it.
   const bigPayroll: CoverageInputs = { ...atFloor, monthlyPayroll: 20000 }
   const r2 = evaluateRung(base, NO_COMMITMENT, calibrated, bigPayroll)
   checkTrue(
-    'but still fires once one month of payroll exceeds the reserve',
-    r2.failures.some((f) => /payroll/i.test(f)),
+    'once one month of payroll exceeds the reserve, the gate no longer fails the rung',
+    !r2.failures.some((f) => /payroll/i.test(f)),
   )
+  // Capping must not be a SILENT loosening -- the owner is still told it applied.
+  checkTrue(
+    'and the capped guideline is surfaced as a tradeoff instead',
+    r2.tradeoffs.some((t) => /payroll/i.test(t) && /reserve/i.test(t)),
+  )
+
+  // The concern the old assertion was really protecting: the cap must not turn
+  // coverage gates into dead code. While the demand fits inside the reserve, a
+  // genuine shortfall still fails the rung.
+  const withinReserve: CoverageInputs = {
+    ...COV,
+    minCashReserve: reserve,
+    monthlyPayroll: 10000,
+  }
+  const thin = { ...BASE, cashOnHand: 9000, expectedInflow: 0, expectedOutflow: 0 }
+  const r3 = evaluateRung(thin, NO_COMMITMENT, calibrated, withinReserve)
+  checkTrue(
+    'the gate still fires when its demand fits within the reserve',
+    r3.failures.some((f) => /payroll/i.test(f)),
+  )
+}
+
+console.log('\nNo coverage gate may demand more cash than the reserve (invariant)')
+{
+  // Checked against every real mode at TODAY's payroll rather than one example, so a
+  // future threshold edit in growth_risk_modes cannot silently reintroduce the
+  // override. Capping is monotonic in `required` -- min(months x cost, reserve) never
+  // decreases as the gate tightens -- so mode ordering is preserved.
+  const cov: CoverageInputs = { ...COV, minCashReserve: 15000, monthlyPayroll: 19552 }
+  const base = { ...BASE, cashOnHand: 17597, expectedInflow: 0, expectedOutflow: 0 }
+  for (const mode of [balanced, conservative, aggressive]) {
+    const demanded = mode.minPayrollCoverageMonths * cov.monthlyPayroll
+    if (demanded <= cov.minCashReserve) continue
+    const r = evaluateRung(base, NO_COMMITMENT, mode, cov)
+    checkTrue(
+      `${mode.label}: a $${Math.round(demanded).toLocaleString()} payroll demand exceeds the $15,000 reserve, so it must not fail the rung`,
+      !r.failures.some((f) => /payroll/i.test(f)),
+    )
+  }
 }
 
 console.log('\nA planner that fails its own baseline is useless')
