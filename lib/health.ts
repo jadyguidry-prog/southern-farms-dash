@@ -8,6 +8,17 @@ import { formatCurrency, formatPercent } from '@/lib/data'
  * "unknown" is used when the underlying data hasn't been entered yet, so an
  * empty table never masquerades as a passing (or failing) grade.
  */
+/**
+ * "2026-08-18" -> "Aug 18". Split manually rather than `new Date(iso)`, because that
+ * parses a bare date as UTC midnight and renders the PREVIOUS day west of Greenwich —
+ * which would state the wrong due date for a payment.
+ */
+function formatDateLong(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  if (!y || !m || !d) return iso
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
 export type HealthStatus = 'green' | 'yellow' | 'red' | 'unknown'
 
 export type HealthResult = {
@@ -454,8 +465,120 @@ type InsightInput = {
    * farm not yet using Bill Pay gets no bill-pay insights rather than zeros.
    */
   billPay?: BillPayInsightInput
+  /**
+   * Weekly cash position from the spending-capacity engine. Omit when fewer than
+   * 8 complete weeks exist, so a thin ledger produces no verdict on solvency.
+   */
+  spending?: SpendingInsightInput
+  /**
+   * Growth Planner position. Omit when the planner has no data (no revenue or
+   * transaction history), so no commitment advice is generated from an empty
+   * database.
+   */
+  growth?: GrowthInsightInput
+  /**
+   * Credit-card exposure. Omit when no card accounts exist, so an empty setup
+   * produces no card advice.
+   */
+  cards?: CardInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
+}
+
+/**
+ * Weekly money-in vs money-out, derived from bank deposits rather than invoices.
+ *
+ * This is the single most consequential input the advisor has: it answers whether
+ * the business is structurally covering its own costs. Both figures are medians,
+ * so a one-off loan advance or a large annual cheque cannot manufacture a
+ * surplus or a crisis that is not there.
+ */
+export type SpendingInsightInput = {
+  typicalWeeklyInflow: number
+  typicalWeeklyOutflow: number
+  /** Complete weeks behind the medians, for honest hedging in the copy. */
+  weeksObserved: number
+  /** Cash that could be spent now without breaching the reserve. */
+  safeToSpendToday: number
+  /**
+   * True when the projection dips under the reserve anywhere in the HORIZON (30 days by
+   * default), which is a longer window than `safeToSpendToday` is solved over. The two
+   * answer different questions on purpose, so any copy using both must say which is which.
+   */
+  breachesReserve: boolean
+  /**
+   * A dated card payment that drops cash under the reserve later in the horizon.
+   *
+   * Separate from `breachesReserve` because the cause matters to the advice: a shortfall
+   * caused by a known, dated payment is actionable (move the date, pay part of it, hold
+   * cash back), whereas a general downward drift needs sales or cost changes. Omitted
+   * entirely when no card payment is responsible, so no advice is invented.
+   */
+  cardCliff?: {
+    accountName: string
+    amount: number
+    dueDate: string
+    /** Cash left on the day it clears, on the cautious basis. */
+    balanceAfter: number
+    shortfall: number
+  }
+  /** Cards with a balance that could NOT be forecast, so the gap is stated not hidden. */
+  unforecastCards?: { accountName: string; reason: string }[]
+}
+
+/**
+ * Growth Planner position, for advisor insights about new commitments.
+ *
+ * `headlineRecurring` is the STRESSED recommendation (survives the mode's sales
+ * decline), never the unstressed edge — the advisor must not headline a number
+ * that breaks on a small dip. `edgeRecurring` is carried only so the copy can
+ * explain the gap when the stressed answer is $0.
+ */
+export type GrowthInsightInput = {
+  /** Recommended monthly commitment that still clears every gate under stress. */
+  headlineRecurring: number
+  /** Largest amount tolerated on the expected path, with no downturn applied. */
+  edgeRecurring: number
+  /** Sales decline the recommendation was stress-tested against. */
+  stressDeclinePct: number
+  modeLabel: string
+  /** Saved proposals whose verdict changed since they were saved. */
+  changedProposals: {
+    name: string
+    fromClassification: string
+    toClassification: string
+    /** True when the change is for the worse (was affordable, now is not). */
+    worsened: boolean
+  }[]
+  /** Approved commitments the owner has said yes to, for the review nudge. */
+  approvedCount: number
+}
+
+/**
+ * Credit-card exposure, for advisor insights about borrowed money on cards.
+ *
+ * Omitted entirely when no card accounts exist, so an empty setup produces no card
+ * advice rather than advice built on zeros.
+ *
+ * `totalOwed` is DELIBERATELY nullable and must never be coerced to 0. Null means
+ * "nobody has entered a balance", which on a card running thousands a month is a very
+ * different statement from "you owe nothing". The insights below branch on null and
+ * say which case it is.
+ */
+export type CardInsightInput = {
+  /** Confirmed amount owed across cards; null when no card balance is recorded. */
+  totalOwed: number | null
+  cardCount: number
+  /** How many cards have an owner-confirmed balance. */
+  confirmedCount: number
+  /** Whole calendar months between the newest card transaction and today. */
+  monthsBehind: number
+  /** Newest recorded card transaction date, null when there is no history. */
+  lastActivityDate: string | null
+  /** Typical monthly charge volume, for sizing the untracked gap. */
+  typicalMonthlyCharges: number | null
+  /** Cards whose utilization is known and above the safe threshold. */
+  highUtilization: { accountName: string; utilizationPct: number }[]
 }
 
 export type BillPayInsightInput = {
@@ -485,10 +608,105 @@ export function generateInsights({
   checks,
   marketing,
   billPay,
+  spending,
+  growth,
+  cards,
   now,
-  }: InsightInput): Insight[] {
+}: InsightInput): Insight[] {
   const out: Insight[] = []
   const { payroll, cash, sales } = pillars
+
+  // --- A dated card payment that breaks the reserve ---
+  // Placed above the weekly-gap insight because it is a specific amount on a specific
+  // date, which is more actionable than a structural trend. No history threshold applies:
+  // the amount and date come from the card itself, not from an estimate.
+  if (spending?.cardCliff) {
+    const c = spending.cardCliff
+    out.push({
+      id: 'auto-card-payment-breaks-reserve',
+      severity: 'critical',
+      category: 'Cash',
+      title: 'A card payment will take you under your cash reserve',
+      detail:
+        `${c.accountName} has ${formatCurrency(c.amount)} due on ` +
+        `${formatDateLong(c.dueDate)}. On a slow week that payment leaves about ` +
+        `${formatCurrency(c.balanceAfter)} in the bank — ${formatCurrency(c.shortfall)} below ` +
+        `your reserve. Spare cash shown as spendable today is measured over a shorter ` +
+        `window and does not hold this back for you. ` +
+        `Either set aside ${formatCurrency(c.shortfall)} now, plan to pay part of the ` +
+        `balance rather than all of it, or line up the payment behind your next deposit.`,
+      impact: `${formatCurrency(c.shortfall)} short on ${formatDateLong(c.dueDate)}`,
+    })
+  }
+
+  // A card carrying a balance that cannot be forecast is a hole in the number above, so
+  // it is reported rather than left to make the forecast quietly optimistic.
+  if (spending?.unforecastCards?.length) {
+    const cards = spending.unforecastCards
+    out.push({
+      id: 'auto-card-payment-not-forecast',
+      severity: 'warning',
+      category: 'Cash',
+      title:
+        cards.length === 1
+          ? 'A card payment is missing from your cash forecast'
+          : `${cards.length} card payments are missing from your cash forecast`,
+      detail:
+        `${cards.map((c) => `${c.accountName} (${c.reason})`).join('; ')}. ` +
+        `Until that is filled in, the forecast assumes no payment leaves your account for ` +
+        `${cards.length === 1 ? 'it' : 'them'}, so your real low point may be worse than shown. ` +
+        `Add the statement due date in Admin to include ${cards.length === 1 ? 'it' : 'them'}.`,
+      impact: 'Forecast is incomplete',
+    })
+  }
+
+  // --- Weekly cash position (bank-derived) ---
+  // Deliberately placed first among ESTIMATE-based insights: whether a typical week covers
+  // its own costs outranks every ratio below it. Requires 8+ complete weeks, so a partially
+  // imported ledger cannot trigger a solvency verdict.
+  if (spending && spending.weeksObserved >= 8) {
+    const gap = spending.typicalWeeklyInflow - spending.typicalWeeklyOutflow
+    const weeklyGap = Math.abs(gap)
+    if (gap < 0) {
+      // Runway in whole weeks: how long today's spare cash absorbs the gap.
+      const weeksOfCover = weeklyGap > 0 ? Math.floor(spending.safeToSpendToday / weeklyGap) : 0
+      out.push({
+        id: 'auto-weekly-cash-deficit',
+        severity: 'critical',
+        category: 'Cash',
+        title: 'A typical week spends more than it takes in',
+        detail:
+          `Across ${spending.weeksObserved} weeks of bank history, a typical week brings in ` +
+          `${formatCurrency(spending.typicalWeeklyInflow)} and pays out ` +
+          `${formatCurrency(spending.typicalWeeklyOutflow)} — about ${formatCurrency(weeklyGap)} ` +
+          `more out than in. ` +
+          (weeksOfCover < 1
+            ? `Your spare cash above the reserve is only ` +
+              `${formatCurrency(spending.safeToSpendToday)} — less than a single week of that ` +
+              `gap — so the reserve itself is now absorbing the shortfall. `
+            : `At that rate your spare cash of ` +
+              `${formatCurrency(spending.safeToSpendToday)} covers about ${weeksOfCover} ` +
+              `${weeksOfCover === 1 ? 'week' : 'weeks'} before the account runs short. `) +
+          `Closing the gap needs either higher sales or lower weekly costs — ` +
+          `trimming spending alone only buys time.`,
+        impact: `About ${formatCurrency(weeklyGap * 4)} a month`,
+      })
+    } else {
+      out.push({
+        id: 'auto-weekly-cash-surplus',
+        severity: 'opportunity',
+        category: 'Cash',
+        title: 'A typical week covers its own costs',
+        detail:
+          `Across ${spending.weeksObserved} weeks of bank history, a typical week brings in ` +
+          `${formatCurrency(spending.typicalWeeklyInflow)} against ` +
+          `${formatCurrency(spending.typicalWeeklyOutflow)} going out, leaving about ` +
+          `${formatCurrency(weeklyGap)} a week. Directing part of that to your cash ` +
+          `reserve builds a buffer for slow weeks.`,
+        impact: `About ${formatCurrency(weeklyGap * 4)} a month`,
+      })
+    }
+  }
 
   // --- Cash reserve ---
   if (cash.status === 'red') {
@@ -1180,6 +1398,162 @@ export function generateInsights({
         title: 'A written check has been uncleared for weeks',
         detail: `The oldest outstanding check was written ${billPay.oldestOutstandingDays} days ago and still has not cleared. Confirm the payee received it before it is stale-dated, and reissue if it was lost.`,
         impact: `Uncleared ${billPay.oldestOutstandingDays} days`,
+      })
+    }
+  }
+
+  // --- Growth commitments -------------------------------------------------
+  // Every figure here is the STRESSED recommendation from the Growth Planner, so
+  // the advisor and the planner page can never headline different numbers.
+  if (growth) {
+    if (growth.headlineRecurring > 0) {
+      out.push({
+        id: 'auto-growth-capacity',
+        severity: 'opportunity',
+        category: 'Growth',
+        title: 'Room for a new monthly commitment',
+        detail:
+          `On ${growth.modeLabel}, you could take on about ` +
+          `${formatCurrency(growth.headlineRecurring)} a month and still stay above your ` +
+          `cash reserve even if sales fell ${growth.stressDeclinePct}%. ` +
+          `That is the amount that survives the downturn — not the most your limits ` +
+          `would technically allow today, which is higher and much closer to the edge.`,
+        impact: `Up to ${formatCurrency(growth.headlineRecurring)}/mo`,
+      })
+    } else if (growth.edgeRecurring > 0) {
+      // The stressed answer is $0 but the expected path allows something. Saying
+      // only "nothing fits" would be wrong; the honest version names what the
+      // expected path would allow and why it is not the recommendation.
+      out.push({
+        id: 'auto-growth-no-headroom',
+        severity: 'warning',
+        category: 'Growth',
+        title: 'No new commitment is safe against a downturn',
+        detail:
+          `If sales hold exactly as expected, your limits would tolerate about ` +
+          `${formatCurrency(growth.edgeRecurring)} a month. But nothing survives a ` +
+          `${growth.stressDeclinePct}% sales drop, so on ${growth.modeLabel} the ` +
+          `recommendation is to commit nothing new yet. Build cash first, or reconsider ` +
+          `once sales are steadier.`,
+        impact: `Recommended new commitment: ${formatCurrency(0)}`,
+      })
+    } else {
+      out.push({
+        id: 'auto-growth-none',
+        severity: 'warning',
+        category: 'Growth',
+        title: 'No room for a new commitment right now',
+        detail:
+          `Your current cash and obligations leave no room for new recurring spending ` +
+          `on ${growth.modeLabel} — not even before allowing for a downturn. ` +
+          `Rebuilding cash above your reserve is the first step.`,
+        impact: `Recommended new commitment: ${formatCurrency(0)}`,
+      })
+    }
+
+    // A saved proposal that flipped is the single most actionable growth signal:
+    // the owner already cared enough to save it, and the answer has since moved.
+    for (const p of growth.changedProposals) {
+      out.push({
+        id: `auto-growth-proposal-changed-${p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        severity: p.worsened ? 'warning' : 'opportunity',
+        category: 'Growth',
+        title: p.worsened
+          ? `"${p.name}" no longer fits as well as it did`
+          : `"${p.name}" fits better than when you saved it`,
+        detail:
+          `When you saved it the answer was "${p.fromClassification}". Against today's ` +
+          `cash it is "${p.toClassification}". ` +
+          (p.worsened
+            ? `Re-open it before committing — the version you remember is out of date.`
+            : `If you still want it, this is a better moment than when you first checked.`),
+        impact: `${p.fromClassification} → ${p.toClassification}`,
+      })
+    }
+  }
+
+  // --- Credit cards -------------------------------------------------------
+  // This whole block exists because a large real expense was invisible: card spend
+  // ran $3.3k-$11.2k a month, stopped being imported, and nothing said so. The
+  // advisor's job here is to make BOTH kinds of silence loud — a balance nobody has
+  // entered, and a feed that has stopped.
+  if (cards) {
+    // 1. A stale feed is the highest-value warning: it is the failure that hid the
+    //    expense in the first place, and it is silent by nature. Sized in dollars
+    //    using typical monthly charges so it reads as money, not as a data chore.
+    if (cards.monthsBehind >= 1 && cards.lastActivityDate) {
+      const monthWord = cards.monthsBehind === 1 ? 'month' : 'months'
+      const estimate =
+        cards.typicalMonthlyCharges === null
+          ? null
+          : cards.typicalMonthlyCharges * cards.monthsBehind
+      out.push({
+        id: 'auto-cards-feed-stale',
+        severity: cards.monthsBehind >= 2 ? 'critical' : 'warning',
+        category: 'Cards',
+        title: `Card spending is ${cards.monthsBehind} ${monthWord} behind`,
+        detail:
+          `The newest card transaction on file is ${cards.lastActivityDate}. ` +
+          (estimate === null
+            ? `Any spending since then is missing from every figure on this dashboard.`
+            : `At your typical ${formatCurrency(cards.typicalMonthlyCharges ?? 0)} a month, ` +
+              `roughly ${formatCurrency(estimate)} of spending is missing from every ` +
+              `figure on this dashboard.`) +
+          ` Import the latest card statement to close the gap.`,
+        impact:
+          estimate === null
+            ? `${cards.monthsBehind} ${monthWord} not imported`
+            : `~${formatCurrency(estimate)} untracked`,
+      })
+    }
+
+    // 2. No confirmed balance at all. Reported separately from staleness because the
+    //    fix is different — this one is a number to look up, not a file to import.
+    if (cards.totalOwed === null) {
+      out.push({
+        id: 'auto-cards-balance-unknown',
+        severity: 'warning',
+        category: 'Cards',
+        title:
+          cards.cardCount === 1
+            ? 'No balance recorded for your credit card'
+            : 'No balance recorded for any credit card',
+        detail:
+          `Nothing is on file for what is currently owed, so card debt is missing from ` +
+          `your total obligations. This is not the same as owing nothing — it means the ` +
+          `figure has never been entered. Add the current balance in Cash & Debt.`,
+        impact: 'Card debt not counted',
+      })
+    } else if (cards.confirmedCount < cards.cardCount) {
+      // A partial total is worse than none if it is read as complete, so name the gap.
+      const missing = cards.cardCount - cards.confirmedCount
+      out.push({
+        id: 'auto-cards-balance-partial',
+        severity: 'warning',
+        category: 'Cards',
+        title: `${missing} of ${cards.cardCount} cards have no balance recorded`,
+        detail:
+          `The ${formatCurrency(cards.totalOwed)} shown as owed covers only the ` +
+          `${cards.confirmedCount} card${cards.confirmedCount === 1 ? '' : 's'} with a ` +
+          `recorded balance. Real card debt is higher by an unknown amount until the ` +
+          `${missing === 1 ? 'other card' : 'other cards'} ${missing === 1 ? 'is' : 'are'} filled in.`,
+        impact: `Understates card debt`,
+      })
+    }
+
+    // 3. Utilization, only where the limit is actually known. Cards with no recorded
+    //    limit are excluded upstream rather than assumed unlimited.
+    for (const c of cards.highUtilization) {
+      out.push({
+        id: `auto-cards-utilization-${c.accountName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        severity: 'warning',
+        category: 'Cards',
+        title: `${c.accountName} is ${Math.round(c.utilizationPct)}% used`,
+        detail:
+          `Running a card near its limit removes the headroom you would need in a bad ` +
+          `month, and high utilization can affect borrowing terms. Paying this down ` +
+          `restores flexibility.`,
+        impact: `${Math.round(c.utilizationPct)}% of limit used`,
       })
     }
   }

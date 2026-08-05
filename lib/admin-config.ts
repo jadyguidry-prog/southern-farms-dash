@@ -7,6 +7,46 @@ export type FieldDef = {
   required?: boolean
   options?: string[]
   placeholder?: string
+  /**
+   * Write NULL, not 0, when a numeric field is left blank.
+   *
+   * Only valid on columns that are actually nullable. Set it wherever the read path
+   * distinguishes "not recorded" from a real zero — a blank statement balance saved as
+   * `0` claims the card is paid off, which is a specific and expensive lie on an
+   * account that runs five figures a month.
+   *
+   * Deliberately opt-in per field: `credit_limit` and `available_credit` are
+   * `NOT NULL DEFAULT 0` in the database, so forcing NULL there would fail the write
+   * instead of recording the blank.
+   */
+  blankIsNull?: boolean
+}
+
+/**
+ * Coerce a raw form/CSV string to the correct JS type for its column.
+ *
+ * Lives here rather than in the server action so it can be tested directly. The rule it
+ * encodes is easy to regress and expensive when it does: a blank numeric field must not
+ * become 0 where the read path treats NULL as "not recorded". Saving a blank statement
+ * balance as 0 asserts the card is paid off.
+ */
+export function coerceFieldValue(
+  value: string | null,
+  type: FieldType | string,
+  blankIsNull = false,
+): unknown {
+  if (value == null || value === '') {
+    if (type !== 'number') return null
+    return blankIsNull ? null : 0
+  }
+  if (type === 'number') {
+    const n = Number(String(value).replace(/[$,%\s]/g, ''))
+    return Number.isFinite(n) ? n : 0
+  }
+  // Normalize boolean-like values (used by the "recurring" obligation flag).
+  if (value === 'true') return true
+  if (value === 'false') return false
+  return value
 }
 
 export type TableDef = {
@@ -212,7 +252,10 @@ export const ADMIN_TABLES: TableDef[] = [
     key: 'bank_accounts',
     table: 'bank_accounts',
     label: 'Bank Accounts',
-    description: 'Operating, savings, and credit line balances.',
+    description:
+      'Operating, savings, credit line, and credit card balances. For a credit card, ' +
+      'Current Balance is what you OWE. Keep Last Updated current — the Growth ' +
+      'Planner lowers its confidence when a figure has gone stale.',
     fields: [
       { name: 'account_name', label: 'Account Name', type: 'text', required: true },
       { name: 'account_nickname', label: 'Account Nickname', type: 'text' },
@@ -227,6 +270,21 @@ export const ADMIN_TABLES: TableDef[] = [
       { name: 'current_balance', label: 'Current Balance', type: 'number', required: true },
       { name: 'available_credit', label: 'Available Credit', type: 'number' },
       { name: 'credit_limit', label: 'Credit Limit', type: 'number' },
+      // Card-only, and intentionally optional: left blank they stay NULL, which the
+      // planner reports as "not tracked" rather than treating as a paid-off card.
+      {
+        name: 'statement_balance',
+        label: 'Statement Balance (cards)',
+        type: 'number',
+        // Load-bearing. Without this a blank saves as 0, and the whole read path
+        // (queries.ts, card-safety.ts) treats 0 as a confirmed "nothing due".
+        blankIsNull: true,
+      },
+      {
+        name: 'statement_due_date',
+        label: 'Statement Due Date (cards)',
+        type: 'date',
+      },
       { name: 'last_updated', label: 'Last Updated', type: 'date' },
       { name: 'notes', label: 'Notes', type: 'text' },
     ],
@@ -234,6 +292,8 @@ export const ADMIN_TABLES: TableDef[] = [
       { name: 'account_name', label: 'Account' },
       { name: 'account_type', label: 'Type' },
       { name: 'current_balance', label: 'Balance', format: 'currency' },
+      // Surfaced in the list so a stale row is visible without opening it.
+      { name: 'last_updated', label: 'Updated' },
     ],
     orderBy: { column: 'current_balance', ascending: false },
   },

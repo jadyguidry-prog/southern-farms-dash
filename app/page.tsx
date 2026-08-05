@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import {
   Wallet,
+  PiggyBank,
   CreditCard,
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -27,11 +28,13 @@ import { formatCurrency, formatPercent } from '@/lib/data'
 import {
   kpi,
   asTrend,
-  getCashForecast,
   getCashFlowMonthly,
   getRecommendations,
   getHealthSnapshot,
 } from '@/lib/queries'
+import { getSpendingCapacity } from '@/lib/spending-capacity-data'
+import { getCardExposure } from '@/lib/card-exposure-service'
+import { CardExposurePanel } from '@/components/cards/card-exposure-panel'
 import { HEALTH_COLOR, HEALTH_TEXT } from '@/lib/health'
 // Reused rather than adding a second month formatter, so the Gross Profit card
 // labels months identically to the cash-flow chart beside it.
@@ -44,11 +47,12 @@ const severityStyles: Record<string, string> = {
 }
 
 export default async function DashboardPage() {
-  const [snapshot, cashForecast, cashFlowMonthly, saved] = await Promise.all([
+  const [snapshot, capacity, cashFlowMonthly, saved, cardExposure] = await Promise.all([
     getHealthSnapshot(),
-    getCashForecast(),
+    getSpendingCapacity(),
     getCashFlowMonthly(),
     getRecommendations(),
+    getCardExposure(),
   ])
 
   const {
@@ -62,8 +66,14 @@ export default async function DashboardPage() {
     checks,
     marketing,
     billPay,
+    growthPlanner,
+    proposalReviews,
   } =
     snapshot
+  // Saved proposals whose live verdict no longer matches the one recorded at save
+  // time. Counted from the same shared review the advisor uses, so the card and the
+  // advisor can never report a different number of changed proposals.
+  const changedProposalCount = proposalReviews.filter((r) => r.changed).length
   // Generated insights lead, followed by anything entered manually.
   //
   // Sorted by severity because the highlights card shows only the first three. On
@@ -106,6 +116,39 @@ export default async function DashboardPage() {
           billPay.outstandingCheckCount
         } outstanding ${billPay.outstandingCheckCount === 1 ? 'check' : 'checks'}`
       : undefined
+  // The "Safe to Spend" hint.
+  //
+  // The headline figure only looks at the near-term window, so a card payment due later in
+  // the month is NOT reflected in it. That payment has to be named right here: this tile is
+  // the screen decisions get made on, and an unqualified number (whether a surplus or a
+  // bare $0) hides the single largest thing about to leave the account.
+  const spendHint = (() => {
+    const dueLater = [...capacity.cardPayments]
+      .filter((p) => p.dueDate > capacity.today)
+      .sort((a, b) => b.amount - a.amount)[0]
+    const dueLaterNote = dueLater
+      ? ` · ${formatCurrency(dueLater.amount)} card payment due ${new Date(
+          `${dueLater.dueDate}T00:00:00`,
+        ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+      : ''
+
+    // At or below the reserve there is no allowance to quote, but the upcoming payment is
+    // still the most important fact — arguably more so, since there is no cushion for it.
+    if (capacity.safeToSpendToday <= 0) {
+      return `Cash is at or below your ${formatCurrency(capacity.minCashReserve)} reserve${dueLaterNote}`
+    }
+
+    const pace = `≈ ${formatCurrency(capacity.perDayAllowance)}/day for ${capacity.nearTermDays} days`
+
+    if (capacity.breachesReserve) {
+      return `${pace} · ${formatCurrency(capacity.reserveShortfall)} short of your reserve by ${new Date(
+        `${capacity.lowestBalanceDate}T00:00:00`,
+      ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}${dueLaterNote}`
+    }
+
+    return `${pace} · keeps ${formatCurrency(capacity.minCashReserve)} reserve${dueLaterNote}`
+  })()
+
   const lineOfCredit = kpi(kpis, 'lineOfCredit')
   const accountsReceivable = kpi(kpis, 'accountsReceivable')
   const accountsPayable = kpi(kpis, 'accountsPayable')
@@ -196,6 +239,17 @@ export default async function DashboardPage() {
           changeLabel="vs last month"
           hint={cashHint}
         />
+        {/* Placed directly after Cash on Hand because it qualifies it: cash on
+            hand is not spendable cash. Only shown once the engine has enough
+            history to stand behind a figure — a guess here would be acted on. */}
+        {capacity.confidence.level === 'ok' && (
+          <StatCard
+            label="Safe to Spend Today"
+            value={formatCurrency(capacity.safeToSpendToday)}
+            icon={PiggyBank}
+            hint={spendHint}
+          />
+        )}
         <StatCard
           label="Available Line of Credit"
           value={formatCurrency(locAvailable)}
@@ -296,6 +350,13 @@ export default async function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Credit card exposure sits directly under the line-of-credit card because
+          both are borrowed money. It was previously invisible on every surface:
+          totalDebt counts loans only, and card balances lived in creditDrawn,
+          which this page never displayed. Card spend running $3.3k-$11.2k/month
+          was therefore absent from the dashboard entirely. */}
+      <CardExposurePanel exposure={cardExposure} className="mt-4" />
 
       {/* Health / ratios */}
       <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -526,8 +587,9 @@ export default async function DashboardPage() {
         </Card>
       </div>
 
-      {/* Marketing affordability */}
-      <div className="mt-4">
+      {/* Marketing affordability + growth capacity, side by side: both answer
+          "what can this business afford to commit to", at different scopes. */}
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -599,6 +661,86 @@ export default async function DashboardPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Growth capacity. Reads the SAME snapshot the Growth Planner page uses,
+            so the headline figure here can never contradict that page. */}
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <CardTitle className="text-base">Growth Investment</CardTitle>
+                <CardDescription>
+                  What a new commitment can be, tested against a downturn
+                </CardDescription>
+              </div>
+              {growthPlanner.hasData ? (
+                <Badge variant="secondary">{growthPlanner.activeMode.label}</Badge>
+              ) : null}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {!growthPlanner.hasData ? (
+              <div className="flex flex-col gap-2">
+                <p className="text-lg font-semibold text-muted-foreground">
+                  Not yet measurable
+                </p>
+                <p className="text-pretty text-sm text-muted-foreground">
+                  Planning a new commitment needs imported bank transactions and
+                  revenue history. Without both, any figure here would be a guess.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <span className="text-3xl font-semibold tracking-tight">
+                    {formatCurrency(growthPlanner.maxRecurring)}
+                  </span>
+                  <span className="text-sm text-muted-foreground">
+                    per month recommended
+                  </span>
+                </div>
+                {/* The headline is the STRESSED figure. Saying so on the card matters:
+                    without it, this number and the higher ceiling on the planner page
+                    look like a contradiction rather than two different standards. */}
+                <p className="text-pretty text-sm text-muted-foreground">
+                  {growthPlanner.maxRecurring > 0
+                    ? `Still clears every limit even if sales fell ${growthPlanner.activeMode.headlineStressSalesDeclinePct}%.`
+                    : growthPlanner.edgeRecurring > 0
+                      ? `Nothing survives a ${growthPlanner.activeMode.headlineStressSalesDeclinePct}% sales drop. If sales held exactly as expected your limits would tolerate about ${formatCurrency(growthPlanner.edgeRecurring)} a month — but that is not a recommendation.`
+                      : 'Your current cash and obligations leave no room for new recurring spending yet.'}
+                </p>
+                {growthPlanner.maxRecurring > 0 ? (
+                  <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                    <span className="text-muted-foreground">
+                      One-time{' '}
+                      <span className="font-medium text-foreground">
+                        {formatCurrency(growthPlanner.maxOneTime)}
+                      </span>
+                    </span>
+                    <span className="text-muted-foreground">
+                      Ceiling{' '}
+                      <span className="font-medium text-foreground">
+                        {formatCurrency(growthPlanner.edgeRecurring)}/mo
+                      </span>
+                    </span>
+                  </div>
+                ) : null}
+                {/* A saved proposal whose answer moved is the most actionable thing
+                    on this card, so it outranks the figures above it. */}
+                {changedProposalCount > 0 ? (
+                  <p className="text-pretty text-sm font-medium text-amber-700">
+                    {changedProposalCount === 1
+                      ? '1 saved proposal has a different answer than when you saved it.'
+                      : `${changedProposalCount} saved proposals have different answers than when you saved them.`}
+                  </p>
+                ) : null}
+                <Link href="/growth" className="text-sm font-medium underline">
+                  Open the Growth Planner
+                </Link>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* 30-day forecast */}
@@ -611,7 +753,11 @@ export default async function DashboardPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <CashForecastChart data={cashForecast} />
+            <CashForecastChart
+              data={capacity.thirtyDay}
+              minBuffer={capacity.minCashReserve}
+              showCautious
+            />
           </CardContent>
         </Card>
 

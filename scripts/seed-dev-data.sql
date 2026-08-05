@@ -23,11 +23,18 @@
 -- BANK ACCOUNTS
 -- Balances deliberately left at 0 — staff enter live figures.
 -- ------------------------------------------------------------
+-- NOTE: this name must match the label the ledger uses EXACTLY. Accounts are joined
+-- to financial_transactions by free text, so seeding "Business Checking" (the old
+-- name) while the ledger says "South Lafourche Bank Checking ending 2268" orphans
+-- 1,061 transactions from their balance. That was a real bug. The guard below keys
+-- on the same string, so it stays idempotent against the renamed row instead of
+-- inserting a duplicate account and recreating the split.
 insert into public.bank_accounts (account_name, institution, account_type, notes)
-select 'Business Checking', 'South Lafourche Bank', 'Checking',
+select 'South Lafourche Bank Checking ending 2268', 'South Lafourche Bank', 'Checking',
        'Balance is entered manually — changes daily.'
 where not exists (
-  select 1 from public.bank_accounts where account_name = 'Business Checking'
+  select 1 from public.bank_accounts
+  where account_name = 'South Lafourche Bank Checking ending 2268'
 );
 
 insert into public.bank_accounts (account_name, institution, account_type, notes)

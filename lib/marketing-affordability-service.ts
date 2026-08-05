@@ -16,6 +16,11 @@
 
 import { createClient } from '@/lib/supabase/server'
 import { canonicalCategory, type CategoryAliasMap } from '@/lib/categories'
+// Imported for this module's OWN use (windowSum etc.) AND re-exported below so
+// existing importers of `addMonths` from this path keep working. A bare
+// `export { addMonths } from ...` creates a binding for importers only, not a
+// local one the module body can call — which is exactly what broke here.
+import { addMonths } from '@/lib/month-key'
 import { SPEND_TYPES, SPEND_OFFSET_TYPES, type TransactionType } from '@/lib/transactions'
 import { fetchAllPages } from '@/lib/paginate'
 import { isGenericDescription } from '@/lib/transaction-groups'
@@ -316,14 +321,12 @@ function monthKeyOf(date: string): string {
   return /^\d{4}-\d{2}/.test(date) ? date.slice(0, 7) : ''
 }
 
-/** Step back `n` whole months from a `YYYY-MM` key. */
-export function addMonths(monthKey: string, n: number): string {
-  const [y, m] = monthKey.split('-').map(Number)
-  const total = y * 12 + (m - 1) + n
-  const year = Math.floor(total / 12)
-  const month = (total % 12) + 1
-  return `${year}-${String(month).padStart(2, '0')}`
-}
+// `addMonths` now lives in the pure `@/lib/month-key` module (imported above): it
+// is a clock-free date helper with no server dependencies, and importing it FROM
+// here previously dragged this server service — and `next/headers` — into the
+// client bundle the moment a client component transitively reached it. Re-exported
+// so existing importers of this path keep working.
+export { addMonths }
 
 /**
  * Collapse a card descriptor to a readable channel name.

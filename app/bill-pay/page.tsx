@@ -12,6 +12,7 @@ import {
   getClearingSuggestions,
   getAchReconcileMatches,
 } from '@/lib/bill-pay-service'
+import { sumPaidInMonth } from '@/lib/bill-pay-shared'
 import { formatCurrency } from '@/lib/data'
 import { BillPayClient } from '@/components/bill-pay/bill-pay-client'
 
@@ -24,8 +25,8 @@ export default async function BillPayPage() {
       getCashObligations(),
       getBankAccounts(),
       getObligationPayments(),
-      // Suggested bank matches for outstanding checks — surfaced for confirmation,
-      // never auto-applied.
+      // Suggested bank matches for outstanding checks and pending ACH drafts —
+      // surfaced for confirmation, never auto-applied.
       getClearingSuggestions(),
       // Known vendors, so a one-off check can reuse an existing payee instead of
       // creating a near-duplicate spelling of a name already in the system.
@@ -68,11 +69,14 @@ export default async function BillPayPage() {
 
   const outstanding = payments.filter((p) => p.status === 'outstanding')
 
+  // Computed once so the tile can't straddle a month boundary mid-render.
+  const currentMonth = new Date().toISOString().slice(0, 7)
+
   return (
     <div>
       <PageHeader
         title="Bill Payments"
-        description="Enter invoices you owe, then record payments against them. Written checks stay outstanding until they clear the bank, so your spendable cash reflects money already committed."
+        description="Enter invoices you owe, then record payments against them. Written checks and pending ACH drafts stay outstanding until they clear the bank, so your spendable cash reflects money already committed."
       />
 
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
@@ -86,11 +90,14 @@ export default async function BillPayPage() {
           label="Spendable Now"
           value={formatCurrency(summary.cashAvailable)}
           icon={CircleDollarSign}
-          hint="After outstanding checks"
+          hint="After outstanding payments"
           goodDirection="up"
         />
         <StatCard
-          label="Outstanding Checks"
+          // Covers written checks AND pending ACH drafts (logged COGS invoices):
+          // both are money committed but not yet gone, so "Checks" would understate
+          // the figure this tile actually shows.
+          label="Outstanding"
           value={formatCurrency(summary.outstandingChecks)}
           icon={FileClock}
           hint={`${summary.outstandingCheckCount} not yet cleared`}
@@ -98,11 +105,11 @@ export default async function BillPayPage() {
         />
         <StatCard
           label="Paid This Month"
-          value={formatCurrency(
-            payments
-              .filter((p) => p.paymentDate.startsWith(new Date().toISOString().slice(0, 7)))
-              .reduce((s, p) => s + p.amount, 0),
-          )}
+          // Shared with the regression tests so the two cannot drift. Excludes void
+          // payments and anything still awaiting its money — without that, a bill
+          // logged as pay-by-check-later counted as paid the moment it was entered,
+          // double-reporting the same dollars shown under Outstanding.
+          value={formatCurrency(sumPaidInMonth(payments, currentMonth))}
           icon={CheckCircle2}
           hint={`${outstanding.length} awaiting clear`}
         />

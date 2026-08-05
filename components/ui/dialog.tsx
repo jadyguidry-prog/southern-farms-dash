@@ -53,13 +53,21 @@ function DialogContent({
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         className={cn(
-          // max-h + overflow is a SAFETY NET for every dialog in the app, not just
-          // the tall ones. This popup is centred with -translate-y-1/2 and had no
-          // height cap, so a form taller than the window overflowed equally off the
-          // top AND bottom with nothing scrollable — the submit button was simply
-          // unreachable (hit on the Bill Pay invoice/check forms at 1045x552).
-          // dvh, not vh, so mobile browser chrome doesn't hide the footer.
-          "fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          // `max-h` + `overflow-y-auto` are a SAFETY NET for every dialog in the
+          // app, not cosmetics on the tall ones. This element is `fixed` and
+          // vertically centred with -translate-y-1/2, so without a height cap a
+          // tall form grows past BOTH edges of the viewport with nothing
+          // scrollable and the submit button is simply unreachable — page
+          // scrolling cannot move a fixed element. (Hit on the Bill Pay
+          // invoice/check forms at 1045x552.)
+          //
+          // `svh`, not `vh` or `dvh`: svh is the SMALLEST viewport height, so the
+          // cap still holds in the worst case where mobile browser chrome is
+          // visible, and it does not resize the dialog mid-form the way dvh does
+          // as chrome hides and reveals.
+          //
+          // Individual dialogs can still pin their footer by overriding grid-rows.
+          "fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100svh-2rem)] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
         {...props}

@@ -19,14 +19,13 @@ import {
   summarizeDailyRows,
 } from '@/lib/square-sales-service'
 import { getCashFlowInsight } from '@/lib/cash-flow-service'
+import { getGrowthPlannerSnapshot } from '@/lib/growth-planner-service'
+import { getSavedProposalReviews } from '@/lib/growth-proposal-review'
+import { getCardExposure } from '@/lib/card-exposure-service'
 import { getLaborHealthSnapshot } from '@/lib/labor-service'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
-import {
-  getOutstandingCheckSummary,
-  getBillPaySnapshot,
-  getObligationPayments,
-  buildForecastMovements,
-} from '@/lib/bill-pay-service'
+import { getOutstandingCheckSummary, getBillPaySnapshot } from '@/lib/bill-pay-service'
+import { getSpendingCapacity } from '@/lib/spending-capacity-data'
 
 // ---------- Types ----------
 export type KpiRow = {
@@ -79,6 +78,20 @@ export const SETTING_DEFAULTS = {
   marketing_baseline_pct: 1.5,
   marketing_ceiling_pct: 3,
   days_cash_target: 30,
+  // How many days a hand-entered account balance stays trustworthy. Past this, the
+  // Growth Planner still answers but reports the age and lowers its confidence.
+  // Seeded as a real row by migration `card_staleness_setting`; this mirror exists
+  // only so a fresh database returns a number instead of `undefined`.
+  account_data_stale_days: 14,
+  // How far ahead the cash forecast projects when hunting for the low point. Must be long
+  // enough to contain a card statement due date (~15 days out here) — a known payment
+  // beyond the last projected day is invisible however large it is. Seeded as a real row
+  // by migration `card_payment_forecast`; this mirror only guards a fresh database.
+  cash_forecast_horizon_days: 30,
+  // The shorter window the "safe to spend" headline is solved against. Deliberately not
+  // the same as the horizon: spending is a decision about now, while the reserve warning
+  // looks across the whole horizon.
+  cash_near_term_days: 7,
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS
@@ -133,95 +146,30 @@ export function asTrend(v: string | null): 'up' | 'down' | undefined {
   return v === 'up' || v === 'down' ? v : undefined
 }
 
-/**
- * A 30-day daily cash projection derived from live records: today's cash on
- * hand, obligations on their resolved due dates (outflows), scheduled-but-not-yet
- * cleared payments on their payment dates (outflows), and receivables on their
- * expected payment dates (inflows). Nothing is stored or hardcoded, so it always
- * reflects the current state of the books.
+/*
+ * The 30-day cash projection used to live here as `getCashForecast`. It has been
+ * replaced by `getSpendingCapacity` in lib/spending-capacity-data.ts.
  *
- * Outstanding payments were previously omitted entirely, so a whole month of
- * already-committed disbursements (Sysco, Quirch, the rent check, etc.) never
- * appeared and the line looked deceptively flat. They are included here through
- * the shared buildForecastMovements helper, which also suppresses an obligation's
- * generic scheduled outflow when a real payment already covers it — so the two
- * can never double-count the same money.
+ * Why it was removed rather than kept: its only source of incoming money was
+ * unpaid receivables, of which this business has 2 totalling $761. Meanwhile it
+ * subtracted every scheduled obligation, so the projected line could only ever
+ * fall — it never counted the ~$13,095 a week that actually lands in the bank
+ * from daily sales. The replacement derives inflows from the deposit history
+ * itself, and is checked against the real balance by
+ * scripts/verify-cash-reconciliation.ts.
  *
- * Base is cashOnHand (the raw bank balance), NOT cashAvailable: cashAvailable has
- * already subtracted outstanding checks, and the forecast subtracts them again as
- * dated movements. Starting from cashAvailable would double-count every open check.
+ * Receivables are deliberately NOT added on top of that: when an invoice is
+ * paid it arrives as a bank deposit, which the deposit history already
+ * reflects. Counting both would double-count the same money.
+ *
+ * The version deleted here had been extended (on the cash-flow branch) to also
+ * include outstanding payments via `buildForecastMovements`, because omitting
+ * them made the line look deceptively flat. That concern is NOT lost:
+ * `getSpendingCapacity` reads `getObligationPayments` itself and subtracts
+ * outstanding checks and pending ACH drafts from the raw bank balance. Both
+ * fixes therefore survive, but only the deposit-derived version is reachable —
+ * do not resurrect the receivables-only forecast.
  */
-export async function getCashForecast() {
-  const [summary, payments] = await Promise.all([
-    getCashDebtSummary(),
-    getObligationPayments(),
-  ])
-
-  const now = new Date()
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const dayKey = (d: Date) => d.toISOString().slice(0, 10)
-
-  const forecastMovements = buildForecastMovements({
-    obligations: summary.scheduledObligations.map((o) => ({
-      id: o.id ?? null,
-      name: o.obligationName,
-      amount: o.amount,
-      effectiveDueDate: o.effectiveDueDate,
-    })),
-    receivables: summary.receivables
-      .filter((r) => r.status !== 'Paid')
-      .map((r) => ({
-        name: r.customerName,
-        outstanding: r.amount - r.amountPaid,
-        // Fall back to the invoice due date when no expected date is set.
-        date: r.expectedPaymentDate || r.dueDate,
-      })),
-    payments: payments.map((p) => ({
-      obligationId: p.obligationId,
-      name: p.payeeName || 'Scheduled payment',
-      amount: p.amount,
-      date: p.paymentDate,
-      status: p.status,
-    })),
-  })
-
-  // Bucket each dated cash movement onto the day it lands.
-  const movements = new Map<string, number>()
-  const add = (date: string, amount: number) => {
-    if (!date) return
-    movements.set(date, (movements.get(date) ?? 0) + amount)
-  }
-
-  for (const m of forecastMovements) {
-    add(m.date, m.amount)
-  }
-
-  // Anything already past due is treated as landing today.
-  const todayKey = dayKey(today)
-  let overdueNet = 0
-  for (const [date, amount] of movements) {
-    if (date < todayKey) {
-      overdueNet += amount
-      movements.delete(date)
-    }
-  }
-  if (overdueNet !== 0) add(todayKey, overdueNet)
-
-  let balance = summary.cashOnHand
-  const series: { day: string; balance: number }[] = []
-
-  for (let i = 0; i < 30; i++) {
-    const date = new Date(today)
-    date.setDate(today.getDate() + i)
-    balance += movements.get(dayKey(date)) ?? 0
-    series.push({
-      day: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      balance,
-    })
-  }
-
-  return series
-}
 
 export async function getCashAccounts() {
   const supabase = await createClient()
@@ -523,7 +471,22 @@ export async function getBankAccounts() {
     currentBalance: Number(a.current_balance),
     availableCredit: Number(a.available_credit),
     creditLimit: Number(a.credit_limit),
+    // Null is preserved as null, NOT coerced to 0. An untracked statement must stay
+    // distinguishable from a card genuinely paid down to zero, otherwise a card
+    // nobody has entered yet looks settled and the planner silently trusts it.
+    statementBalance:
+      a.statement_balance === null || a.statement_balance === undefined
+        ? null
+        : Number(a.statement_balance),
+    statementDueDate: a.statement_due_date ?? null,
+    // Empty string means never recorded. Staleness is judged from this, so it is
+    // left falsy rather than defaulted to today — defaulting would make an
+    // unmaintained figure look freshly confirmed.
     lastUpdated: a.last_updated ?? '',
+    // Null means the account is OPEN. A closed account keeps its balance and history
+    // and still counts toward money owed, but must be excluded from data-freshness
+    // alerts, because no further statements will ever arrive for it.
+    closedAt: a.closed_at ?? null,
     notes: a.notes ?? '',
   }))
 }
@@ -646,9 +609,23 @@ export const getCashDebtSummary = cache(async () => {
   // Operating Liquidity = cash on hand + available credit.
   const operatingLiquidity = cashOnHand + availableCredit
 
-  // Sum of every account balance (kept for the legacy "cash position" label).
-  const totalCash = accounts.reduce((s, a) => s + a.currentBalance, 0)
-  const totalAvailableCredit = accounts.reduce((s, a) => s + a.availableCredit, 0)
+  // Legacy "cash position" label. Must count DEPOSIT balances only.
+  //
+  // This previously summed EVERY account, which silently counted a drawn credit
+  // balance as cash: with $15,000 drawn on the line of credit, "total cash" read
+  // $15,000 too high, and money owed on a credit card would have added to it as
+  // well. `currentBalance` on a credit account is debt, not cash.
+  //
+  // Now derived from the same cash figure used everywhere else, so the two can
+  // never disagree. Cash Flow already filtered credit out of its own total
+  // (`app/cash-flow/page.tsx`), so this brings the summary in line with it.
+  const totalCash = cashOnHand
+
+  // Undrawn credit across borrowing accounts only. Previously unfiltered, which
+  // would have swept in any stray `available_credit` sitting on a deposit row —
+  // exactly how a Square Capital loan OFFER parked on the savings account could
+  // have been read as spendable headroom. Same basis as `availableCredit`.
+  const totalAvailableCredit = availableCredit
 
   // ---- Debt ----
   const totalDebt = loans.reduce((s, l) => s + l.balance, 0)
@@ -767,7 +744,12 @@ export const getCashDebtSummary = cache(async () => {
     unscheduledObligations,
     overdueObligationsCount: overdueObligations.length,
     overdueReceivablesCount: overdueReceivables.length,
-    netWorth: totalCash + totalReceivable - totalDebt - totalObligations,
+    // Cash + money owed to us − everything we owe. `creditDrawn` is included
+    // because a drawn line of credit and a carried card balance are real debts that
+    // `totalDebt` (term loans only) does not cover. Before this, drawn credit was
+    // ADDED here as cash; leaving it merely absent would still overstate net worth.
+    netWorth:
+      totalCash + totalReceivable - totalDebt - creditDrawn - totalObligations,
   }
 })
 
@@ -836,17 +818,29 @@ export async function getHealthSnapshot() {
     cashFlowInsight,
     labor,
     checks,
-    marketing,
-    billPay,
+  marketing,
+  billPay,
+  spendingCapacity,
+  growthPlanner,
+  proposalReviews,
+  cardExposure,
   ] = await Promise.all([
-    getKpis(),
-    getCashDebtSummary(),
-    getSquareDailySales(),
-    getCashFlowInsight(),
-    getLaborHealthSnapshot(),
-    getCheckResolutionSnapshot(),
-    getMarketingAffordabilitySnapshot(),
-    getBillPaySnapshot(),
+  getKpis(),
+  getCashDebtSummary(),
+  getSquareDailySales(),
+  getCashFlowInsight(),
+  getLaborHealthSnapshot(),
+  getCheckResolutionSnapshot(),
+  getMarketingAffordabilitySnapshot(),
+  getBillPaySnapshot(),
+  getSpendingCapacity(),
+  // Both are `cache`-wrapped and share the same underlying projection, so the
+  // dashboard, the advisor and the Growth Planner page all see identical figures.
+  getGrowthPlannerSnapshot(),
+  getSavedProposalReviews(),
+  // Also `cache`-wrapped, and the same loader the dashboard, Cash & Debt and the
+  // report call, so a card figure in an advisor warning always matches the panel.
+  getCardExposure(),
   ])
   const settings = summary.settings
 
@@ -963,6 +957,47 @@ export async function getHealthSnapshot() {
 
   const composite = compositeHealth(pillars)
 
+  // A card payment is only worth advising on when it is BOTH forecast and the thing that
+  // takes cash under the reserve. Deriving it here (rather than in health.ts) keeps the
+  // rules engine pure and free of projection-walking.
+  //
+  // The day is found by looking for the forecast payment inside the projection, so the
+  // balance quoted in the advice is the same balance the forecast table shows on that row.
+  // Recomputing it independently is how two surfaces start disagreeing.
+  const cardCliff = (() => {
+    if (!spendingCapacity.breachesReserve) return undefined
+    const candidates = spendingCapacity.cardPayments
+      .map((p) => {
+        const day = spendingCapacity.days.find((d) => d.date === p.dueDate)
+        if (!day || !day.breachesReserve) return null
+        return {
+          accountName: p.accountName,
+          amount: p.amount,
+          dueDate: p.dueDate,
+          balanceAfter: day.cautiousBalance,
+          shortfall: Math.max(0, spendingCapacity.minCashReserve - day.cautiousBalance),
+        }
+      })
+      .filter((c): c is NonNullable<typeof c> => c !== null && c.shortfall > 0)
+    // Worst first, so a single insight names the payment that hurts most rather than
+    // whichever card happens to sort first.
+    candidates.sort((a, b) => b.shortfall - a.shortfall)
+    return candidates[0]
+  })()
+
+  // Cards carrying a balance that could not be projected. Reported so the forecast's
+  // optimism is visible; a silent omission would make the low point look better than it is.
+  // Only cards blocked by MISSING DATA. A card whose due date simply falls past the end of
+  // the forecast window is excluded: nothing is missing for it, so advising the owner to
+  // "add the statement due date in Admin" would send them to fill in a field already
+  // filled. The forecast panel still lists it, labelled as known-but-further-out.
+  const unforecastCards = spendingCapacity.blockedCardPayments
+    .filter((p) => !p.blockedBeyondHorizon)
+    .map((p) => ({
+      accountName: p.accountName,
+      reason: p.blockedReason ?? 'not enough information',
+    }))
+
   const insights = generateInsights({
     settings,
     pillars,
@@ -977,6 +1012,47 @@ export async function getHealthSnapshot() {
       latestDate: squareWeekly.latestDate,
       conflictDayCount: squareSummary.conflictDays.length,
     },
+    // Omitted entirely when the planner has no data, so an empty database cannot
+    // produce commitment advice. `maxRecurring` is the STRESSED recommendation —
+    // passing the unstressed edge here would let the advisor headline a number that
+    // breaks on a small sales dip.
+    growth: growthPlanner.hasData
+      ? {
+          headlineRecurring: growthPlanner.maxRecurring,
+          edgeRecurring: growthPlanner.edgeRecurring,
+          stressDeclinePct: growthPlanner.activeMode.headlineStressSalesDeclinePct,
+          modeLabel: growthPlanner.activeMode.label,
+          changedProposals: proposalReviews
+            .filter((r) => r.changed)
+            .map((r) => ({
+              name: r.name,
+              fromClassification: r.originalClassification,
+              toClassification: r.live.classification,
+              worsened: r.worsened,
+            })),
+          approvedCount: proposalReviews.filter((r) => r.approvedAt != null).length,
+        }
+      : undefined,
+    // Card exposure, read from the SAME shared loader the dashboard, Cash & Debt and
+    // the report use, so the advisor can never warn about a different number than the
+    // one on screen. Omitted when no card accounts exist.
+    //
+    // `totalOwed` is passed through as-is, including null. Coercing it to 0 here would
+    // silently convert "nobody has entered a balance" into "you owe nothing" and
+    // suppress the very warning this block exists to raise.
+    cards: cardExposure.hasCards
+      ? {
+          totalOwed: cardExposure.totalOwed,
+          cardCount: cardExposure.cardCount,
+          confirmedCount: cardExposure.confirmedCount,
+          monthsBehind: cardExposure.monthsBehind,
+          // Open-scoped, so the date quoted in the warning cannot contradict the
+          // months-behind figure it appears next to.
+          lastActivityDate: cardExposure.lastOpenActivityDate,
+          typicalMonthlyCharges: cardExposure.typicalMonthlyCharges,
+          highUtilization: cardExposure.highUtilization,
+        }
+      : undefined,
     // Same guard as cash flow: with no timecards there is nothing to advise on,
     // so the group is omitted rather than passed as zeros.
     labor: labor.hasData
@@ -1099,6 +1175,29 @@ export async function getHealthSnapshot() {
             minCashReserve: summary.minCashReserve,
           }
         : undefined,
+    // Needs 8+ complete weeks of deposits before it will pass judgement on
+    // whether the business covers its costs; below that the group is omitted so
+    // a thin ledger produces no verdict rather than a wrong one.
+    //
+    // The group is emitted when there are 8+ weeks OR when there is a dated card fact to
+    // report. The weekly-gap verdict has its own `weeksObserved >= 8` gate inside
+    // generateInsights, so passing the group with a thin ledger cannot produce a solvency
+    // claim — but it does let a card payment be reported, which depends on the card's own
+    // balance and due date rather than on history.
+    spending:
+      spendingCapacity.estimate.weeksObserved >= 8 ||
+      cardCliff !== undefined ||
+      unforecastCards.length > 0
+        ? {
+            typicalWeeklyInflow: spendingCapacity.estimate.typicalInflow,
+            typicalWeeklyOutflow: spendingCapacity.estimate.typicalOutflow,
+            weeksObserved: spendingCapacity.estimate.weeksObserved,
+            safeToSpendToday: spendingCapacity.safeToSpendToday,
+            breachesReserve: spendingCapacity.breachesReserve,
+            cardCliff,
+            unforecastCards: unforecastCards.length > 0 ? unforecastCards : undefined,
+          }
+        : undefined,
   })
 
   // Surface the weekly figure on the KPI the dashboard already renders, so the
@@ -1206,6 +1305,12 @@ export async function getHealthSnapshot() {
     // tile, the advisor, and reporting all read this one snapshot so the
     // spendable-cash figure and the outstanding-check count never drift apart.
     billPay,
+    // Growth Planner position and every saved proposal re-checked live. Same
+    // contract as the rest: the dashboard card, the advisor insights and the admin
+    // report all read these two, so none of them can state a commitment figure the
+    // Growth Planner page itself would contradict.
+    growthPlanner,
+    proposalReviews,
   }
 }
 

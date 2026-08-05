@@ -158,9 +158,18 @@ export function CogsReport({ snapshot }: { snapshot: CheckResolutionSnapshot }) 
                       <span className="font-mono">—</span>
                     )}
                   </td>
+                  {/*
+                    `relative` on the span below is load-bearing, not decoration.
+                    Tailwind's `sr-only` is position:absolute, so without a
+                    positioned ancestor it resolves against the page and lands past
+                    the right edge of this horizontally scrolling table — which
+                    stretched the document to 641px on a 390px phone and made the
+                    whole admin page slide sideways. Anchoring it to the cell keeps
+                    the screen-reader text without the overflow.
+                  */}
                   <td className="py-2 text-right font-mono text-xs">
                     {m.unresolvedCheckAmount > 0 ? (
-                      <span className="text-destructive">
+                      <span className="relative text-destructive">
                         {formatCurrency(m.unresolvedCheckAmount)}
                         <span className="sr-only">
                           {' '}

@@ -35,12 +35,22 @@ export function paymentLabel(
  *
  * Returns an error message, or null when the input is acceptable.
  */
-export function validatePaymentBasics(input: {
-  amount: number
-  paymentDate: string
-  paymentMethod: string
-  checkNumber?: string
-}): string | null {
+export function validatePaymentBasics(
+  input: {
+    amount: number
+    paymentDate: string
+    paymentMethod: string
+    checkNumber?: string
+  },
+  opts: {
+    /**
+     * Permit `check` with no number yet — for logging a bill that WILL be paid by
+     * check before the check is actually written. Defaults to false so the
+     * "Write a Check" path keeps the strict rule; only invoice logging opts in.
+     */
+    allowUnwrittenCheck?: boolean
+  } = {},
+): string | null {
   const amount = Number(input.amount)
   if (!Number.isFinite(amount) || amount <= 0) {
     return 'Enter a payment amount greater than zero.'
@@ -51,9 +61,15 @@ export function validatePaymentBasics(input: {
   if (input.paymentMethod !== 'check' && input.paymentMethod !== 'ach') {
     return 'Choose check or ACH.'
   }
-  // A check with no number cannot be matched to the bank feed later, which is the
-  // whole reason the float number can be trusted. Same rule as check-resolution.
-  if (input.paymentMethod === 'check' && !(input.checkNumber ?? '').trim()) {
+  // A written check with no number cannot be matched to the bank feed later, which
+  // is the whole reason the float number can be trusted. Same rule as
+  // check-resolution. An invoice logged before the check exists is exempt: the
+  // number is captured later, when the check is actually written.
+  if (
+    input.paymentMethod === 'check' &&
+    !opts.allowUnwrittenCheck &&
+    !(input.checkNumber ?? '').trim()
+  ) {
     return 'Enter the check number.'
   }
   return null
@@ -225,6 +241,68 @@ export function isOverpayment(
   if (!Number.isFinite(proposed) || proposed <= 0) return false
   const remaining = remainingOnOneTimeBill(bill.amount, paidTotal)
   return proposed > remaining + BILL_COVERAGE_TOLERANCE
+}
+
+/**
+ * Is this payment still WAITING to leave the bank, with no physical instrument in
+ * existence yet?
+ *
+ * Two cases, both "money promised, nothing written":
+ *   - an ACH draft that hasn't been taken yet, and
+ *   - a bill logged as pay-by-check, before the check is written.
+ *
+ * Both must be described as "expected", never "written".
+ *
+ * Keyed on `checkWritten`, NOT on a missing check number. A written check whose
+ * number simply wasn't recorded is still written: its payment date is a fact, so it
+ * stays eligible for amount+date bank matching. Only an unwritten check has a date
+ * that is merely an intention. Conflating the two would silently change matching
+ * behaviour for checks the owner wrote but didn't fully log.
+ *
+ * Note this deliberately does NOT change the cash math: `sumOutstanding` counts
+ * every outstanding row regardless, which is correct — the money is owed and the
+ * bank balance still includes it either way.
+ */
+export function isAwaitingPayment(p: {
+  paymentMethod: string
+  checkWritten?: boolean
+}): boolean {
+  if (p.paymentMethod === 'ach') return true
+  // Absent flag means "written": matches the column default, so a caller reading an
+  // older row (or a partial object) never gets silently downgraded to unwritten.
+  return p.checkWritten === false
+}
+
+/**
+ * Total actually PAID OUT in the given month (`YYYY-MM`).
+ *
+ * Exported and shared with the page rather than computed inline, so a test cannot
+ * quietly drift from what the owner sees on screen.
+ *
+ * Excludes:
+ *   - void payments — they never happened, and
+ *   - anything still awaiting its money (ACH not yet drafted, check not yet
+ *     written), whose payment date is an intention rather than a fact.
+ *
+ * Cleared and outstanding-but-written payments both count: the money has left, or
+ * the instrument exists and is in flight.
+ */
+export function sumPaidInMonth(
+  payments: Array<{
+    amount: number
+    paymentDate: string
+    status: string
+    paymentMethod: string
+    checkWritten?: boolean
+  }>,
+  month: string,
+): number {
+  return payments
+    .filter(
+      (p) =>
+        p.status !== 'void' && !isAwaitingPayment(p) && p.paymentDate.startsWith(month),
+    )
+    .reduce((s, p) => s + p.amount, 0)
 }
 
 // ---------------------------------------------------------------------------
