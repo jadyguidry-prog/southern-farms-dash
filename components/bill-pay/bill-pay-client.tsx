@@ -43,6 +43,10 @@ import type { ObligationPayment, ClearingSuggestion } from '@/lib/bill-pay-servi
 import {
   paymentLabel,
   validateBillDueBasics,
+  sumPaymentsForObligation,
+  paymentDefaultAmount,
+  remainingOnOneTimeBill,
+  isOverpayment,
   type AchReconcileMatch,
 } from '@/lib/bill-pay-shared'
 import {
@@ -295,9 +299,18 @@ export function BillPayClient({
         )}
       </section>
 
+      {/* paidTotal comes from the payment list this page already loads, so the
+          form can default to what's STILL owed instead of re-offering the full
+          invoice after a partial payment. Meaningful for one-time bills only —
+          see paymentDefaultAmount. */}
       <RecordPaymentDialog
         key={activeObligation?.id ?? 'none'}
         obligation={activeObligation}
+        paidTotal={
+          activeObligation
+            ? sumPaymentsForObligation(payments, activeObligation.id)
+            : 0
+        }
         banks={banks}
         onClose={() => setActiveObligation(null)}
       />
@@ -529,10 +542,12 @@ function SuggestionRow({
 
 function RecordPaymentDialog({
   obligation,
+  paidTotal,
   banks,
   onClose,
 }: {
   obligation: Obligation | null
+  paidTotal: number
   banks: Bank[]
   onClose: () => void
 }) {
@@ -541,12 +556,25 @@ function RecordPaymentDialog({
   // state from props at mount is correct and needs no reset effect.
   const [pending, startTransition] = useTransition()
   const [method, setMethod] = useState<'check' | 'ach'>('check')
-  const [amount, setAmount] = useState(obligation ? String(obligation.amount) : '')
+  // Defaults to what is STILL owed, not the full invoice — see
+  // paymentDefaultAmount for the $1,850-against-a-$1,450-bill bug this closes.
+  const [amount, setAmount] = useState(
+    obligation ? String(paymentDefaultAmount(obligation, paidTotal)) : '',
+  )
   const [paymentDate, setPaymentDate] = useState(todayStr())
   const [checkNumber, setCheckNumber] = useState('')
   const [bankAccountId, setBankAccountId] = useState<string>('')
   const [memo, setMemo] = useState('')
   const [rollForward, setRollForward] = useState(true)
+
+  // Partial-payment context, one-time bills only. A recurring bill's history
+  // spans every period it has ever been paid for, so "already paid" against a
+  // single period's amount would be nonsense (see remainingOnOneTimeBill).
+  const hasPriorPayments = !!obligation && !obligation.recurring && paidTotal > 0
+  const remaining = obligation
+    ? remainingOnOneTimeBill(obligation.amount, paidTotal)
+    : 0
+  const overpaying = !!obligation && isOverpayment(obligation, paidTotal, Number(amount))
 
   const submit = () => {
     if (!obligation) return
@@ -591,6 +619,33 @@ function RecordPaymentDialog({
         </DialogHeader>
 
         <div className="space-y-4">
+          {/* Only shown once a partial payment exists, so the owner can see WHY the
+              amount below is less than the invoice total. Without this the reduced
+              default would look like the bill had been entered wrong. */}
+          {hasPriorPayments && (
+            <div className="rounded-md border border-border bg-muted/40 p-3 text-sm">
+              <p className="text-muted-foreground">
+                Already paid{' '}
+                <span className="font-semibold text-foreground">
+                  {formatCurrency(paidTotal)}
+                </span>{' '}
+                of {formatCurrency(obligation.amount)}.
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {remaining > 0 ? (
+                  <>
+                    Still owed:{' '}
+                    <span className="font-semibold text-foreground">
+                      {formatCurrency(remaining)}
+                    </span>
+                  </>
+                ) : (
+                  'This bill is already fully covered.'
+                )}
+              </p>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <Label htmlFor="bp-method">Method</Label>
@@ -613,9 +668,25 @@ function RecordPaymentDialog({
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="0.00"
+                aria-describedby={overpaying ? 'bp-amount-warning' : undefined}
               />
             </div>
           </div>
+
+          {/* Advisory, never a block: overpaying can be legitimate (a late fee, or an
+              invoice entered below the real figure) and refusing the write would stop
+              the owner recording what actually left the account. See isOverpayment. */}
+          {overpaying && (
+            <p
+              id="bp-amount-warning"
+              role="status"
+              className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm leading-relaxed text-foreground"
+            >
+              This is more than the {formatCurrency(remaining)} still owed on this bill.
+              You can still record it if the extra is real — a late fee, or an invoice
+              entered too low — otherwise check the amount.
+            </p>
+          )}
 
           <div className="grid grid-cols-2 gap-3">
             <div>

@@ -9,6 +9,10 @@ import {
   validateBillDueBasics,
   billFullyCovered,
   resolveOneTimeBillStatus,
+  remainingOnOneTimeBill,
+  paymentDefaultAmount,
+  isOverpayment,
+  sumPaymentsForObligation,
   BILL_COVERAGE_TOLERANCE,
 } from '../lib/bill-pay-shared'
 
@@ -111,6 +115,85 @@ for (const s of stages) {
     resolveOneTimeBillStatus(bill, s.paid) === s.expect,
   )
 }
+
+console.log('\n9. remainingOnOneTimeBill')
+check('nothing paid -> full amount owed', remainingOnOneTimeBill(1450, 0) === 1450)
+check('partially paid -> the difference', remainingOnOneTimeBill(1450, 400) === 1050)
+check('fully paid -> zero', remainingOnOneTimeBill(1450, 1450) === 0)
+check(
+  'OVERpaid floors at zero, never a negative credit',
+  remainingOnOneTimeBill(1450, 2000) === 0,
+)
+check('float dust is rounded to cents', remainingOnOneTimeBill(0.3, 0.1) === 0.2)
+check('zero-amount bill owes nothing', remainingOnOneTimeBill(0, 0) === 0)
+
+console.log('\n10. paymentDefaultAmount — the overpayment bug this closes')
+// The bug: the form always seeded the FULL obligation amount. After paying $400
+// of a $1,450 invoice it re-offered $1,450, so accepting the default recorded
+// $1,850 against a $1,450 bill and nothing blocked it.
+const oneTime = { amount: 1450, recurring: false }
+check('unpaid one-time bill offers the full amount', paymentDefaultAmount(oneTime, 0) === 1450)
+check(
+  'after $400 paid it offers the $1,050 REMAINING (not $1,450)',
+  paymentDefaultAmount(oneTime, 400) === 1050,
+)
+check(
+  'accepting the default can never exceed the bill total',
+  400 + paymentDefaultAmount(oneTime, 400) === 1450,
+)
+check('a covered bill offers nothing rather than re-billing', paymentDefaultAmount(oneTime, 1450) === 0)
+
+console.log('\n11. RECURRING bills must NOT subtract a paid total')
+// The trap: a recurring bill's history spans every period ever paid. Twelve
+// months of $1,000 rent would report $12,000 paid against a $1,000 amount and a
+// remaining balance of MINUS $11,000. Each period is a fresh charge, so the full
+// period amount stays correct no matter how much history exists.
+const rent = { amount: 1000, recurring: true }
+check('a fresh recurring period offers the full amount', paymentDefaultAmount(rent, 0) === 1000)
+check(
+  'twelve periods of history still offers the full period amount',
+  paymentDefaultAmount(rent, 12000) === 1000,
+)
+check(
+  'recurring history never produces a negative default',
+  paymentDefaultAmount(rent, 12000) > 0,
+)
+
+console.log('\n12. isOverpayment is advisory, and scoped correctly')
+check('paying exactly what is owed is not overpayment', !isOverpayment(oneTime, 400, 1050))
+check('paying more than owed IS flagged', isOverpayment(oneTime, 400, 1450))
+check('paying less than owed is not flagged', !isOverpayment(oneTime, 400, 500))
+check(
+  'a cent of float dust is not flagged as overpayment',
+  !isOverpayment(oneTime, 400, 1050 + BILL_COVERAGE_TOLERANCE),
+)
+check(
+  'a recurring period is NEVER flagged, however much history exists',
+  !isOverpayment(rent, 12000, 1000),
+)
+check('an empty/invalid amount is not flagged', !isOverpayment(oneTime, 400, NaN))
+
+console.log('\n13. sumPaymentsForObligation')
+const rows = [
+  { obligationId: 'a', amount: 400, status: 'outstanding' },
+  { obligationId: 'a', amount: 250, status: 'cleared' },
+  { obligationId: 'a', amount: 999, status: 'void' },
+  { obligationId: 'b', amount: 700, status: 'cleared' },
+  { obligationId: null, amount: 500, status: 'cleared' },
+]
+check('sums only this obligation', sumPaymentsForObligation(rows, 'a') === 650)
+check(
+  'VOID payments are excluded — a voided check never left the account',
+  sumPaymentsForObligation(rows, 'a') !== 1649,
+)
+check('one-off checks with no obligation are ignored', sumPaymentsForObligation(rows, 'b') === 700)
+check('an unknown obligation sums to zero', sumPaymentsForObligation(rows, 'zzz') === 0)
+// End-to-end: the void must reopen headroom, not leave the bill looking covered.
+check(
+  'after voiding, the default returns to the true remaining balance',
+  paymentDefaultAmount({ amount: 1450, recurring: false }, sumPaymentsForObligation(rows, 'a')) ===
+    800,
+)
 
 console.log(`\n${pass} passed, ${fail} failed\n`)
 if (fail > 0) process.exit(1)

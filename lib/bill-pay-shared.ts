@@ -129,6 +129,104 @@ export function resolveOneTimeBillStatus(
   return billFullyCovered(amount, paidTotal) ? 'Paid' : 'Pending'
 }
 
+/**
+ * What is still owed on a ONE-TIME bill after prior payments.
+ *
+ * ONLY valid for one-time bills, and the restriction is the whole point rather
+ * than a caveat. A RECURRING bill's payment history spans every period it has
+ * ever been paid for, so summing it against the single-period `amount` is
+ * meaningless: twelve months of $1,000 rent would report $12,000 paid against
+ * $1,000 owed and a remaining balance of MINUS $11,000. Each recurring period is
+ * a fresh charge, so its correct default payment is the full period amount —
+ * which is why `paymentDefaultAmount` below branches on `recurring` instead of
+ * subtracting a paid total for every bill.
+ *
+ * Mirrors billFullyCovered: same non-void requirement on `paidTotal`, and the
+ * result is floored at zero so an overpaid bill reports nothing remaining rather
+ * than a negative figure that would read as a credit the business doesn't have.
+ */
+export function remainingOnOneTimeBill(amount: number, paidTotal: number): number {
+  const owed = Number(amount)
+  const paid = Number(paidTotal)
+  if (!Number.isFinite(owed) || owed <= 0) return 0
+  if (!Number.isFinite(paid) || paid <= 0) return owed
+  return Math.max(0, round2(owed - paid))
+}
+
+/** Round to cents, so subtraction can't surface float dust as a payable amount. */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+/**
+ * Total of non-void payments recorded against one obligation.
+ *
+ * Filters `void` defensively even though the server query already excludes it:
+ * this helper is the basis of the amount pre-filled into the payment form, and a
+ * voided check that slipped in would understate what's still owed.
+ */
+export function sumPaymentsForObligation(
+  payments: readonly { obligationId: string | null; amount: number; status: string }[],
+  obligationId: string,
+): number {
+  return round2(
+    payments
+      .filter(
+        (p) =>
+          p.obligationId === obligationId &&
+          p.status !== 'void' &&
+          Number.isFinite(Number(p.amount)),
+      )
+      .reduce((sum, p) => sum + Number(p.amount), 0),
+  )
+}
+
+/**
+ * The amount the Record Payment form should offer by default.
+ *
+ * The bug this fixes: the form always seeded the FULL `obligation.amount`, with
+ * no knowledge of prior payments. After paying $400 of a $1,450 invoice, opening
+ * it again offered $1,450 — so accepting the default recorded $1,850 against a
+ * $1,450 bill. Nothing blocked it, and the bill would close while $400 of
+ * phantom spend sat in the outstanding-check total.
+ *
+ * Recurring bills keep the full amount for the reason given in
+ * remainingOnOneTimeBill: their history is not a balance.
+ */
+export function paymentDefaultAmount(
+  bill: { amount: number; recurring: boolean },
+  paidTotal: number,
+): number {
+  if (bill.recurring) return Number(bill.amount)
+  const remaining = remainingOnOneTimeBill(bill.amount, paidTotal)
+  // A fully covered bill shouldn't be payable at all, but if it is reached (a
+  // stale list, a race) offer nothing rather than silently re-billing the total.
+  return remaining
+}
+
+/**
+ * Is this payment more than the bill still owes? Advisory only.
+ *
+ * Deliberately NOT a hard block. Overpaying can be legitimate — a late fee, or an
+ * invoice entered below the real figure — and refusing the write would send the
+ * owner to edit records to write down what actually left the account. The form
+ * warns and lets it through, which keeps the books matching reality while making
+ * an accidental double-payment obvious before it is saved.
+ *
+ * Recurring bills are never flagged: paying a period is not overpaying a balance.
+ */
+export function isOverpayment(
+  bill: { amount: number; recurring: boolean },
+  paidTotal: number,
+  proposedAmount: number,
+): boolean {
+  if (bill.recurring) return false
+  const proposed = Number(proposedAmount)
+  if (!Number.isFinite(proposed) || proposed <= 0) return false
+  const remaining = remainingOnOneTimeBill(bill.amount, paidTotal)
+  return proposed > remaining + BILL_COVERAGE_TOLERANCE
+}
+
 // ---------------------------------------------------------------------------
 // Automatic reconciliation of autopay/ACH bills from the checking feed.
 //
