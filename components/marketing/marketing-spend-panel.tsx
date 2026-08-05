@@ -209,8 +209,14 @@ export function MarketingSpendPanel({
                   evidence that marketing stopped.{' '}
                   {reconciliation.resolved.count > 0 && (
                     <>
-                      The {reconciliation.resolved.count} you have already identified on
-                      Check Resolution are excluded from that figure.{' '}
+                      {/* Name the unit and give the dollars. A bare "The 41" sat
+                          directly beside "$263,139" and read as an amount. */}
+                      The {reconciliation.resolved.count} checks you have already
+                      identified on Check Resolution —{' '}
+                      <span className="font-mono font-semibold text-foreground">
+                        {formatCurrency(reconciliation.resolved.total)}
+                      </span>{' '}
+                      — are excluded from that figure.{' '}
                     </>
                   )}
                   Identifying them there is the only way to see them: a bank feed cannot
