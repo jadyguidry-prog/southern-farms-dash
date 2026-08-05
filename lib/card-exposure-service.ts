@@ -107,6 +107,14 @@ export type CardExposureCard = {
   statementBalance: number | null
   statementDueDate: string | null
   daysUntilDue: number | null
+  /** Owner-facing cycle phrase, e.g. "cycle 4 Jul - 3 Aug". Null when not recorded. */
+  statementCycleLabel: string | null
+  /**
+   * False when the recorded statement cannot be shown to be the current one. The
+   * amount is still displayed — hiding it would understate exposure — but must be
+   * presented as unconfirmed rather than as fact.
+   */
+  statementIsCurrent: boolean
   /** How old the hand-entered balance is. */
   balanceLabel: string
   balanceNeverRecorded: boolean
@@ -195,6 +203,10 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
   ])
 
   const staleAfterDays = requireSetting(settings, 'account_data_stale_days')
+  const cycleStaleAfterDays = requireSetting(
+    settings,
+    'card_statement_cycle_stale_days',
+  )
 
   // The clock is read exactly once here and passed down, so two panels rendered in
   // the same request cannot straddle midnight and disagree.
@@ -205,7 +217,10 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
   // overstate card spending by more than the cards themselves.
   const cardAccounts = accounts.filter((a) => a.accountType === CARD_ACCOUNT_TYPE)
 
-  const safety = assessCardSafety(cardAccounts, today, { staleAfterDays })
+  const safety = assessCardSafety(cardAccounts, today, {
+    staleAfterDays,
+    cycleStaleAfterDays,
+  })
 
   const ledger = await readCardLedger(cardAccounts.map((a) => a.accountName))
   const activity = summarizeCardActivity(ledger, { today })
@@ -235,6 +250,13 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
       statementBalance: assessment?.statementBalance ?? null,
       statementDueDate: assessment?.statementDueDate ?? null,
       daysUntilDue: assessment?.daysUntilDue ?? null,
+      statementCycleLabel: assessment?.cycle.notRecorded
+        ? null
+        : (assessment?.cycle.label ?? null),
+      // Defaults to true when there is no assessment at all: absence of a statement is
+      // reported by its own warning, so defaulting to false here would invent a second
+      // complaint about the same missing figure.
+      statementIsCurrent: assessment?.statementIsCurrent ?? true,
       balanceLabel: assessment?.freshness.label ?? 'never confirmed',
       balanceNeverRecorded: assessment?.freshness.neverRecorded ?? true,
       balanceStale: assessment?.freshness.isStale ?? true,

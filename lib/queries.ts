@@ -479,6 +479,13 @@ export async function getBankAccounts() {
         ? null
         : Number(a.statement_balance),
     statementDueDate: a.statement_due_date ?? null,
+    // Which billing cycle `statementBalance` covers. Null means not recorded, which is
+    // deliberately distinct from a cycle that IS recorded but has since closed: the
+    // first needs the owner to enter the dates, the second needs a newer statement.
+    // Without these, `lastUpdated` alone cannot tell a current statement from one left
+    // over from a cycle months gone -- it only says when a number was typed.
+    statementPeriodStart: a.statement_period_start ?? null,
+    statementPeriodEnd: a.statement_period_end ?? null,
     // Empty string means never recorded. Staleness is judged from this, so it is
     // left falsy rather than defaulted to today — defaulting would make an
     // unmaintained figure look freshly confirmed.

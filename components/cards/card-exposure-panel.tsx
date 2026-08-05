@@ -199,14 +199,37 @@ export function CardExposurePanel({
                 )}
 
                 {card.statementDueDate && (
-                  <p className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <CalendarClock className="size-3.5" aria-hidden="true" />
-                    Statement {money(card.statementBalance)} due{' '}
-                    {friendlyDate(card.statementDueDate)}
-                    {card.daysUntilDue !== null &&
-                      (card.daysUntilDue < 0
-                        ? ` — ${Math.abs(card.daysUntilDue)} days overdue`
-                        : ` — in ${card.daysUntilDue} days`)}
+                  <p className="mt-2 flex items-start gap-1.5 text-xs text-muted-foreground">
+                    <CalendarClock
+                      className="mt-0.5 size-3.5 shrink-0"
+                      aria-hidden="true"
+                    />
+                    <span>
+                      Statement {money(card.statementBalance)} due{' '}
+                      {friendlyDate(card.statementDueDate)}
+                      {card.daysUntilDue !== null &&
+                        (card.daysUntilDue < 0
+                          ? ` — ${Math.abs(card.daysUntilDue)} days overdue`
+                          : ` — in ${card.daysUntilDue} days`)}
+                      {/* Which cycle this figure covers. Without it there is no way to
+                          tell this month's bill from one left over months ago. */}
+                      {card.statementCycleLabel && (
+                        <span className="text-muted-foreground/80">
+                          {' · '}
+                          {card.statementCycleLabel}
+                        </span>
+                      )}
+                    </span>
+                  </p>
+                )}
+
+                {/* The amount is never hidden — that would understate exposure — but
+                    an unconfirmed one must not read as fact. */}
+                {card.statementBalance !== null && !card.statementIsCurrent && (
+                  <p className="mt-1.5 text-xs font-medium text-foreground">
+                    {card.statementCycleLabel
+                      ? 'This statement covers a cycle that has closed — confirm the current one.'
+                      : 'Statement cycle not recorded, so this amount cannot be confirmed as current.'}
                   </p>
                 )}
 

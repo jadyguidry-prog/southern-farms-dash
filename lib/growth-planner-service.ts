@@ -232,6 +232,10 @@ export const getGrowthPlannerSnapshot = cache(
 
     const horizonMonths = requireSetting(settings, 'growth_horizon_months')
     const staleAfterDays = requireSetting(settings, 'account_data_stale_days')
+    const cycleStaleAfterDays = requireSetting(
+      settings,
+      'card_statement_cycle_stale_days',
+    )
     const minCashReserve = requireSetting(settings, 'min_cash_reserve')
 
     const today = new Date()
@@ -257,10 +261,12 @@ export const getGrowthPlannerSnapshot = cache(
           availableCredit: a.availableCredit,
           statementBalance: a.statementBalance,
           statementDueDate: a.statementDueDate,
+          statementPeriodStart: a.statementPeriodStart,
+          statementPeriodEnd: a.statementPeriodEnd,
           lastUpdated: a.lastUpdated,
         })),
       today,
-      { staleAfterDays },
+      { staleAfterDays, cycleStaleAfterDays },
     )
 
     // ---- Does a commitment now collide with a statement coming due? ------

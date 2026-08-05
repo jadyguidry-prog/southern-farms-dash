@@ -43,6 +43,17 @@ export type CreditAccountInput = {
   statementBalance?: number | null
   /** Date that statement must be paid by. Null means not tracked. */
   statementDueDate?: string | null
+  /** First day of the billing cycle `statementBalance` covers. Null = not recorded. */
+  statementPeriodStart?: string | null
+  /**
+   * Closing date of the billing cycle `statementBalance` covers. Null = not recorded.
+   *
+   * This is what makes a SUPERSEDED statement detectable. Without it, a balance left
+   * over from a cycle that closed months ago is indistinguishable from this month's,
+   * because `lastUpdated` only says when someone typed a number — not which cycle the
+   * number belongs to.
+   */
+  statementPeriodEnd?: string | null
   /** ISO date the figures were last confirmed. Empty means never recorded. */
   lastUpdated?: string
 }
@@ -137,6 +148,85 @@ export function accountFreshness(
 }
 
 // ---------------------------------------------------------------------------
+// Statement cycle
+
+export type StatementCycle = {
+  start: string | null
+  end: string | null
+  /** True when neither end of the cycle is recorded. */
+  notRecorded: boolean
+  /** Whole days since the cycle closed. Null when the closing date is unknown. */
+  daysSinceClose: number | null
+  /**
+   * True when the cycle closed long enough ago that a newer statement should exist,
+   * so the recorded balance is probably last cycle's rather than the current one.
+   */
+  superseded: boolean
+  /** Owner-facing phrase, e.g. "cycle 4 Jul - 3 Aug". */
+  label: string
+}
+
+/**
+ * Which billing cycle does the recorded statement balance belong to, and is it current?
+ *
+ * This exists because `lastUpdated` answers a different question. It records when a
+ * figure was TYPED, not which cycle it COVERS — so a statement from a cycle that
+ * closed in May, re-confirmed today, looks perfectly fresh while describing a period
+ * three months gone.
+ *
+ * `today` is injected rather than read from the clock so results are reproducible.
+ */
+export function statementCycle(
+  periodStart: string | null | undefined,
+  periodEnd: string | null | undefined,
+  today: Date,
+  cycleStaleAfterDays: number,
+): StatementCycle {
+  const start = (periodStart ?? '').trim() || null
+  const end = (periodEnd ?? '').trim() || null
+
+  if (!start && !end) {
+    return {
+      start: null,
+      end: null,
+      notRecorded: true,
+      daysSinceClose: null,
+      // Not recorded is NOT "superseded". Absent data and a known-stale cycle need
+      // different remedies -- one asks the owner for the cycle dates, the other asks
+      // for the newer statement -- so they must not collapse into one flag.
+      superseded: false,
+      label: 'statement cycle not recorded',
+    }
+  }
+
+  const daysSinceClose = end ? -1 * (daysBetween(end, today) ?? 0) : null
+  const closeReadable = end ? daysBetween(end, today) !== null : false
+
+  return {
+    start,
+    end,
+    notRecorded: false,
+    daysSinceClose: closeReadable ? daysSinceClose : null,
+    superseded:
+      closeReadable && daysSinceClose !== null
+        ? daysSinceClose > cycleStaleAfterDays
+        : false,
+    label: formatCycleLabel(start, end),
+  }
+}
+
+function formatCycleLabel(start: string | null, end: string | null): string {
+  const fmt = (iso: string): string => {
+    const d = new Date(iso + 'T00:00:00')
+    if (Number.isNaN(d.getTime())) return iso
+    return `${d.getDate()} ${d.toLocaleString('en-US', { month: 'short' })}`
+  }
+  if (start && end) return `cycle ${fmt(start)} - ${fmt(end)}`
+  if (end) return `cycle closing ${fmt(end)}`
+  return `cycle from ${fmt(start as string)}`
+}
+
+// ---------------------------------------------------------------------------
 // Per-account and aggregate card safety
 
 export type CardAssessment = {
@@ -157,6 +247,14 @@ export type CardAssessment = {
   /** Days until the statement is due. Negative means overdue. Null when untracked. */
   daysUntilDue: number | null
   freshness: Freshness
+  /** Which billing cycle the statement balance covers, and whether it is current. */
+  cycle: StatementCycle
+  /**
+   * True when a statement balance is recorded AND its cycle is known to be current
+   * (or, for a card with no balance owed, when there is nothing to time). This is the
+   * flag a caller should check before treating `statementBalance` as this month's bill.
+   */
+  statementIsCurrent: boolean
   /** Specific, owner-readable problems found on this account. */
   warnings: string[]
 }
@@ -180,6 +278,11 @@ export type CardSafetySummary = {
   untrackedLimitCount: number
   /** Accounts whose figures are stale or never confirmed. */
   staleCount: number
+  /**
+   * Cards carrying a balance whose statement cannot be shown to be the current one —
+   * either the cycle dates are missing or the cycle has been superseded.
+   */
+  uncertainStatementCount: number
   /** Aggregate problems worth surfacing above the per-card detail. */
   warnings: string[]
   /**
@@ -212,7 +315,7 @@ function daysBetween(fromISO: string, today: Date): number | null {
 export function assessCardSafety(
   accounts: CreditAccountInput[],
   today: Date,
-  opts: { staleAfterDays: number },
+  opts: { staleAfterDays: number; cycleStaleAfterDays: number },
 ): CardSafetySummary {
   const credit = accounts.filter((a) => isCreditAccount(a.accountType))
 
@@ -248,6 +351,27 @@ export function assessCardSafety(
       )
     }
 
+    const cycle = statementCycle(
+      a.statementPeriodStart,
+      a.statementPeriodEnd,
+      today,
+      opts.cycleStaleAfterDays,
+    )
+
+    // Only meaningful for a card that actually reports a statement.
+    const hasStatement = (a.statementBalance ?? null) !== null
+    if (a.accountType === CARD_ACCOUNT_TYPE && hasStatement) {
+      if (cycle.notRecorded) {
+        warnings.push(
+          `${a.accountName}: statement cycle dates not recorded, so there is no way to tell whether this balance is the current statement.`,
+        )
+      } else if (cycle.superseded) {
+        warnings.push(
+          `${a.accountName}: recorded statement covers the ${cycle.label}, which closed ${cycle.daysSinceClose} days ago — a newer statement has almost certainly been issued.`,
+        )
+      }
+    }
+
     const daysUntilDue = a.statementDueDate
       ? daysBetween(a.statementDueDate, today)
       : null
@@ -277,6 +401,19 @@ export function assessCardSafety(
       statementDueDate: a.statementDueDate ?? null,
       daysUntilDue,
       freshness,
+      cycle,
+      // Judges the RECORDED statement's cycle, and only that.
+      //
+      // A card with no statement recorded is NOT reported here as an uncertain cycle:
+      // that gap already has its own warning ("statement balance not tracked"), and
+      // counting it a second time as a cycle problem would report one missing figure
+      // as two different defects and push confidence down twice for it. This flag
+      // answers a narrower question -- "is the statement we DO have the current one?"
+      // -- so a card with nothing recorded, and a card owing nothing at all, both
+      // pass here and are handled by their own checks.
+      statementIsCurrent: !hasStatement
+        ? true
+        : !cycle.notRecorded && !cycle.superseded,
       warnings,
     }
   })
@@ -286,6 +423,9 @@ export function assessCardSafety(
   const totalHeadroom = cards.reduce((s, c) => s + (c.headroom ?? 0), 0)
   const untrackedLimitCount = cards.filter((c) => c.headroom === null).length
   const staleCount = cards.filter((c) => c.freshness.isStale).length
+  const uncertainStatementCount = cards.filter(
+    (c) => c.accountType === CARD_ACCOUNT_TYPE && !c.statementIsCurrent,
+  ).length
 
   const warnings: string[] = []
   if (cards.length === 0) {
@@ -297,7 +437,13 @@ export function assessCardSafety(
   const confidence: CardSafetySummary['confidence'] =
     cards.length === 0
       ? 'missing'
-      : staleCount > 0 || untrackedLimitCount > 0
+      : staleCount > 0 ||
+          untrackedLimitCount > 0 ||
+          // A statement that can't be shown to be current is exactly as unreliable as
+          // a stale balance, so it must pull confidence down the same way. Otherwise a
+          // superseded statement would be reported per-card while the summary still
+          // claimed 'high'.
+          uncertainStatementCount > 0
         ? 'reduced'
         : 'high'
 
@@ -310,6 +456,7 @@ export function assessCardSafety(
     hasCreditAccounts: cards.length > 0,
     untrackedLimitCount,
     staleCount,
+    uncertainStatementCount,
     warnings,
     confidence,
   }
@@ -324,6 +471,13 @@ export type DueDateConflict = {
   statementBalance: number
   /** Days between the commitment and the statement due date. */
   gapDays: number
+  /**
+   * False when the statement cannot be shown to cover the current cycle, so the
+   * amount is the best available figure rather than a confirmed one. The conflict is
+   * still reported — suppressing it would hide real exposure — but callers should
+   * present the number as unconfirmed.
+   */
+  amountConfirmed: boolean
   message: string
 }
 
@@ -361,15 +515,28 @@ export function findDueDateConflicts(
     // paid before the commitment date competes for nothing.
     if (gapDays < 0 || gapDays > opts.windowDays) continue
 
+    const money = bal.toLocaleString('en-US', {
+      style: 'currency',
+      currency: 'USD',
+    })
+    const timing =
+      gapDays === 0 ? 'is due the same day' : `is due ${gapDays} day${gapDays === 1 ? '' : 's'} later`
+
+    // A superseded or undated cycle means this figure may not be the bill that is
+    // actually coming. Say so in the message rather than presenting it as fact.
+    const caveat = c.statementIsCurrent
+      ? ''
+      : c.cycle.superseded
+        ? ` (from the ${c.cycle.label}, which has since closed — confirm the current statement)`
+        : ' (statement cycle not recorded — amount unconfirmed)'
+
     conflicts.push({
       accountName: c.accountName,
       statementDueDate: c.statementDueDate,
       statementBalance: bal,
       gapDays,
-      message:
-        gapDays === 0
-          ? `${c.accountName} statement of ${bal.toLocaleString('en-US', { style: 'currency', currency: 'USD' })} is due the same day.`
-          : `${c.accountName} statement of ${bal.toLocaleString('en-US', { style: 'currency', currency: 'USD' })} is due ${gapDays} day${gapDays === 1 ? '' : 's'} later.`,
+      amountConfirmed: c.statementIsCurrent,
+      message: `${c.accountName} statement of ${money} ${timing}${caveat}.`,
     })
   }
 

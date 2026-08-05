@@ -16,6 +16,7 @@ import {
   assessCardSafety,
   findDueDateConflicts,
   isCreditAccount,
+  statementCycle,
   type CreditAccountInput,
 } from '../lib/card-safety'
 
@@ -42,7 +43,7 @@ function ok(label: string, cond: boolean, detail = '') {
 
 // Fixed "today" so results never depend on when the suite runs.
 const TODAY = new Date(2026, 7, 3) // 2026-08-03
-const STALE = { staleAfterDays: 14 }
+const STALE = { staleAfterDays: 14, cycleStaleAfterDays: 35 }
 
 const card = (o: Partial<CreditAccountInput> = {}): CreditAccountInput => ({
   accountName: 'American Express ending 0-73009',
@@ -52,6 +53,12 @@ const card = (o: Partial<CreditAccountInput> = {}): CreditAccountInput => ({
   availableCredit: 12000,
   statementBalance: null,
   statementDueDate: null,
+  // A cycle that closed the day before TODAY, so the default fixture represents a
+  // CURRENT statement. Existing assertions therefore keep their original meaning --
+  // adding cycle tracking must not silently re-label every pre-existing case as
+  // uncertain, or these tests would start passing for a new reason.
+  statementPeriodStart: '2026-07-03',
+  statementPeriodEnd: '2026-08-02',
   lastUpdated: '2026-08-03',
   ...o,
 })
@@ -297,6 +304,182 @@ console.log('\nTwo separate cards aggregate independently')
   check('limits total across all credit accounts', summary.totalLimit, 65000)
   check('headroom totals across all credit accounts', summary.totalHeadroom, 41000)
   ok('blended utilisation is reported', Math.abs((summary.utilization ?? 0) - 24000 / 65000) < 1e-9)
+}
+
+console.log('\nStatement cycle: which bill does this balance actually cover?')
+{
+  // Not recorded and superseded are DIFFERENT problems with different remedies:
+  // one needs the owner to enter cycle dates, the other needs the newer statement.
+  // Collapsing them into one flag would tell the owner to do the wrong thing.
+  const none = statementCycle(null, null, TODAY, 35)
+  ok(
+    'no cycle dates reads as not-recorded, NOT as superseded',
+    none.notRecorded && !none.superseded && none.daysSinceClose === null,
+  )
+
+  const current = statementCycle('2026-07-03', '2026-08-02', TODAY, 35)
+  ok(
+    'a cycle that closed yesterday is current',
+    !current.superseded && !current.notRecorded && current.daysSinceClose === 1,
+  )
+
+  // 35 days is the boundary: a monthly cycle plus a few days to issue and enter it.
+  ok(
+    'a cycle closed exactly at the threshold is still current',
+    !statementCycle('2026-05-30', '2026-06-29', TODAY, 35).superseded,
+  )
+  ok(
+    'a cycle closed past the threshold is superseded',
+    statementCycle('2026-05-29', '2026-06-28', TODAY, 35).superseded,
+  )
+  check(
+    'the cycle label is owner-readable',
+    statementCycle('2026-07-04', '2026-08-03', TODAY, 35).label,
+    'cycle 4 Jul - 3 Aug',
+  )
+}
+
+console.log('\nA statement is only trusted when its cycle is provably current')
+{
+  // THE REAL CASE. The active Amex sat at a $2 statement against a ~$9,948 balance.
+  // `lastUpdated` was today, so every freshness check passed and the timing check
+  // waved a $2 payment through as trivially safe. Only the CYCLE can catch this.
+  const staleCycle = assessCardSafety(
+    [
+      card({
+        statementBalance: 2,
+        statementDueDate: '2026-08-18',
+        statementPeriodStart: '2026-04-04',
+        statementPeriodEnd: '2026-05-03', // closed ~92 days before TODAY
+        lastUpdated: '2026-08-03', // typed today -- looks perfectly fresh
+      }),
+    ],
+    TODAY,
+    STALE,
+  )
+  const c = staleCycle.cards[0]
+  ok('a superseded cycle is detected even when the figure was typed today', c.cycle.superseded)
+  ok('...and the freshness check alone would NOT have caught it', !c.freshness.isStale)
+  ok('...so the statement is not treated as current', !c.statementIsCurrent)
+  ok(
+    '...and it is reported as superseded rather than merely missing',
+    c.warnings.some((w) => /closed \d+ days ago/i.test(w)),
+  )
+  check(
+    '...and it drags summary confidence down',
+    staleCycle.confidence,
+    'reduced',
+  )
+  check('...and is counted', staleCycle.uncertainStatementCount, 1)
+
+  // Balance recorded, cycle absent: flagged, but with the OTHER message.
+  const noCycle = assessCardSafety(
+    [
+      card({
+        statementBalance: 10904.4,
+        statementDueDate: '2026-08-18',
+        statementPeriodStart: null,
+        statementPeriodEnd: null,
+      }),
+    ],
+    TODAY,
+    STALE,
+  )
+  ok('a missing cycle is also untrusted', !noCycle.cards[0].statementIsCurrent)
+  ok(
+    '...and asks for the cycle dates, not a newer statement',
+    noCycle.cards[0].warnings.some((w) => /cycle dates not recorded/i.test(w)),
+  )
+
+  // The real, corrected Amex row must come out clean -- otherwise the guard would
+  // nag about correct data, which is how warnings get ignored.
+  const good = assessCardSafety(
+    [
+      card({
+        statementBalance: 10904.4,
+        statementDueDate: '2026-08-18',
+        statementPeriodStart: '2026-07-04',
+        statementPeriodEnd: '2026-08-03',
+        lastUpdated: '2026-08-03',
+      }),
+    ],
+    TODAY,
+    STALE,
+  )
+  ok('the corrected Amex row is trusted', good.cards[0].statementIsCurrent)
+  check('...with no cycle warning', good.cards[0].warnings.length, 0)
+  check('...and full confidence', good.confidence, 'high')
+
+  // No statement recorded is NOT a cycle problem -- it has its own warning already,
+  // and double-reporting it would push confidence down twice for one missing figure.
+  const settled = assessCardSafety(
+    [card({ currentBalance: 0, availableCredit: 20000, statementBalance: null })],
+    TODAY,
+    STALE,
+  )
+  ok('a paid-off card is not flagged as uncertain', settled.cards[0].statementIsCurrent)
+
+  const noStatement = assessCardSafety(
+    [card({ statementBalance: null, statementPeriodStart: null, statementPeriodEnd: null })],
+    TODAY,
+    STALE,
+  )
+  ok(
+    'a card with no statement is not double-reported as a cycle problem',
+    noStatement.cards[0].statementIsCurrent &&
+      noStatement.uncertainStatementCount === 0,
+  )
+  ok(
+    '...it is still reported once, as an untracked statement',
+    noStatement.cards[0].warnings.some((w) => /statement balance not tracked/i.test(w)),
+  )
+}
+
+console.log('\nAn uncertain statement is still reported, just not as fact')
+{
+  // Suppressing the conflict would HIDE real exposure -- the opposite failure. It
+  // must still fire, flagged as unconfirmed.
+  const summary = assessCardSafety(
+    [
+      card({
+        statementBalance: 9948,
+        statementDueDate: '2026-08-18',
+        statementPeriodStart: '2026-04-04',
+        statementPeriodEnd: '2026-05-03',
+      }),
+    ],
+    TODAY,
+    STALE,
+  )
+  const conflicts = findDueDateConflicts(summary, '2026-08-10', { windowDays: 14 })
+  check('the conflict is still raised', conflicts.length, 1)
+  ok('but marked unconfirmed', conflicts[0].amountConfirmed === false)
+  ok(
+    'and the message says to confirm the current statement',
+    /confirm the current statement/i.test(conflicts[0].message),
+  )
+
+  const confirmed = findDueDateConflicts(
+    assessCardSafety(
+      [
+        card({
+          statementBalance: 10904.4,
+          statementDueDate: '2026-08-18',
+          statementPeriodStart: '2026-07-04',
+          statementPeriodEnd: '2026-08-03',
+        }),
+      ],
+      TODAY,
+      STALE,
+    ),
+    '2026-08-10',
+    { windowDays: 14 },
+  )
+  ok('a current statement is reported as confirmed', confirmed[0].amountConfirmed)
+  ok(
+    '...with no hedging in the message',
+    !/unconfirmed|confirm the current/i.test(confirmed[0].message),
+  )
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
