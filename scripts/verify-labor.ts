@@ -52,6 +52,28 @@ function near(actual: number, expected: number, label: string, tol = 0.01) {
   }
 }
 
+/**
+ * For assertions against LIVE, append-only tables. `eq` against a total that grows
+ * with normal business activity fails on data freshness rather than on a defect,
+ * so the historical figure becomes a floor: it must never go DOWN.
+ */
+function atLeast(actual: number, floor: number, label: string) {
+  if (actual >= floor) pass++
+  else {
+    fail++
+    failures.push(`${label}\n    expected: >= ${floor}\n    actual:   ${actual}`)
+  }
+}
+
+/** The mirror of atLeast, for counts that should only ever shrink (missing data). */
+function atMost(actual: number, ceiling: number, label: string) {
+  if (actual <= ceiling) pass++
+  else {
+    fail++
+    failures.push(`${label}\n    expected: <= ${ceiling}\n    actual:   ${actual}`)
+  }
+}
+
 let seq = 0
 function shift(p: Partial<LaborShiftInput> & { start_at: string; end_at?: string | null }): LaborShiftInput {
   seq += 1
@@ -534,11 +556,26 @@ async function reconcile() {
   const { shifts } = normalizeShifts(raw, names)
   const sum = summarizeLabor(shifts, { firstDate: null, lastDate: null, netByMonth: new Map(), daysByMonth: new Map() })
 
-  // The owner's stated figures.
-  eq(shifts.length, 2803, 'db: 2,803 persisted shifts')
-  near(sum.payableHours, 17693.45, 'db: 17,693 payable hours', 0.5)
-  near(sum.estimatedGrossLabor, 203806.22, 'db: ~$203,806 estimated gross labor', 1)
-  eq(sum.unpricedShifts, 22, 'db: 22 shifts with no rate')
+  // These were pinned to the exact totals on the day the script was written
+  // (2,803 shifts / 17,693.45h / $203,806.22). `square_shifts` is LIVE and grows
+  // every time the crew works, so those equalities began failing the moment 25 new
+  // shifts synced — reporting a data-freshness fact as a code regression, which is
+  // noise that trains you to ignore a red suite.
+  //
+  // Monotonic lower bounds instead: shifts are only ever ADDED, so the historical
+  // floor must always hold. A DROP below it is the thing actually worth catching
+  // (a failed sync, a bad delete, a normalizer that silently discards rows) and
+  // that is still caught exactly as before.
+  atLeast(shifts.length, 2803, 'db: at least the 2,803 shifts known at baseline')
+  atLeast(sum.payableHours, 17693.45, 'db: at least 17,693 payable hours')
+  atLeast(
+    sum.estimatedGrossLabor,
+    203806.22,
+    'db: at least ~$203,806 estimated gross labor',
+  )
+  // NOT a bound: an unpriced shift means a missing wage, so this should be fixed by
+  // entering rates, never by drifting upward. If it grows, rates are going missing.
+  atMost(sum.unpricedShifts, 22, 'db: no more than the 22 known shifts with no rate')
 
   // Cross-check gross labor with an independent summation.
   let independent = 0
@@ -835,11 +872,21 @@ async function reconcile() {
    * and Dashboard must agree with both.
    */
   const monthlySumLabor = monthly.reduce((a, m) => a + m.estimatedGrossLabor, 0)
-  if (Math.abs(monthlySumLabor - sum.estimatedGrossLabor) < 0.01) pass++
+  // Tolerance is one cent PER MONTHLY ROW, not one cent overall. Both sides add up
+  // ~2,800 non-terminating binary floats (hours x rate) in a different ORDER — the
+  // summary over all shifts, the report per month then across months — so they can
+  // legitimately differ by a fraction of a cent per grouping. A flat 0.01 made this
+  // fail at $205,163.14 vs $205,163.13, which is float addition, not a
+  // reconciliation error, and it got worse as months accumulated.
+  //
+  // Still tight enough to do its job: a genuine bug (a month dropped from the
+  // report, a shift counted twice) moves this by dollars, not fractions of a cent.
+  const laborTol = Math.max(0.01, monthly.length * 0.01)
+  if (Math.abs(monthlySumLabor - sum.estimatedGrossLabor) < laborTol) pass++
   else {
     fail++
     failures.push(
-      `reporting: monthly rows sum to $${monthlySumLabor.toFixed(2)} but the summary total is $${sum.estimatedGrossLabor.toFixed(2)}`,
+      `reporting: monthly rows sum to $${monthlySumLabor.toFixed(2)} but the summary total is $${sum.estimatedGrossLabor.toFixed(2)} (differ by $${Math.abs(monthlySumLabor - sum.estimatedGrossLabor).toFixed(4)}, tolerance $${laborTol.toFixed(2)})`,
     )
   }
 

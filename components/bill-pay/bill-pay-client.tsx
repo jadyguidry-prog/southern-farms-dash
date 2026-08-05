@@ -11,13 +11,10 @@ import {
   Link2,
   Landmark,
   Zap,
-<<<<<<< HEAD
   FileClock,
   Hash,
-=======
   FileText,
   Undo2,
->>>>>>> origin/v0/jadyguidry-prog-f71cb68d
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -45,16 +42,9 @@ import { formatCurrency } from '@/lib/data'
 // module would (and did) break the build.
 import type { ObligationPayment, ClearingSuggestion } from '@/lib/bill-pay-service'
 // Pure display helper + type, kept in a server-free module for the reason noted above.
-<<<<<<< HEAD
-=======
 import {
   paymentLabel,
   isAwaitingPayment,
-  type AchReconcileMatch,
-} from '@/lib/bill-pay-shared'
->>>>>>> origin/v0/jadyguidry-prog-f71cb68d
-import {
-  paymentLabel,
   validateBillDueBasics,
   sumPaymentsForObligation,
   paymentDefaultAmount,
@@ -111,14 +101,15 @@ export function BillPayClient({
   detected: AchReconcileMatch[]
 }) {
   const [activeObligation, setActiveObligation] = useState<Obligation | null>(null)
-<<<<<<< HEAD
-  const [oneOffOpen, setOneOffOpen] = useState(false)
   const [billDueOpen, setBillDueOpen] = useState(false)
-=======
   // Which flavour of one-off entry is open. 'check' is a check being written now;
   // 'invoice' logs a COGS invoice whose ACH draft will pull in a few days.
+  //
+  // This replaced a plain `oneOffOpen` boolean: once there were two flavours of
+  // one-off entry a boolean could not say WHICH was open, and the dialog needs
+  // that to pick its mode. `billDueOpen` stays separate because BillDueDialog is
+  // a different form (an invoice you owe, not a payment leaving now).
   const [oneOffMode, setOneOffMode] = useState<'check' | 'invoice' | null>(null)
->>>>>>> origin/v0/jadyguidry-prog-f71cb68d
   // Locally dismissed suggestions — hidden without a write, so an owner who
   // knows a match is wrong isn't nagged on every load of this session.
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
@@ -163,9 +154,22 @@ export function BillPayClient({
         <div>
           <p className="text-sm font-semibold text-foreground">Add something new</p>
           <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-            An invoice you owe but haven&apos;t paid yet, or a check you already wrote.
+            An invoice you owe but haven&apos;t paid yet, a check you already wrote,
+            or a bill the vendor will draft out of the bank itself.
           </p>
         </div>
+        {/* All three entry points live here together. The two one-off buttons used
+            to sit beside the de-emphasized "One-Off Payment" label further down,
+            which is the same undiscoverability that hid invoice entry.
+
+            The labels distinguish by WHAT HAPPENS NEXT, not by document type. Two
+            of these start life as the same piece of paper — an invoice — so
+            labelling both "invoice" ("Enter an Invoice" / "Log an invoice") left
+            the owner no way to tell them apart at the point of choosing:
+              - Enter an Invoice  -> createBillDue      -> an OBLIGATION to pay later
+              - Write a Check     -> recordOneOffPayment -> a payment, check written now
+              - Log an ACH Draft  -> recordOneOffPayment -> a payment that floats as
+                                     outstanding until the vendor pulls it */}
         <div className="flex flex-wrap gap-2">
           <Button className="h-11" onClick={() => setBillDueOpen(true)}>
             <FileClock className="size-4" aria-hidden="true" />
@@ -174,10 +178,18 @@ export function BillPayClient({
           <Button
             variant="outline"
             className="h-11"
-            onClick={() => setOneOffOpen(true)}
+            onClick={() => setOneOffMode('check')}
           >
             <Plus className="size-4" aria-hidden="true" />
             Write a Check
+          </Button>
+          <Button
+            variant="outline"
+            className="h-11"
+            onClick={() => setOneOffMode('invoice')}
+          >
+            <FileText className="size-4" aria-hidden="true" />
+            Log an ACH Draft
           </Button>
         </div>
       </div>
@@ -298,39 +310,14 @@ export function BillPayClient({
           the float number is silently optimistic, since most checks the owner
           writes are not against the recurring obligations. */}
       <section>
-<<<<<<< HEAD
-        {/* "Write a Check" now lives in the top action bar alongside the invoice
-            entry point, so both ways of recording something new are in one place. */}
+        {/* Both one-off entry points ("Write a Check" and "Log an ACH Draft") now
+            live in the top action bar alongside invoice entry, so every way of
+            recording something new is in one place. They were duplicated here
+            beside this de-emphasized label, which is exactly where the owner
+            failed to find invoice entry. */}
         <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
           One-Off Payment
         </h3>
-=======
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-            One-Off Payment
-          </h3>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-11"
-              onClick={() => setOneOffMode('check')}
-            >
-              <Plus className="size-4" aria-hidden="true" />
-              Write a check
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-11"
-              onClick={() => setOneOffMode('invoice')}
-            >
-              <FileText className="size-4" aria-hidden="true" />
-              Log an invoice
-            </Button>
-          </div>
-        </div>
->>>>>>> origin/v0/jadyguidry-prog-f71cb68d
         <Card>
           <CardContent className="p-4 text-sm text-muted-foreground">
             <p>
@@ -375,12 +362,6 @@ export function BillPayClient({
         )}
       </section>
 
-<<<<<<< HEAD
-      {/* paidTotal comes from the payment list this page already loads, so the
-          form can default to what's STILL owed instead of re-offering the full
-          invoice after a partial payment. Meaningful for one-time bills only —
-          see paymentDefaultAmount. */}
-=======
       {/* Recently cleared, purely so a mistaken clear can be undone. Hidden when
           empty rather than showing an empty-state card, since it is a correction
           tool and not something to act on day to day. */}
@@ -397,7 +378,10 @@ export function BillPayClient({
         </section>
       )}
 
->>>>>>> origin/v0/jadyguidry-prog-f71cb68d
+      {/* paidTotal comes from the payment list this page already loads, so the
+          form can default to what's STILL owed instead of re-offering the full
+          invoice after a partial payment. Meaningful for one-time bills only —
+          see paymentDefaultAmount. */}
       <RecordPaymentDialog
         key={activeObligation?.id ?? 'none'}
         obligation={activeObligation}
@@ -515,11 +499,9 @@ function OutstandingRow({
   label: string
 }) {
   const [pending, startTransition] = useTransition()
-<<<<<<< HEAD
   // Confirmation is required because the conversion DELETES the payment record and
   // moves money from "already spent" back to "still owed".
   const [confirmConvert, setConfirmConvert] = useState(false)
-=======
   const [numberOpen, setNumberOpen] = useState(false)
   const [draftNumber, setDraftNumber] = useState('')
 
@@ -532,7 +514,6 @@ function OutstandingRow({
   // number also marks it written) or written-but-unlogged (the number simply fills a
   // gap). Both cases benefit, so this stays keyed on the missing number.
   const needsCheckNumber = payment.paymentMethod === 'check' && !payment.checkNumber
->>>>>>> origin/v0/jadyguidry-prog-f71cb68d
 
   const onClear = () => {
     startTransition(async () => {
@@ -699,6 +680,53 @@ function OutstandingRow({
         </div>
       )}
       </CardContent>
+
+      {/* Lives HERE, in OutstandingRow, because confirmConvert / onConvert /
+          hasCheckNumber and the button that opens it are all declared in this
+          component. It had been sitting inside ClearedRow, which has none of
+          them — a merge dropped it into the wrong component and the file was
+          committed with the conflict markers still in it, so this never
+          compiled. Converting only makes sense for an OUTSTANDING payment
+          anyway: a cleared payment has already left the bank, so there is
+          nothing to move back to "still owed". */}
+      <Dialog open={confirmConvert} onOpenChange={setConfirmConvert}>
+        <DialogContent className="max-w-md grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>Move to invoices due?</DialogTitle>
+            <DialogDescription>
+              {label} · {formatCurrency(payment.amount)}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="-mx-1 min-h-0 space-y-3 overflow-y-auto px-1 text-sm leading-relaxed">
+            <p className="text-muted-foreground">
+              This treats the money as{' '}
+              <span className="font-semibold text-foreground">still owed</span> rather
+              than already spent. Your spendable cash goes up by{' '}
+              {formatCurrency(payment.amount)}, and the invoice appears in your payable
+              list and cash forecast, due {payment.paymentDate}.
+            </p>
+            <p className="text-muted-foreground">
+              The payment record is deleted, so this won&apos;t show as a voided check.
+            </p>
+            {hasCheckNumber && (
+              <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-foreground">
+                Check #{payment.checkNumber} is recorded against this payment. Only do
+                this if that check was never actually sent.
+              </p>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmConvert(false)}>
+              Cancel
+            </Button>
+            <Button onClick={onConvert} disabled={pending}>
+              {pending ? 'Moving…' : 'Move to invoices due'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }
@@ -755,45 +783,6 @@ function ClearedRow({
           Not cleared
         </Button>
       </CardContent>
-
-      <Dialog open={confirmConvert} onOpenChange={setConfirmConvert}>
-        <DialogContent className="max-w-md grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
-          <DialogHeader>
-            <DialogTitle>Move to invoices due?</DialogTitle>
-            <DialogDescription>
-              {label} · {formatCurrency(payment.amount)}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="-mx-1 min-h-0 space-y-3 overflow-y-auto px-1 text-sm leading-relaxed">
-            <p className="text-muted-foreground">
-              This treats the money as{' '}
-              <span className="font-semibold text-foreground">still owed</span> rather
-              than already spent. Your spendable cash goes up by{' '}
-              {formatCurrency(payment.amount)}, and the invoice appears in your payable
-              list and cash forecast, due {payment.paymentDate}.
-            </p>
-            <p className="text-muted-foreground">
-              The payment record is deleted, so this won&apos;t show as a voided check.
-            </p>
-            {hasCheckNumber && (
-              <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-foreground">
-                Check #{payment.checkNumber} is recorded against this payment. Only do
-                this if that check was never actually sent.
-              </p>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmConvert(false)}>
-              Cancel
-            </Button>
-            <Button onClick={onConvert} disabled={pending}>
-              {pending ? 'Moving…' : 'Move to invoices due'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </Card>
   )
 }
@@ -936,13 +925,9 @@ function RecordPaymentDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-<<<<<<< HEAD
-      {/* Same pinned-footer grid as the invoice form — see the note there. This one
-          grew taller when the partial-payment balance block was added. */}
-=======
       {/* grid-rows pins the title and the action buttons while only the fields
-          scroll, so "Record Payment" stays reachable on a short window. */}
->>>>>>> origin/v0/jadyguidry-prog-f71cb68d
+          scroll, so "Record Payment" stays reachable on a short window. This form
+          grew taller again when the partial-payment balance block was added. */}
       <DialogContent className="max-w-md grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
         <DialogHeader>
           <DialogTitle>Record Payment</DialogTitle>
@@ -955,7 +940,10 @@ function RecordPaymentDialog({
           </DialogDescription>
         </DialogHeader>
 
-<<<<<<< HEAD
+        {/* min-h-0 is required, not cosmetic: a grid row defaults to min-height:auto,
+            which refuses to shrink below its content, so overflow-y-auto here would
+            never actually scroll and the pinned footer would be pushed off-screen.
+            -mx-1 px-1 so focus rings on the inputs aren't clipped by the scroll box. */}
         <div className="-mx-1 min-h-0 space-y-4 overflow-y-auto px-1">
           {/* Only shown once a partial payment exists, so the owner can see WHY the
               amount below is less than the invoice total. Without this the reduced
@@ -984,10 +972,6 @@ function RecordPaymentDialog({
             </div>
           )}
 
-=======
-        {/* -mx-1 px-1 so focus rings on the inputs aren't clipped by the scroll box. */}
-        <div className="-mx-1 space-y-4 overflow-y-auto px-1">
->>>>>>> origin/v0/jadyguidry-prog-f71cb68d
           <div className="grid grid-cols-2 gap-3">
             <div>
               <Label htmlFor="bp-method">Method</Label>
@@ -1380,12 +1364,9 @@ function OneOffPaymentDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-<<<<<<< HEAD
-      {/* Same pinned-footer grid as the invoice form — see the note there. */}
-=======
-      {/* Same pinning as Record Payment: this form is the tallest in the app, so
-          the Save button must stay visible rather than sit below the viewport. */}
->>>>>>> origin/v0/jadyguidry-prog-f71cb68d
+      {/* Same pinned-footer grid as Record Payment — see the note there. This form
+          is the tallest in the app, so the Save button must stay visible rather
+          than sit below the viewport. */}
       <DialogContent className="max-w-md grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
         <DialogHeader>
           <DialogTitle>{isInvoice ? 'Log an Invoice' : 'One-Off Payment'}</DialogTitle>
@@ -1396,11 +1377,9 @@ function OneOffPaymentDialog({
           </DialogDescription>
         </DialogHeader>
 
-<<<<<<< HEAD
+        {/* min-h-0 for the same grid-row reason as Record Payment; -mx-1 px-1 keeps
+            focus rings from being clipped by the scroll box. */}
         <div className="-mx-1 min-h-0 space-y-4 overflow-y-auto px-1">
-=======
-        <div className="-mx-1 space-y-4 overflow-y-auto px-1">
->>>>>>> origin/v0/jadyguidry-prog-f71cb68d
           <div>
             <Label htmlFor="oo-payee">Pay to</Label>
             <Input
