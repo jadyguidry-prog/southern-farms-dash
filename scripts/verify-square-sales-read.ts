@@ -251,5 +251,51 @@ const row = (
   check('partial week sums only real days', w.netSales, 300)
 }
 
+// --- Prior-window coverage (guards the weekly % change) ----------------
+// The dashboard only reports a weekly change when daysCovered ===
+// priorDaysCovered, so these two numbers have to be reported accurately and
+// independently. Without that guard a short current week reads as a collapse.
+{
+  const days = resolveDailyRows(
+    Array.from({ length: 14 }, (_, i) => {
+      const d = new Date(Date.UTC(2026, 7, 1 + i)).toISOString().slice(0, 10)
+      return row(d, 'square_api', 100)
+    }),
+  ).rows
+  const w = computeWeeklySales(days)
+  check('full fortnight: both windows covered equally', w.priorDaysCovered, 7)
+  check('equal coverage means the change is comparable', w.daysCovered === w.priorDaysCovered, true)
+}
+{
+  // A closed day in EACH window (the real Southern Farms pattern: closed Sundays)
+  // still leaves the two windows comparable at 6 days apiece.
+  const dates = [
+    '2026-07-21', '2026-07-22', '2026-07-23', '2026-07-24', '2026-07-25', '2026-07-27',
+    '2026-07-28', '2026-07-29', '2026-07-30', '2026-07-31', '2026-08-01', '2026-08-03',
+  ]
+  const { rows } = resolveDailyRows(dates.map((d) => row(d, 'square_api', 100)))
+  const w = computeWeeklySales(rows)
+  check('matching closed day in both windows: current covered', w.daysCovered, 6)
+  check('matching closed day in both windows: prior covered', w.priorDaysCovered, 6)
+  check('still comparable, so a change may be shown', w.daysCovered === w.priorDaysCovered, true)
+}
+{
+  // Lopsided: a 2-day current week against a full prior week. Sums are correct,
+  // but the windows are NOT comparable — the caller must suppress the percentage.
+  const dates = [
+    '2026-07-21', '2026-07-22', '2026-07-23', '2026-07-24', '2026-07-25', '2026-07-26', '2026-07-27',
+    '2026-08-02', '2026-08-03',
+  ]
+  const { rows } = resolveDailyRows(dates.map((d) => row(d, 'square_api', 100)))
+  const w = computeWeeklySales(rows)
+  check('short current window is reported honestly', w.daysCovered, 2)
+  check('prior window still fully covered', w.priorDaysCovered, 7)
+  check('mismatch is detectable, so no % is claimed', w.daysCovered === w.priorDaysCovered, false)
+}
+{
+  const w = computeWeeklySales([])
+  check('empty prior coverage is 0', w.priorDaysCovered, 0)
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

@@ -254,6 +254,13 @@ export type SquareWeeklySales = {
   latestDate: string | null
   /** Days of actual data in the window (may be fewer than 7). */
   daysCovered: number
+  /**
+   * Days of actual data in the PRIOR window. Exposed so callers can verify the
+   * two windows are like-for-like before reporting a percentage change: a
+   * 3-day current week measured against a 7-day prior week would read as a
+   * collapse that is really just missing days.
+   */
+  priorDaysCovered: number
 }
 
 /**
@@ -275,6 +282,7 @@ export function computeWeeklySales(rows: SquareDailyRow[]): SquareWeeklySales {
       processingFees: 0,
       latestDate: null,
       daysCovered: 0,
+      priorDaysCovered: 0,
     }
   }
 
@@ -326,6 +334,7 @@ export function computeWeeklySales(rows: SquareDailyRow[]): SquareWeeklySales {
     processingFees: round(processingFees),
     latestDate,
     daysCovered,
+    priorDaysCovered: priorDays,
   }
 }
 

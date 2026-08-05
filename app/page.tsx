@@ -211,7 +211,11 @@ export default async function DashboardPage() {
           change={accountsReceivable.change ?? undefined}
           trend={asTrend(accountsReceivable.trend)}
           goodDirection="down"
-          changeLabel="owed to us"
+          // A `hint`, not a `changeLabel`: "owed to us" describes the value on its
+          // own and must show whether or not a month-over-month change exists.
+          // changeLabel is reserved for text that only makes sense beside a
+          // percentage ("vs last month"), which is now gated on having one.
+          hint="owed to us"
         />
         <StatCard
           label="Accounts Payable"
@@ -220,7 +224,7 @@ export default async function DashboardPage() {
           change={accountsPayable.change ?? undefined}
           trend={asTrend(accountsPayable.trend)}
           goodDirection="down"
-          changeLabel="we owe vendors"
+          hint="we owe vendors"
         />
         <StatCard
           label="Current Inventory Value"
@@ -228,7 +232,7 @@ export default async function DashboardPage() {
           icon={Package}
           change={inventoryValue.change ?? undefined}
           trend={asTrend(inventoryValue.trend)}
-          changeLabel="at cost"
+          hint="at cost"
         />
         {/* Actual money in vs out for the last month with a full picture.
             Rendered only when real transactions exist — a month missing its

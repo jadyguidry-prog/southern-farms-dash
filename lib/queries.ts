@@ -914,6 +914,31 @@ export async function getHealthSnapshot() {
       ? squareMonthly.grossSales
       : storedMonthlySales
 
+  // Whether the weekly card is showing the MEASURED Square figure rather than the
+  // stored fallback. The change must only be attached in the former case: a
+  // percentage derived from Square while the value came from a stored KPI would
+  // describe a different number than the one on screen.
+  const weeklyFromSquare =
+    squareWeekly.netSales != null && squareWeekly.netSales > 0
+
+  // Percent change against the prior 7-day window. Suppressed unless BOTH windows
+  // have the same number of days with data — the farm is closed some days, so the
+  // windows are only comparable when their coverage matches. A 3-day current week
+  // against a 7-day prior week would report a collapse that is really just missing
+  // or not-yet-synced days (the same like-for-like rule computeMonthlySales
+  // applies by truncating the prior month). Null means "not comparable", which the
+  // card renders by hiding the badge and its label entirely rather than showing 0%.
+  const weeklyChange =
+    weeklyFromSquare &&
+    squareWeekly.priorNetSales != null &&
+    squareWeekly.priorNetSales > 0 &&
+    squareWeekly.netSales != null &&
+    squareWeekly.daysCovered === squareWeekly.priorDaysCovered
+      ? ((squareWeekly.netSales - squareWeekly.priorNetSales) /
+          squareWeekly.priorNetSales) *
+        100
+      : null
+
   // Percent change against the SAME span of the prior month, so a part-finished
   // month is not reported as a collapse. Null when there is nothing to compare.
   const monthlyChange =
@@ -1095,13 +1120,21 @@ export async function getHealthSnapshot() {
     weeklySales: {
       ...kpi(kpis, 'weeklySales'),
       value: weeklySalesValue,
+      // Overwrite trend/change rather than inheriting them: the stored row's
+      // figures describe a week this value no longer represents. The stored
+      // `kpis` table is empty, so inheriting left this permanently null while the
+      // card still printed "vs prior week" with no number beside it.
+      change: weeklyChange,
+      trend: weeklyChange == null ? null : weeklyChange >= 0 ? 'up' : 'down',
       meta: {
         ...kpi(kpis, 'weeklySales').meta,
-        ...(squareWeekly.netSales != null && squareWeekly.netSales > 0
+        ...(weeklyFromSquare
           ? {
               source: 'Square',
               daysCovered: squareWeekly.daysCovered,
+              priorDaysCovered: squareWeekly.priorDaysCovered,
               throughDate: squareWeekly.latestDate ?? '',
+              priorNetSales: squareWeekly.priorNetSales ?? 0,
             }
           : {}),
       },
