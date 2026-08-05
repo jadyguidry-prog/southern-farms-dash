@@ -338,6 +338,101 @@ export function computeWeeklySales(rows: SquareDailyRow[]): SquareWeeklySales {
   }
 }
 
+export type SquareWeekToDateSales = {
+  /**
+   * Net sales for the CURRENT calendar week so far (Monday through today).
+   * Null when the week has no recorded days yet — never 0, because "the week
+   * just started and nothing has synced" is not the same as "we sold nothing".
+   */
+  netSales: number | null
+  /**
+   * The same weekdays of the prior week. Matched day-by-day against the days
+   * actually covered this week, NOT by calendar span — see computeWeekToDateSales.
+   */
+  priorNetSales: number | null
+  /** Monday of the current week (ISO week start). */
+  weekStart: string
+  /** Latest day inside this week that has data, for an honest "through" label. */
+  throughDate: string | null
+  /** Days of this week with data so far (0-7). */
+  daysCovered: number
+  /** How many of the matched prior-week days had data. */
+  priorDaysCovered: number
+}
+
+/**
+ * Calendar week-to-date Square sales: Monday through today.
+ *
+ * This is deliberately NOT the same window as computeWeeklySales, which measures
+ * a trailing 7 days ending at the last day with data. Both exist because they
+ * answer different questions, and the difference is large enough to mislead: on
+ * Tue 4 Aug 2026 the trailing window read $21,868 while the calendar week held a
+ * single Monday worth $2,572. A card labelled "Weekly Sales" showing the former
+ * invites exactly the question "it's only Tuesday, where did that come from?".
+ *
+ * The prior-week comparison is matched PER DAY, not by calendar span. For every
+ * day covered this week, the day exactly 7 days earlier is added to the prior
+ * sum. This makes the comparison like-for-like by construction — same weekdays,
+ * same count. Summing the prior week's whole Mon-Tue span against a Monday-only
+ * current week would have reported -75% (prior Mon+Tue = $10,450 vs $2,572) when
+ * the truthful same-weekday change was +12.8%. Weekday matters here: Friday
+ * averages 22.3% of the week's sales and Saturday 12.3%, so days are not
+ * interchangeable and a day-count-only guard is not enough.
+ *
+ * `todayISO` is passed in rather than read from the clock so this stays pure and
+ * testable, following the same convention as the growth planner.
+ */
+export function computeWeekToDateSales(
+  rows: SquareDailyRow[],
+  todayISO: string,
+): SquareWeekToDateSales {
+  const dayMs = 86_400_000
+  const iso = (d: Date) => d.toISOString().slice(0, 10)
+
+  const today = new Date(`${todayISO}T00:00:00Z`)
+  // ISO week starts Monday. getUTCDay() is 0=Sun..6=Sat, so shift Sunday to 6.
+  const offsetFromMonday = (today.getUTCDay() + 6) % 7
+  const weekStart = new Date(today.getTime() - offsetFromMonday * dayMs)
+
+  const byDate = new Map<string, number>()
+  for (const r of rows) byDate.set(r.saleDate, r.netSales)
+
+  let netSales = 0
+  let priorNetSales = 0
+  let daysCovered = 0
+  let priorDaysCovered = 0
+  let throughDate: string | null = null
+
+  for (let i = 0; i <= offsetFromMonday; i += 1) {
+    const day = new Date(weekStart.getTime() + i * dayMs)
+    const key = iso(day)
+    const value = byDate.get(key)
+    if (value == null) continue
+
+    netSales += value
+    daysCovered += 1
+    throughDate = key
+
+    // Like-for-like: only the matching weekday from the prior week.
+    const priorValue = byDate.get(iso(new Date(day.getTime() - 7 * dayMs)))
+    if (priorValue != null) {
+      priorNetSales += priorValue
+      priorDaysCovered += 1
+    }
+  }
+
+  const round = (n: number) => Math.round(n * 100) / 100
+
+  return {
+    netSales: daysCovered > 0 ? round(netSales) : null,
+    priorNetSales: priorDaysCovered > 0 ? round(priorNetSales) : null,
+    weekStart: iso(weekStart),
+    throughDate,
+    daysCovered,
+    priorDaysCovered,
+  }
+}
+
 export type SquareMonthlySales = {
   /** Gross sales for the current month, through `latestDate`. */
   grossSales: number | null

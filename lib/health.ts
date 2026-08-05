@@ -140,6 +140,13 @@ export function cashReserveHealth(
 /**
  * Weekly sales measured against the preferred goal and the minimum floor.
  * Green at/above preferred, yellow from minimum up to preferred, red below minimum.
+ *
+ * The caller MUST pass a FULL seven-day window (the trailing week), never a
+ * part-finished calendar week. The goal and floor are whole-week amounts, so a
+ * Monday-only figure would be judged against a $17,000 floor and reported as a
+ * severe shortfall on every Monday and Tuesday. The messages say "last 7 days"
+ * explicitly because the dashboard card next to this shows calendar
+ * week-to-date — two different windows, so each has to name its own.
  */
 export function weeklySalesHealth(
   weeklySales: number,
@@ -161,7 +168,7 @@ export function weeklySalesHealth(
     return {
       status: 'green',
       label: HEALTH_LABEL.green,
-      message: `Weekly sales of ${formatCurrency(weeklySales)} meet your ${formatCurrency(goal)} preferred target.`,
+      message: `Sales over the last 7 days of ${formatCurrency(weeklySales)} meet your ${formatCurrency(goal)} weekly target.`,
       score: 100,
     }
   }
@@ -170,7 +177,7 @@ export function weeklySalesHealth(
     return {
       status: 'yellow',
       label: HEALTH_LABEL.yellow,
-      message: `Weekly sales of ${formatCurrency(weeklySales)} clear your ${formatCurrency(floor)} floor but fall short of the ${formatCurrency(goal)} goal.`,
+      message: `Sales over the last 7 days of ${formatCurrency(weeklySales)} clear your ${formatCurrency(floor)} weekly floor but fall short of the ${formatCurrency(goal)} goal.`,
       score: 70,
     }
   }
@@ -178,7 +185,7 @@ export function weeklySalesHealth(
   return {
     status: 'red',
     label: HEALTH_LABEL.red,
-    message: `Weekly sales of ${formatCurrency(weeklySales)} are below your ${formatCurrency(floor)} minimum target.`,
+    message: `Sales over the last 7 days of ${formatCurrency(weeklySales)} are below your ${formatCurrency(floor)} weekly minimum.`,
     score: 30,
   }
 }

@@ -140,6 +140,23 @@ export default async function DashboardPage() {
         })} · ${monthlySales.meta.daysCovered ?? 0} days of sales`
     : undefined
 
+  // Weekly card provenance. The card reports the CALENDAR week so far, while the
+  // sales health pillar judges a full trailing 7 days against the weekly goal and
+  // floor. Both are named on the card: showing week-to-date beside a pillar verdict
+  // derived from a different window reads as a contradiction unless each window is
+  // stated. `hasData` distinguishes "no day of this week has synced yet" from a
+  // genuine zero, so the card never prints $0 for an unrecorded week.
+  const weeklyHasData = Number(weeklySales.meta.hasData ?? 0) === 1
+  const weeklyDaysCovered = Number(weeklySales.meta.daysCovered ?? 0)
+  const weeklyTrailing = Number(weeklySales.meta.trailingSevenDay ?? 0)
+  // Kept short enough to survive StatCard's `truncate`: the pillar label is
+  // deliberately omitted because it already appears in Business Health below and
+  // on the advisor, whereas the 7-day figure appears nowhere else on this card
+  // and is what reconciles the headline with the weekly floor.
+  const weeklyHint = weeklyHasData
+    ? `${weeklyDaysCovered} ${weeklyDaysCovered === 1 ? 'day' : 'days'} in · 7-day ${formatCurrency(weeklyTrailing, { compact: true })} vs ${formatCurrency(settings.minimum_weekly_sales, { compact: true })} floor`
+    : `Nothing recorded yet · 7-day ${formatCurrency(weeklyTrailing, { compact: true })} vs ${formatCurrency(settings.minimum_weekly_sales, { compact: true })} floor`
+
   const locTotal = lineOfCredit.value
   const locUsed = Number(lineOfCredit.meta.used ?? 0)
   const locAvailable = Number(lineOfCredit.meta.available ?? Math.max(locTotal - locUsed, 0))
@@ -181,13 +198,13 @@ export default async function DashboardPage() {
           hint={`${formatCurrency(locUsed, { compact: true })} drawn of ${formatCurrency(locTotal, { compact: true })}`}
         />
         <StatCard
-          label="Weekly Sales"
-          value={formatCurrency(weeklySales.value)}
+          label="Sales — Week to Date"
+          value={weeklyHasData ? formatCurrency(weeklySales.value) : 'Not recorded yet'}
           icon={TrendingUp}
           change={weeklySales.change ?? undefined}
           trend={asTrend(weeklySales.trend)}
-          changeLabel="vs prior week"
-          hint={`${pillars.sales.label} · goal ${formatCurrency(settings.preferred_weekly_sales)} · floor ${formatCurrency(settings.minimum_weekly_sales)}`}
+          changeLabel="vs same days last week"
+          hint={weeklyHint}
         />
         <StatCard
           label={

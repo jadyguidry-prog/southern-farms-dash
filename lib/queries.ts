@@ -14,6 +14,7 @@ import {
 import {
   getSquareDailySales,
   computeWeeklySales,
+  computeWeekToDateSales,
   computeMonthlySales,
   summarizeDailyRows,
 } from '@/lib/square-sales-service'
@@ -849,7 +850,17 @@ export async function getHealthSnapshot() {
   // Square is the only source that actually measures weekly sales. The stored
   // `weeklySales` KPI was never populated, so without this the sales pillar sat
   // permanently at "unknown".
+  // Trailing 7 days. This remains the basis for the SALES HEALTH PILLAR, because
+  // the goal ($18,000) and floor ($17,000) are whole-week targets: judging a
+  // part-finished week against them would report a Monday-only $2,572 as
+  // catastrophically below a $17,000 floor. A full window is the only
+  // apples-to-apples comparison available.
   const squareWeekly = computeWeeklySales(squareDaily.rows)
+  // Calendar week-to-date drives the DASHBOARD CARD, which is what the owner
+  // reads as "this week". Clock is read once here and passed down, keeping the
+  // computation pure.
+  const todayISO = new Date().toISOString().slice(0, 10)
+  const squareWeekToDate = computeWeekToDateSales(squareDaily.rows, todayISO)
   // Same story for the monthly card: `monthlySales` was never populated either,
   // so the dashboard showed $0 while the Sales page showed real Square figures.
   const squareMonthly = computeMonthlySales(squareDaily.rows)
@@ -914,28 +925,19 @@ export async function getHealthSnapshot() {
       ? squareMonthly.grossSales
       : storedMonthlySales
 
-  // Whether the weekly card is showing the MEASURED Square figure rather than the
-  // stored fallback. The change must only be attached in the former case: a
-  // percentage derived from Square while the value came from a stored KPI would
-  // describe a different number than the one on screen.
-  const weeklyFromSquare =
-    squareWeekly.netSales != null && squareWeekly.netSales > 0
-
-  // Percent change against the prior 7-day window. Suppressed unless BOTH windows
-  // have the same number of days with data — the farm is closed some days, so the
-  // windows are only comparable when their coverage matches. A 3-day current week
-  // against a 7-day prior week would report a collapse that is really just missing
-  // or not-yet-synced days (the same like-for-like rule computeMonthlySales
-  // applies by truncating the prior month). Null means "not comparable", which the
-  // card renders by hiding the badge and its label entirely rather than showing 0%.
-  const weeklyChange =
-    weeklyFromSquare &&
-    squareWeekly.priorNetSales != null &&
-    squareWeekly.priorNetSales > 0 &&
-    squareWeekly.netSales != null &&
-    squareWeekly.daysCovered === squareWeekly.priorDaysCovered
-      ? ((squareWeekly.netSales - squareWeekly.priorNetSales) /
-          squareWeekly.priorNetSales) *
+  // Percent change for the week-to-date card, against the SAME weekdays of the
+  // prior week. computeWeekToDateSales already matches those days one-for-one, so
+  // the remaining guard is that every matched day actually had data
+  // (priorDaysCovered === daysCovered). Null means "not comparable", which the
+  // card renders by hiding the badge and its label rather than showing 0%.
+  const weekToDateChange =
+    squareWeekToDate.netSales != null &&
+    squareWeekToDate.netSales > 0 &&
+    squareWeekToDate.priorNetSales != null &&
+    squareWeekToDate.priorNetSales > 0 &&
+    squareWeekToDate.daysCovered === squareWeekToDate.priorDaysCovered
+      ? ((squareWeekToDate.netSales - squareWeekToDate.priorNetSales) /
+          squareWeekToDate.priorNetSales) *
         100
       : null
 
@@ -1119,24 +1121,33 @@ export async function getHealthSnapshot() {
     },
     weeklySales: {
       ...kpi(kpis, 'weeklySales'),
-      value: weeklySalesValue,
+      // The card now reports the CALENDAR week so far, not the trailing 7 days.
+      // `hasData: 0` (no day of this week recorded yet) is surfaced rather than
+      // collapsed to a 0 value, so the card can say "not recorded yet" instead of
+      // printing $0 and implying a week with no sales.
+      value: squareWeekToDate.netSales ?? 0,
       // Overwrite trend/change rather than inheriting them: the stored row's
       // figures describe a week this value no longer represents. The stored
       // `kpis` table is empty, so inheriting left this permanently null while the
       // card still printed "vs prior week" with no number beside it.
-      change: weeklyChange,
-      trend: weeklyChange == null ? null : weeklyChange >= 0 ? 'up' : 'down',
+      change: weekToDateChange,
+      trend:
+        weekToDateChange == null ? null : weekToDateChange >= 0 ? 'up' : 'down',
       meta: {
         ...kpi(kpis, 'weeklySales').meta,
-        ...(weeklyFromSquare
-          ? {
-              source: 'Square',
-              daysCovered: squareWeekly.daysCovered,
-              priorDaysCovered: squareWeekly.priorDaysCovered,
-              throughDate: squareWeekly.latestDate ?? '',
-              priorNetSales: squareWeekly.priorNetSales ?? 0,
-            }
-          : {}),
+        source: 'Square',
+        hasData: squareWeekToDate.netSales == null ? 0 : 1,
+        weekStart: squareWeekToDate.weekStart,
+        throughDate: squareWeekToDate.throughDate ?? '',
+        daysCovered: squareWeekToDate.daysCovered,
+        priorDaysCovered: squareWeekToDate.priorDaysCovered,
+        priorNetSales: squareWeekToDate.priorNetSales ?? 0,
+        // The trailing-7-day figure the health pillar actually judges, exposed so
+        // the card can state BOTH standards. Without this the card would show
+        // $2,572 beside a pillar saying "On Track" against a $17,000 floor, which
+        // reads as a contradiction rather than two different windows.
+        trailingSevenDay: squareWeekly.netSales ?? 0,
+        trailingThroughDate: squareWeekly.latestDate ?? '',
       },
     },
     monthlySales: {
