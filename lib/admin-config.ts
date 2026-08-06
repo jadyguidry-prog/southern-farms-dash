@@ -49,6 +49,45 @@ export function coerceFieldValue(
   return value
 }
 
+/**
+ * Turn a value read from the database back into the string an <input>/<Select> needs.
+ *
+ * The inverse of coerceFieldValue, and load-bearing for editing: `updateRecord` writes
+ * EVERY field in the table def on every save. Any field the edit form fails to prefill
+ * submits as an empty string and overwrites real data with NULL — a silent wipe of a
+ * column the owner never touched.
+ *
+ * Dates are the specific hazard. A Postgres `date` arrives as '2026-08-26', but a
+ * timestamp arrives as '2026-08-26T00:00:00+00:00', and <input type="date"> renders a
+ * value it cannot parse as BLANK. The field then looks legitimately empty and saving
+ * clears the due date. Truncating at 10 chars keeps both shapes working.
+ */
+export function toInputValue(value: unknown, type: FieldType | string): string {
+  if (value == null) return ''
+  if (type === 'date') {
+    if (value instanceof Date) return value.toISOString().slice(0, 10)
+    return String(value).slice(0, 10)
+  }
+  // Booleans back to the 'true'/'false' strings the select options use.
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  return String(value)
+}
+
+/**
+ * The options a select should offer when editing an existing row.
+ *
+ * If the stored value is not among the configured options, a Radix Select renders its
+ * placeholder — it looks like nothing was ever chosen, and saving writes NULL over a
+ * value that was perfectly valid. Legacy rows and hand-run SQL both produce values that
+ * predate the current option list, so surface the stored value instead of dropping it.
+ */
+export function selectOptionsFor(field: FieldDef, currentValue: unknown): string[] {
+  const options = field.options ?? []
+  const current = toInputValue(currentValue, field.type)
+  if (current === '' || options.includes(current)) return options
+  return [current, ...options]
+}
+
 export type TableDef = {
   key: string
   table: string

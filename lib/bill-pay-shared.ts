@@ -103,6 +103,54 @@ export function validateBillDueBasics(input: {
 }
 
 /**
+ * The fields an edit is allowed to change on an already-recorded payment.
+ *
+ * A separate validator from validatePaymentBasics because an edit is a CORRECTION of a
+ * payment that already exists, so it must not demand fields the original flow supplies
+ * itself (obligation, method, bank account). What it does still enforce is the part that
+ * makes a payment meaningful: a real amount and a real date.
+ */
+export function validatePaymentEdit(input: {
+  amount: number
+  paymentDate: string
+}): string | null {
+  const amount = Number(input.amount)
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return 'Enter a payment amount greater than zero.'
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.paymentDate ?? '')) {
+    return 'Choose a valid payment date.'
+  }
+  return null
+}
+
+/**
+ * Whether an edit breaks the bank match a CLEARED payment was reconciled against.
+ *
+ * A cleared payment is tied to a specific bank transaction, so its amount and date are
+ * not just data — they are the assertion that this record equals that transaction.
+ * Editing either one makes the app disagree with the bank statement, and the owner
+ * asked to be warned rather than blocked.
+ *
+ * Amount and date are the ONLY fields that matter here. Payee, memo, purpose and check
+ * number are descriptive: correcting a misspelled payee does not change which
+ * transaction this is, so warning about it would train the owner to dismiss the warning
+ * that actually counts.
+ */
+export function editBreaksReconciliation(
+  before: { amount: number; paymentDate: string; status: string },
+  after: { amount: number; paymentDate: string },
+): boolean {
+  if (before.status !== 'cleared') return false
+  // Compare in cents. A numeric column round-tripping through a float can differ in the
+  // last bit without anything having actually changed, which would warn on every save.
+  const amountChanged =
+    Math.round(Number(before.amount) * 100) !== Math.round(Number(after.amount) * 100)
+  const dateChanged = String(before.paymentDate).slice(0, 10) !== String(after.paymentDate).slice(0, 10)
+  return amountChanged || dateChanged
+}
+
+/**
  * Cent tolerance when deciding whether a bill is fully covered. Amounts are
  * numeric in Postgres but arrive through JS floats, so an exact `>=` can leave a
  * bill a hundredth of a cent short and permanently "unpaid".

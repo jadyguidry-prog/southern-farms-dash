@@ -17,6 +17,8 @@ import { nextScheduledDueDate, getAchReconcileMatches } from '@/lib/bill-pay-ser
 import {
   validatePaymentBasics,
   validateBillDueBasics,
+  validatePaymentEdit,
+  editBreaksReconciliation,
   resolveOneTimeBillStatus,
 } from '@/lib/bill-pay-shared'
 
@@ -943,4 +945,160 @@ export async function recordCheckNumber(
 
   revalidateAll()
   return { ok: true, paymentId }
+}
+
+export type EditPaymentInput = {
+  paymentId: string
+  amount: number
+  paymentDate: string
+  payeeName?: string
+  checkNumber?: string
+  memo?: string
+  purpose?: string
+}
+
+/**
+ * Correct a payment or check that was already recorded.
+ *
+ * Previously the only way to fix a typo was to void the payment and re-enter it, which
+ * left a void in the audit trail implying the money never moved. A correction and a
+ * cancellation are different events and should not look identical afterwards.
+ *
+ * Two rules make this safe:
+ *
+ * 1. Editing the amount RE-DERIVES the parent bill's status, exactly as voidPayment
+ *    does. Whether a bill is Paid is a function of its payments, so changing a payment
+ *    and leaving the status alone silently desyncs them — correcting a $5,000 check
+ *    down to $500 would leave the bill marked Paid with $4,500 still genuinely owed,
+ *    which is money owed and invisible, the more expensive direction to be wrong in.
+ * 2. A VOID payment is refused. Void means "this money never moved", so there is no
+ *    amount to correct; editing one would assert a specific figure for a payment that
+ *    did not happen.
+ *
+ * Editing a CLEARED payment's amount or date is allowed but flagged: the caller re-sends
+ * with acknowledgedReconciliationBreak once the owner has seen the warning, and the
+ * audit entry records that the bank match was knowingly broken.
+ */
+export async function editPayment(
+  input: EditPaymentInput,
+  acknowledgedReconciliationBreak = false,
+): Promise<ActionResult & { reconciliationWarning?: string }> {
+  if (!input.paymentId) return { ok: false, error: 'No payment was specified.' }
+
+  const basicError = validatePaymentEdit({
+    amount: input.amount,
+    paymentDate: input.paymentDate,
+  })
+  if (basicError) return { ok: false, error: basicError }
+
+  const supabase = await createClient()
+  const actor = await currentActor()
+
+  const { data: existing, error: readErr } = await supabase
+    .from('obligation_payments')
+    .select(
+      'id, status, amount, payment_date, obligation_id, payee_name, check_number, memo, purpose',
+    )
+    .eq('id', input.paymentId)
+    .maybeSingle()
+  if (readErr) return { ok: false, error: readErr.message }
+  if (!existing) return { ok: false, error: 'That payment no longer exists.' }
+
+  // Rule 2 above.
+  if (existing.status === 'void') {
+    return {
+      ok: false,
+      error:
+        'This payment is voided, so there is no payment to correct. Record a new payment instead.',
+    }
+  }
+
+  const breaksReconciliation = editBreaksReconciliation(
+    {
+      amount: Number(existing.amount),
+      paymentDate: String(existing.payment_date),
+      status: String(existing.status),
+    },
+    { amount: Number(input.amount), paymentDate: input.paymentDate },
+  )
+
+  // Returned as a WARNING, not an error, so the UI can show it and let the owner
+  // confirm. This must stop the FIRST attempt (otherwise the warning is never seen)
+  // and allow the second.
+  if (breaksReconciliation && !acknowledgedReconciliationBreak) {
+    return {
+      ok: false,
+      reconciliationWarning:
+        'This check is marked cleared against a bank transaction. Changing its amount or date will make this record disagree with your bank statement.',
+    }
+  }
+
+  const nextAmount = Number(input.amount)
+  const { error: updErr } = await supabase
+    .from('obligation_payments')
+    .update({
+      amount: nextAmount,
+      payment_date: input.paymentDate,
+      // Trimmed to null rather than '', so an emptied field reads as "not recorded"
+      // everywhere, matching how these columns are read elsewhere.
+      payee_name: (input.payeeName ?? '').trim() || null,
+      check_number: (input.checkNumber ?? '').trim() || null,
+      memo: (input.memo ?? '').trim() || null,
+      purpose: (input.purpose ?? '').trim() || null,
+    })
+    .eq('id', input.paymentId)
+  if (updErr) return { ok: false, error: updErr.message }
+
+  // Rule 1 above. Same recurring guard as voidPayment: recurring bills track periods by
+  // due date rather than a Paid status, so routing one through here would close it and
+  // drop it out of the forecast entirely.
+  if (existing.obligation_id) {
+    const { data: ob } = await supabase
+      .from('cash_obligations')
+      .select('id, amount, status, recurring')
+      .eq('id', existing.obligation_id)
+      .maybeSingle()
+    if (ob && !ob.recurring) {
+      const { data: paidRows } = await supabase
+        .from('obligation_payments')
+        .select('amount')
+        .eq('obligation_id', existing.obligation_id)
+        .neq('status', 'void')
+      const paidTotal = (paidRows ?? []).reduce(
+        (sum, r) => sum + (Number(r.amount) || 0),
+        0,
+      )
+      const nextStatus = resolveOneTimeBillStatus(Number(ob.amount), paidTotal)
+      if (nextStatus !== ob.status) {
+        await supabase
+          .from('cash_obligations')
+          .update({ status: nextStatus })
+          .eq('id', existing.obligation_id)
+      }
+    }
+  }
+
+  await supabase.from('obligation_payment_audit').insert({
+    payment_id: input.paymentId,
+    action: 'updated',
+    detail: {
+      edited: true,
+      previousAmount: Number(existing.amount),
+      newAmount: nextAmount,
+      previousPaymentDate: existing.payment_date,
+      newPaymentDate: input.paymentDate,
+      previousPayeeName: existing.payee_name,
+      previousCheckNumber: existing.check_number,
+      previousMemo: existing.memo,
+      previousPurpose: existing.purpose,
+      // Recorded so a later reconciliation mismatch is explainable rather than
+      // looking like corrupted data.
+      reconciliationBreakAcknowledged: breaksReconciliation || undefined,
+      statusAtEdit: existing.status,
+    },
+    created_by: actor,
+  })
+
+  revalidateAll()
+  return { ok: true, paymentId: input.paymentId }
 }

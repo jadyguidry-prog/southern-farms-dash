@@ -15,6 +15,7 @@ import {
   Hash,
   FileText,
   Undo2,
+  Pencil,
 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -64,6 +65,7 @@ import {
   confirmClearWithMatch,
   reconcileAchFromBank,
 } from '@/app/bill-pay/actions'
+import { EditPaymentDialog } from '@/components/bill-pay/edit-payment-dialog'
 
 type Obligation = {
   id: string
@@ -504,6 +506,7 @@ function OutstandingRow({
   const [confirmConvert, setConfirmConvert] = useState(false)
   const [numberOpen, setNumberOpen] = useState(false)
   const [draftNumber, setDraftNumber] = useState('')
+  const [editOpen, setEditOpen] = useState(false)
 
   // Shared with the server so the label can never disagree with the validation.
   // Covers an ACH awaiting its draft AND a check the owner hasn't written yet.
@@ -594,6 +597,19 @@ function OutstandingRow({
           >
             <Check className="size-4" aria-hidden="true" />
             Cleared
+          </Button>
+          {/* Correcting a typo used to require voiding and re-entering, which left a
+              void in the audit trail implying the money never moved. */}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-11"
+            onClick={() => setEditOpen(true)}
+            disabled={pending}
+            title="Edit payment"
+            aria-label={`Edit payment to ${label}`}
+          >
+            <Pencil className="size-4" aria-hidden="true" />
           </Button>
           {/* For the case this panel can't distinguish on its own: the entry was
               logged as a payment but the money never left. Icon-only to keep the
@@ -727,6 +743,15 @@ function OutstandingRow({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {editOpen && (
+        <EditPaymentDialog
+          payment={payment}
+          label={label}
+          open
+          onOpenChange={setEditOpen}
+        />
+      )}
     </Card>
   )
 }
@@ -747,6 +772,7 @@ function ClearedRow({
   label: string
 }) {
   const [pending, startTransition] = useTransition()
+  const [editOpen, setEditOpen] = useState(false)
 
   const onUnclear = () => {
     startTransition(async () => {
@@ -772,17 +798,42 @@ function ClearedRow({
             {payment.purpose ? ` · ${payment.purpose}` : ''}
           </p>
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-11 shrink-0"
-          onClick={onUnclear}
-          disabled={pending}
-        >
-          <Undo2 className="size-4" aria-hidden="true" />
-          Not cleared
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {/* Allowed on a cleared payment, but the server refuses the first save when
+              the amount or date changes and returns a warning to confirm — that edit
+              breaks the bank match this payment was reconciled against. */}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-11"
+            onClick={() => setEditOpen(true)}
+            disabled={pending}
+            title="Edit payment"
+            aria-label={`Edit cleared payment to ${label}`}
+          >
+            <Pencil className="size-4" aria-hidden="true" />
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-11"
+            onClick={onUnclear}
+            disabled={pending}
+          >
+            <Undo2 className="size-4" aria-hidden="true" />
+            Not cleared
+          </Button>
+        </div>
       </CardContent>
+
+      {editOpen && (
+        <EditPaymentDialog
+          payment={payment}
+          label={label}
+          open
+          onOpenChange={setEditOpen}
+        />
+      )}
     </Card>
   )
 }
