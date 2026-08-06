@@ -545,6 +545,12 @@ export async function getCashObligations() {
     // True when the invoice carries no due date, so the date is the owner's own payment
     // plan. Such a bill must never be reported as overdue — there is no deadline to miss.
     selfScheduled: Boolean(o.self_scheduled),
+    // Invoice date + net terms, when both are known, DERIVE the due date (see
+    // resolveNextDueDate). Kept as null rather than '' / 0 so "no terms recorded" stays
+    // distinguishable from "Due on Receipt", which is a real 0-day deadline.
+    invoiceDate: o.invoice_date ?? null,
+    paymentTermsDays:
+      o.payment_terms_days == null ? null : Number(o.payment_terms_days),
     paymentMethod: o.payment_method ?? '',
     active: o.active ?? true,
     status: o.status ?? 'Pending',

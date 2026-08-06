@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dialog'
 import { createVendor, updateVendor } from '@/app/vendors/actions'
 import type { DirectoryVendor } from '@/lib/queries'
+import { PAYMENT_TERM_LABELS } from '@/lib/payment-terms'
 
 export const VENDOR_TYPES = [
   'Supplier',
@@ -26,14 +27,12 @@ export const VENDOR_TYPES = [
   'Other',
 ]
 
-export const PAYMENT_TERMS = [
-  'Due on Receipt',
-  'Net 15',
-  'Net 30',
-  'Net 45',
-  'Net 60',
-  'Prepaid',
-]
+/**
+ * Re-exported from lib/payment-terms so this dropdown and the numeric mapping used to
+ * DERIVE due dates can never disagree. When the list was hardcoded here, 'Net 21' simply
+ * did not exist as an option, and any label added here would have had no number behind it.
+ */
+export const PAYMENT_TERMS = PAYMENT_TERM_LABELS
 
 export const PAYMENT_METHODS = [
   'ACH',

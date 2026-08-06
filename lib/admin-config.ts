@@ -383,6 +383,22 @@ export const ADMIN_TABLES: TableDef[] = [
       },
       { name: 'vendor_name', label: 'Payee / Vendor', type: 'text' },
       { name: 'amount', label: 'Amount', type: 'number', required: true },
+      // Invoice date + terms DERIVE the due date (see resolveNextDueDate in health.ts).
+      // Fill both and the Due Date below is computed rather than trusted.
+      {
+        name: 'invoice_date',
+        label: 'Invoice Date (date the vendor billed us)',
+        type: 'date',
+      },
+      {
+        name: 'payment_terms_days',
+        label: 'Payment Terms in Days (21 = Net 21)',
+        type: 'number',
+        // MANDATORY here. Without it a blank saves as 0, and 0 means "Due on Receipt",
+        // so leaving terms empty would mark the bill due the day it was invoiced and
+        // report it overdue. NULL correctly means "no terms recorded".
+        blankIsNull: true,
+      },
       { name: 'due_date', label: 'Due Date', type: 'date', required: true },
       {
         name: 'frequency',
@@ -392,6 +408,15 @@ export const ADMIN_TABLES: TableDef[] = [
         options: ['One-time', 'Weekly', 'Biweekly', 'Monthly', 'Quarterly', 'Annually'],
       },
       { name: 'next_due_date', label: 'Next Due Date', type: 'date' },
+      // Previously unreachable: the column and the read path both existed, but there was
+      // no control, so a bill with no vendor deadline could not be marked as such and was
+      // reported "overdue" against a date the owner had picked themselves.
+      {
+        name: 'self_scheduled',
+        label: 'No vendor due date? (own payment plan - never overdue)',
+        type: 'select',
+        options: ['false', 'true'],
+      },
       {
         name: 'active',
         label: 'Active Status',

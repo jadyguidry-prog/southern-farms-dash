@@ -1,5 +1,6 @@
 import type { BusinessSettings } from '@/lib/queries'
 import { formatCurrency, formatPercent } from '@/lib/data'
+import { deriveDueDate } from '@/lib/payment-terms'
 
 /**
  * Shared health-scoring logic. Every threshold comes from the owner's stored
@@ -1702,9 +1703,34 @@ export function addInterval(date: Date, frequency: string): Date {
  * the past. Returns an ISO date string, or '' when nothing is scheduled.
  */
 export function resolveNextDueDate(
-  o: { dueDate: string; nextDueDate?: string; recurring: boolean; frequency: string },
+  o: {
+    dueDate: string
+    nextDueDate?: string
+    recurring: boolean
+    frequency: string
+    /** Date the vendor issued the invoice, when known. */
+    invoiceDate?: string | null
+    /** Net terms in days for THIS invoice (21 for Net 21). */
+    paymentTermsDays?: number | null
+  },
   today: Date,
 ): string {
+  // Terms win when they can actually be computed: invoice date + net days IS the deadline
+  // the vendor set, so it outranks any hand-typed date, which is usually a placeholder.
+  //
+  // `deriveDueDate` returns '' unless BOTH parts are present, so a bill with no invoice
+  // date (or a Prepaid vendor with no numeric term) falls through to the old behaviour
+  // untouched. This is what keeps the change additive for every existing row.
+  const derived = deriveDueDate(o.invoiceDate, o.paymentTermsDays)
+  if (derived) {
+    // Deliberately NOT rolled forward by frequency. A net-21 invoice is a one-time
+    // deadline attached to one delivery — even from a vendor billed many times a month.
+    // Rolling it would invent a due date for an invoice that does not exist yet, and for
+    // a vendor delivering weekly it would collapse many separate invoices into one
+    // recurring phantom. Each delivery is its own record with its own clock.
+    return derived
+  }
+
   // An explicit next_due_date is the authority for WHICH DAY of the cycle this bill
   // falls on, but it is not frozen in time. Nothing in the app advances that column, so
   // returning it unconditionally pinned recurring bills in the past permanently: they
