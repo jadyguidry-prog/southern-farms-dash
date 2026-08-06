@@ -22,6 +22,7 @@ import { getCashFlowInsight } from '@/lib/cash-flow-service'
 import { getGrowthPlannerSnapshot } from '@/lib/growth-planner-service'
 import { getSavedProposalReviews } from '@/lib/growth-proposal-review'
 import { getCardExposure } from '@/lib/card-exposure-service'
+import { CARD_ACCOUNT_TYPE, CREDIT_ACCOUNT_TYPES } from '@/lib/card-safety'
 import { getBillReminders } from '@/lib/bill-reminders-service'
 import type { BillReminderResult } from '@/lib/bill-reminders'
 import type { BillsInsightInput } from '@/lib/health'
@@ -613,8 +614,11 @@ export type CashDebtSummary = Awaited<ReturnType<typeof getCashDebtSummary>>
 
 // Account types that count as immediately spendable cash.
 const CASH_ON_HAND_TYPES = ['Checking', 'Savings', 'Cash']
-// Account types that carry a revolving credit line.
-const CREDIT_LINE_TYPES = ['Line of Credit', 'Credit Card']
+// Account types that carry a revolving credit line. Sourced from card-safety so
+// there is one definition of "this account is borrowed money" in the codebase.
+const CREDIT_LINE_TYPES: readonly string[] = CREDIT_ACCOUNT_TYPES
+// The two credit facilities, kept apart where they must not be averaged together.
+const LINE_OF_CREDIT_TYPE = 'Line of Credit'
 
 // Days from today (inclusive) that a dated item falls within.
 function daysUntil(dateStr: string, today: Date) {
@@ -649,12 +653,35 @@ export const getCashDebtSummary = cache(async () => {
     .filter((a) => CREDIT_LINE_TYPES.includes(a.accountType))
     .reduce((s, a) => s + a.availableCredit, 0)
 
-  // Total approved credit, and how much of it is currently drawn.
+  // Total approved credit, and how much of it is currently drawn. This blends the
+  // revolving line WITH credit cards on purpose: both are borrowing capacity, and
+  // `operatingLiquidity` / the net-position math below need the combined figure.
   const creditLines = accounts.filter((a) =>
     CREDIT_LINE_TYPES.includes(a.accountType),
   )
   const creditLimitTotal = creditLines.reduce((s, a) => s + a.creditLimit, 0)
   const creditDrawn = creditLines.reduce((s, a) => s + a.currentBalance, 0)
+
+  // ---- Line of credit vs. cards, kept separate --------------------------
+  // The blended totals above are right for liquidity but WRONG as a headline
+  // labelled "Line of Credit": they fold the Amex balance and its limit into a
+  // figure the owner reads as the state of the revolving line, so a card run-up
+  // silently moves a number about the credit line. The two facilities also have
+  // different terms and consequences, so a utilization percentage across both
+  // answers no real question. The Growth Planner already draws this same
+  // distinction (see `locAccounts` in growth-planner-service) -- these fields let
+  // the Dashboard state the line and the cards separately instead of averaging
+  // them. Card exposure is reported in depth by the Credit Card Exposure panel.
+  const locAccounts = accounts.filter((a) => a.accountType === LINE_OF_CREDIT_TYPE)
+  const locLimitTotal = locAccounts.reduce((s, a) => s + a.creditLimit, 0)
+  const locDrawn = locAccounts.reduce((s, a) => s + a.currentBalance, 0)
+  const locAvailable = locAccounts.reduce((s, a) => s + a.availableCredit, 0)
+  const hasLineOfCredit = locAccounts.length > 0
+
+  const cardAccounts = accounts.filter((a) => a.accountType === CARD_ACCOUNT_TYPE)
+  const cardLimitTotal = cardAccounts.reduce((s, a) => s + a.creditLimit, 0)
+  const cardDrawn = cardAccounts.reduce((s, a) => s + a.currentBalance, 0)
+  const hasCards = cardAccounts.length > 0
 
   // Outstanding checks: money already promised (a check is written) but not yet
   // gone from the bank, so cashOnHand still includes it. `cashAvailable` is the
@@ -777,6 +804,15 @@ export const getCashDebtSummary = cache(async () => {
     availableCredit,
     creditLimitTotal,
     creditDrawn,
+    // Revolving line only — what the Dashboard's line-of-credit tiles report.
+    locLimitTotal,
+    locDrawn,
+    locAvailable,
+    hasLineOfCredit,
+    // Cards only, so card debt is never folded into a line-of-credit figure.
+    cardLimitTotal,
+    cardDrawn,
+    hasCards,
     operatingLiquidity,
     totalCash,
     totalAvailableCredit,
@@ -949,9 +985,14 @@ export async function getHealthSnapshot() {
   const kpis: Kpis = {
     ...rawKpis,
     cashOnHand: derive('cashOnHand', summary.cashOnHand),
-    lineOfCredit: derive('lineOfCredit', summary.creditLimitTotal, {
-      used: summary.creditDrawn,
-      available: summary.availableCredit,
+    // Revolving line ONLY. This previously used the blended credit totals, so the
+    // Amex limit and balance were reported as line-of-credit utilization: the
+    // Dashboard read "42% of your line drawn" when the line itself was at 43% of a
+    // $35k limit and the rest was card debt. Two facilities averaged into one
+    // percentage is not a number the owner can act on.
+    lineOfCredit: derive('lineOfCredit', summary.locLimitTotal, {
+      used: summary.locDrawn,
+      available: summary.locAvailable,
     }),
     accountsReceivable: derive('accountsReceivable', summary.totalReceivable),
     accountsPayable: derive('accountsPayable', summary.totalObligations),

@@ -154,11 +154,14 @@ export default async function CashDebtPage() {
           icon={Wallet}
           hint="Checking + Savings + Cash"
         />
+        {/* Deliberately the BLENDED figure — undrawn line plus card headroom — because
+            operating liquidity below is built from it. The hint names both facilities
+            so this is not read as the state of the revolving line alone. */}
         <StatCard
           label="Available Credit"
           value={formatCurrency(summary.availableCredit)}
           icon={CreditCard}
-          hint="Undrawn lines of credit"
+          hint={`Undrawn line ${formatCurrency(summary.locAvailable, { compact: true })} + card headroom`}
         />
         <StatCard
           label="Operating Liquidity"

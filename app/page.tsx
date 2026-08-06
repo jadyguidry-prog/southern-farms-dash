@@ -209,10 +209,15 @@ export default async function DashboardPage() {
     ? `${weeklyDaysCovered} ${weeklyDaysCovered === 1 ? 'day' : 'days'} in · 7-day ${formatCurrency(weeklyTrailing, { compact: true })} vs ${formatCurrency(settings.minimum_weekly_sales, { compact: true })} floor`
     : `Nothing recorded yet · 7-day ${formatCurrency(weeklyTrailing, { compact: true })} vs ${formatCurrency(settings.minimum_weekly_sales, { compact: true })} floor`
 
+  // Revolving line of credit only. Credit cards are reported by the Credit Card
+  // Exposure panel below, NOT blended in here — see the `lineOfCredit` KPI.
   const locTotal = lineOfCredit.value
   const locUsed = Number(lineOfCredit.meta.used ?? 0)
   const locAvailable = Number(lineOfCredit.meta.available ?? Math.max(locTotal - locUsed, 0))
-  const creditUsedPct = locTotal ? Math.round((locUsed / locTotal) * 100) : 0
+  // No approved limit means no line is set up, which is not the same as a line
+  // sitting at 0% drawn. Percentages are suppressed rather than shown as a real 0.
+  const hasLoc = locTotal > 0
+  const creditUsedPct = hasLoc ? Math.round((locUsed / locTotal) * 100) : null
   // Owner-defined thresholds from Admin → Business Settings.
   const payrollTarget = settings.target_payroll_pct
   const payrollWarning = settings.warning_payroll_pct
@@ -256,9 +261,13 @@ export default async function DashboardPage() {
         )}
         <StatCard
           label="Available Line of Credit"
-          value={formatCurrency(locAvailable)}
+          value={hasLoc ? formatCurrency(locAvailable) : 'Not set up'}
           icon={CreditCard}
-          hint={`${formatCurrency(locUsed, { compact: true })} drawn of ${formatCurrency(locTotal, { compact: true })}`}
+          hint={
+            hasLoc
+              ? `${formatCurrency(locUsed, { compact: true })} drawn of ${formatCurrency(locTotal, { compact: true })} · cards shown separately`
+              : 'No line of credit is set up'
+          }
         />
         <StatCard
           label="Sales — Week to Date"
@@ -338,18 +347,26 @@ export default async function DashboardPage() {
                   Line of Credit Utilization
                 </p>
                 <p className="mt-2 font-mono text-2xl font-bold text-foreground">
-                  {creditUsedPct}%
+                  {creditUsedPct === null ? 'Not set up' : `${creditUsedPct}%`}
                 </p>
               </div>
               <div className="flex size-10 items-center justify-center rounded-lg bg-secondary text-primary">
                 <CreditCard className="size-5" aria-hidden="true" />
               </div>
             </div>
-            <Progress value={creditUsedPct} className="mt-4" />
+            <Progress value={creditUsedPct ?? 0} className="mt-4" />
+            {/* States its scope explicitly. This percentage used to include the Amex
+                limit and balance, so card spending moved a figure labelled "line of
+                credit" — the note keeps the two facilities distinguishable now that
+                only the line is counted. */}
             <p className="mt-2 text-xs text-muted-foreground">
-              {creditUsedPct <= 50
-                ? 'Healthy — at or below the 50% target'
-                : `Above the 50% target — ${formatCurrency(locUsed)} drawn`}
+              {creditUsedPct === null
+                ? 'No line of credit is set up'
+                : `${
+                    creditUsedPct <= 50
+                      ? 'Healthy — at or below the 50% target'
+                      : `Above the 50% target — ${formatCurrency(locUsed)} drawn`
+                  } · revolving line only, credit cards below`}
             </p>
           </CardContent>
         </Card>
