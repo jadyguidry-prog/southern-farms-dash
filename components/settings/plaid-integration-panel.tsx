@@ -77,6 +77,24 @@ const IFRAME_MESSAGE =
   'this page is running inside an embedded preview, which Plaid does not support. Open it in its own browser tab and connect again.'
 
 /**
+ * Plain-English remedies for Plaid exit codes that are *account configuration*
+ * problems rather than anything wrong in this app — raw codes give the owner no
+ * idea that the fix is a Plaid Dashboard setting.
+ */
+const EXIT_REMEDIES: Record<string, string> = {
+  // Since 2024-10-31 every new US/Canada account must pick a Data Transparency
+  // Messaging use case before Link works in Production. Nothing to change here.
+  INVALID_LINK_CUSTOMIZATION:
+    'fix in Plaid Dashboard → Link → Link Customization: under "Data Transparency Messaging" pick a use case, then Publish. Required for Production; not an app problem.',
+  INVALID_LINK_TOKEN:
+    'the token expired or was already used — close this and click Connect again.',
+  INVALID_API_KEYS:
+    'PLAID_SECRET does not match PLAID_ENV. Check both in the project environment variables.',
+  INSTITUTION_NOT_RESPONDING:
+    "the bank's own connection is down right now. Nothing to fix here — try again later.",
+}
+
+/**
  * Mounts Plaid Link for exactly one token and opens it exactly once.
  *
  * This is deliberately a separate component. Previously `usePlaidLink` lived in the
@@ -144,6 +162,9 @@ function PlaidLinkLauncher({
         parts.push(`(${err.error_code})`)
       }
       if (metadata?.status) parts.push(`— closed at: ${metadata.status}`)
+
+      const remedy = err.error_code ? EXIT_REMEDIES[err.error_code] : undefined
+      if (remedy) parts.push(`· ${remedy}`)
 
       const trace = [
         metadata?.request_id ? `request ${metadata.request_id}` : null,
