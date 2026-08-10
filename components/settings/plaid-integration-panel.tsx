@@ -82,10 +82,13 @@ const IFRAME_MESSAGE =
  * idea that the fix is a Plaid Dashboard setting.
  */
 const EXIT_REMEDIES: Record<string, string> = {
-  // Since 2024-10-31 every new US/Canada account must pick a Data Transparency
-  // Messaging use case before Link works in Production. Nothing to change here.
+  // Since 2024-10-31 every new US/Canada account must pick a use case before Link
+  // works in Production. The dashboard row is labelled "Consent" — NOT "Data
+  // Transparency Messaging", which is the name in Plaid's docs but appears nowhere
+  // in the UI. Verified 2026-08-10 that Link's FIRST pane opens fine without it, so
+  // this fires later, when Link renders the consent pane after institution select.
   INVALID_LINK_CUSTOMIZATION:
-    'fix in Plaid Dashboard → Link → Link Customization: under "Data Transparency Messaging" pick a use case, then Publish. Required for Production; not an app problem.',
+    'fix in Plaid Dashboard → Link → Link Customization → the "Consent" row: pick a use case, then "Publish changes". Required for Production; not an app problem.',
   INVALID_LINK_TOKEN:
     'the token expired or was already used — close this and click Connect again.',
   INVALID_API_KEYS:
