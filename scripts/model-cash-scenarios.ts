@@ -24,6 +24,7 @@ import {
   assembleCapacity,
   formatDate,
   parseDate,
+  weekStart,
   type LedgerRow,
 } from '../lib/spending-capacity-service'
 
@@ -250,6 +251,74 @@ function payCard(input: Inputs, match: RegExp, amount: number): Inputs {
   }
 }
 
+/**
+ * Model a SUSTAINED lift in weekly takings.
+ *
+ * Adds `perWeek` of extra receipts to every complete week already in the ledger. Because
+ * median(x + c) === median(x) + c and the same holds for the lower quartile, this raises the
+ * typical AND cautious weekly inflow by exactly `perWeek` — which is what "my sales run
+ * higher from now on" actually means to the forecast.
+ *
+ * Deliberately dated inside weeks the ledger already covers, so the partial-week detection
+ * added earlier sees no new coverage spans and the week count cannot change.
+ *
+ * This is extra CASH COLLECTED, not extra sales rung up. The conversion between the two is
+ * the owner's gross margin, which is not quotable in this business, so the two are reported
+ * separately and never silently equated.
+ */
+function addWeeklyReceipts(input: Inputs, perWeek: number): Inputs {
+  if (perWeek === 0) return input
+  const account = String(
+    (input.accounts as { account_name?: string; account_type?: string }[]).find(
+      (a) => !/credit|card|line of credit/i.test(String(a.account_type ?? '')),
+    )?.account_name ?? '',
+  )
+  if (!account) throw new Error('no operating account found — refusing to model blind')
+
+  const weeks = new Set(
+    input.rows
+      .filter((r) => r.accountName === account && r.date)
+      .map((r) => weekStart(r.date)),
+  )
+
+  const synthetic: LedgerRow[] = [...weeks].map((wk) => ({
+    // Wednesday of each covered week: comfortably inside the span, never on an edge.
+    date: addDays(wk, 2),
+    description: 'SCENARIO extra receipts',
+    amount: perWeek,
+    type: 'income',
+    accountName: account,
+  }))
+
+  return { ...input, rows: [...input.rows, ...synthetic] }
+}
+
+/** Model a lump sum collected today, by raising the operating account's balance. */
+function injectCash(input: Inputs, amount: number): Inputs {
+  let done = false
+  return {
+    ...input,
+    accounts: (input.accounts as { account_type?: string; current_balance?: number }[]).map(
+      (a) => {
+        if (done || /credit|card|line of credit/i.test(String(a.account_type ?? ''))) return a
+        done = true
+        return { ...a, current_balance: Number(a.current_balance ?? 0) + amount }
+      },
+    ) as never,
+  }
+}
+
+/** Smallest value on `grid` where the trough clears `floor`, or null if none does. */
+function solve(
+  make: (v: number) => Inputs,
+  pick: (r: ReturnType<typeof run>['result']) => number,
+  floor: number,
+  grid: number[],
+) {
+  for (const v of grid) if (pick(run(make(v)).result) >= floor) return v
+  return null
+}
+
 async function main() {
   const base = await loadInputs()
   const baseline = run(base)
@@ -415,6 +484,145 @@ async function main() {
         (best === null
           ? 'NO payment amount works — even paying $0 on the card leaves a shortfall'
           : `pay at most ${usd(best)} of the ${usd(9_948)} statement`),
+    )
+  }
+
+  // ---- Can extra sales close this instead? ----
+  const troughDate = baseline.result.lowestBalanceDate
+  const daysToTrough = Math.round(
+    (parseDate(troughDate).getTime() - parseDate(base.today).getTime()) / 86_400_000,
+  )
+  const weeksToTrough = daysToTrough / 7
+
+  console.log()
+  console.log('='.repeat(78))
+  console.log('CAN EXTRA SALES CLOSE IT? — solved, not guessed')
+  console.log('='.repeat(78))
+  console.log(
+    `  Trough is ${troughDate}: ${daysToTrough} days out, ~${weeksToTrough.toFixed(1)} weeks of trading.`,
+  )
+  console.log()
+
+  // Prove the lift model does what it claims before quoting any "+$X/week" answer: a lift of
+  // L must raise the typical AND cautious weekly inflow by exactly L, and must not change how
+  // many weeks are observed. Quantiles are shift-invariant, so anything else means the
+  // synthetic rows landed somewhere they shouldn't have.
+  {
+    const L = 1_000
+    const lifted = run(addWeeklyReceipts(base, L)).estimate
+    const failures = [
+      ['typical inflow', lifted.typicalInflow, baseline.estimate.typicalInflow + L],
+      ['cautious inflow', lifted.cautiousInflow, baseline.estimate.cautiousInflow + L],
+      ['weeks observed', lifted.weeksObserved, baseline.estimate.weeksObserved],
+      ['typical outflow', lifted.typicalOutflow, baseline.estimate.typicalOutflow],
+    ].filter(([, got, want]) => Math.abs(Number(got) - Number(want)) > 1)
+
+    if (failures.length > 0) {
+      for (const [label, got, want] of failures) {
+        console.log(`  LIFT MODEL BROKEN: ${label} is ${got}, expected ${want}`)
+      }
+      throw new Error('the sustained-lift model is not a clean shift — refusing to quote it')
+    }
+    console.log(
+      `  (lift model verified: +${usd(L)}/wk moves typical and cautious inflow by exactly ${usd(L)},` +
+        ' leaves outflow and week count untouched)',
+    )
+  }
+
+  const weekGrid = Array.from({ length: 121 }, (_, i) => i * 250)
+  const lumpGrid = Array.from({ length: 141 }, (_, i) => i * 250)
+
+  console.log('  SUSTAINED lift — extra cash collected EVERY week from now on:')
+  for (const [label, pick] of [
+    ['expected week', (r: ReturnType<typeof run>['result']) => r.typicalLowestBalance],
+    ['bad week', (r: ReturnType<typeof run>['result']) => r.lowestBalance],
+  ] as const) {
+    for (const [floorLabel, floor] of [
+      ['stay solvent ($0)', 0],
+      [`keep reserve (${usd(base.minCashReserve)})`, base.minCashReserve],
+    ] as const) {
+      const need = solve((v) => addWeeklyReceipts(base, v), pick, floor, weekGrid)
+      console.log(
+        '    ' +
+          label.padEnd(15) +
+          floorLabel.padEnd(26) +
+          (need === null
+            ? 'not reachable within +$30,000/wk'
+            : `+${usd(need)}/week  (about ${usd(need * weeksToTrough)} total before ${troughDate})`),
+      )
+    }
+  }
+
+  console.log()
+  console.log('  ONE-OFF collection — a single lump sum banked today:')
+  for (const [label, pick] of [
+    ['expected week', (r: ReturnType<typeof run>['result']) => r.typicalLowestBalance],
+    ['bad week', (r: ReturnType<typeof run>['result']) => r.lowestBalance],
+  ] as const) {
+    for (const [floorLabel, floor] of [
+      ['stay solvent ($0)', 0],
+      [`keep reserve (${usd(base.minCashReserve)})`, base.minCashReserve],
+    ] as const) {
+      const need = solve((v) => injectCash(base, v), pick, floor, lumpGrid)
+      console.log(
+        '    ' +
+          label.padEnd(15) +
+          floorLabel.padEnd(26) +
+          (need === null ? 'not reachable within $35,000' : usd(need) + ' collected now'),
+      )
+    }
+  }
+
+  // The realistic ask: sales lift needed ON TOP OF the bill levers, which is the combination
+  // the owner would actually run. Quoting a sales target that ignores the levers overstates
+  // how much trading has to change.
+  console.log()
+  console.log('  COMBINED with scenario H (Amex held to $3,000 + all Sysco +21d):')
+  const withLevers = shift(payCard(base, /amex|american express/i, 3_000), /sysco/i, 21)
+  for (const [label, pick] of [
+    ['expected week', (r: ReturnType<typeof run>['result']) => r.typicalLowestBalance],
+    ['bad week', (r: ReturnType<typeof run>['result']) => r.lowestBalance],
+  ] as const) {
+    for (const [floorLabel, floor] of [
+      ['stay solvent ($0)', 0],
+      [`keep reserve (${usd(base.minCashReserve)})`, base.minCashReserve],
+    ] as const) {
+      const need = solve((v) => addWeeklyReceipts(withLevers, v), pick, floor, weekGrid)
+      console.log(
+        '    ' +
+          label.padEnd(15) +
+          floorLabel.padEnd(26) +
+          (need === null
+            ? 'not reachable within +$30,000/wk'
+            : need === 0
+              ? 'already clear — no extra sales needed'
+              : `+${usd(need)}/week of extra cash`),
+      )
+    }
+  }
+
+  // Cash collected is not sales rung up. Margin is not quotable in this business, so the
+  // conversion is shown as a range instead of being asserted as one number.
+  const needSolvent = solve(
+    (v) => addWeeklyReceipts(base, v),
+    (r) => r.typicalLowestBalance,
+    0,
+    weekGrid,
+  )
+  if (needSolvent !== null && needSolvent > 0) {
+    console.log()
+    console.log('  What that lift means in SALES (cash collected / gross margin):')
+    console.log(
+      `    to net +${usd(needSolvent)}/week of cash you must ring up roughly:`,
+    )
+    for (const margin of [0.2, 0.3, 0.4, 0.5, 1]) {
+      const label = margin === 1 ? 'pure margin, no added cost' : `at ${Math.round(margin * 100)}% margin`
+      console.log(
+        '      ' + label.padEnd(30) + '+' + usd(needSolvent / margin) + '/week of extra sales',
+      )
+    }
+    console.log(
+      `    for scale: typical weekly takings are ${usd(baseline.estimate.typicalInflow)}.`,
     )
   }
 
