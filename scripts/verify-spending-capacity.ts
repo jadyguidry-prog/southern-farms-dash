@@ -301,6 +301,53 @@ function est(o: Partial<FlowEstimate> = {}): FlowEstimate {
   )
   check('no income is expected on Saturday', r.days[5]?.cautiousIn, 0)
   check('no income is expected on Sunday', r.days[6]?.cautiousIn, 0)
+
+  // The typical low point is CONTEXT ONLY. If it ever starts driving the headline or the
+  // breach flag, the panel stops being safe in a bad week — which is the entire reason the
+  // cautious basis exists.
+  ok(
+    'the typical low point is never below the cautious one',
+    r.typicalLowestBalance >= r.lowestBalance,
+  )
+  ok(
+    'the typical low point matches a day actually projected',
+    r.days.some(
+      (d) =>
+        d.date === r.typicalLowestBalanceDate && d.typicalBalance === r.typicalLowestBalance,
+    ),
+  )
+}
+
+{
+  // The two scenarios can bottom out on DIFFERENT days. Reading the typical balance off the
+  // cautious trough's date would print a figure that appears nowhere in the projection, so
+  // each date is tracked independently.
+  const r = deriveSpendingCapacity({
+    cashOnHand: 30_000,
+    minCashReserve: 15_000,
+    today: '2026-08-03',
+    estimate: est({ typicalInflow: 21_000, cautiousInflow: 7_000 }),
+    shares: evenShares,
+    datedOutflows: [{ date: '2026-08-07', amount: 12_000, label: 'Vendor draft' }],
+    baselineWeeklyOutflow: 14_000,
+    horizonDays: 7,
+    nearTermDays: 7,
+  })
+  ok(
+    'each scenario reports its own trough date and value',
+    r.days.some(
+      (d) =>
+        d.date === r.typicalLowestBalanceDate && d.typicalBalance === r.typicalLowestBalance,
+    ) &&
+      r.days.some((d) => d.date === r.lowestBalanceDate && d.cautiousBalance === r.lowestBalance),
+  )
+  // The actual regression risk: now that a rosier figure sits beside it, the headline must
+  // keep answering the cautious question.
+  check(
+    'the headline still solves against the cautious trough',
+    r.safeToSpendToday,
+    Math.max(0, Math.round((r.nearTermLowestBalance - 15_000) * 100) / 100),
+  )
 }
 
 {

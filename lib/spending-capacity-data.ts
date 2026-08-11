@@ -46,6 +46,22 @@ export type SpendingCapacity = CapacityResult & {
   cardPayments: ForecastCardPayment[]
   /** Cards that could NOT be forecast, and why. Shown so a gap is never silent. */
   blockedCardPayments: ForecastCardPayment[]
+  /**
+   * Undrawn credit on revolving LINES OF CREDIT, as context for a negative trough.
+   *
+   * Deliberately NOT added to cash and NOT fed into any projection: borrowing is not money
+   * you have, and folding it in would inflate "safe to spend" with debt. It is reported
+   * only because a forecast that shows a big shortfall while ignoring a real, drawable
+   * buffer reads as more dire than the true position.
+   *
+   * `null` means NOT TRACKED (no limit recorded), which must never render as $0 — a
+   * literal zero reads as "fully drawn" and would overstate exposure.
+   *
+   * Credit CARDS are excluded on purpose: card headroom cannot cover payroll or an ACH
+   * vendor draft, so counting it as a cash buffer would be misleading.
+   */
+  availableCredit: number | null
+  creditLines: { accountName: string; limit: number; drawn: number; available: number }[]
 }
 
 /**
@@ -66,7 +82,9 @@ export const getSpendingCapacity = cache(async (): Promise<SpendingCapacity> => 
 
   const [{ data: accounts }, settings, summary, payments, exposure, { data: cardMatchers }] =
     await Promise.all([
-      supabase.from('bank_accounts').select('account_name, account_type, current_balance'),
+      supabase
+        .from('bank_accounts')
+        .select('account_name, account_type, current_balance, credit_limit, closed_at'),
       getBusinessSettings(),
       getCashDebtSummary(),
       getObligationPayments().catch((err) => {
@@ -155,6 +173,36 @@ export const getSpendingCapacity = cache(async (): Promise<SpendingCapacity> => 
     nearTermDays: settings.cash_near_term_days,
   })
 
+  // ---- Undrawn credit, reported beside the trough but never folded into it ----
+  //
+  // Restricted to `Line of Credit` accounts. A revolving line can be drawn to cover an
+  // ACH draft or payroll; card headroom cannot, so treating the two alike would present
+  // a buffer the business can't actually deploy against these obligations.
+  const creditLines = (accounts ?? [])
+    .filter((a) => {
+      if (a.closed_at) return false
+      if (!/line of credit/i.test(String(a.account_type ?? ''))) return false
+      // A missing or zero limit is "not recorded", not a $0 line. Excluded so it cannot
+      // contribute a fake zero to the total.
+      return Number(a.credit_limit ?? 0) > 0
+    })
+    .map((a) => {
+      const limit = Number(a.credit_limit ?? 0)
+      const drawn = Number(a.current_balance ?? 0)
+      return {
+        accountName: String(a.account_name ?? ''),
+        limit: money(limit),
+        drawn: money(drawn),
+        // Clamped at 0: an over-limit line is not negative borrowing capacity.
+        available: money(Math.max(0, limit - drawn)),
+      }
+    })
+
+  // Null, not 0, when no line has a recorded limit — the distinction between "nothing
+  // available" and "we don't know" is the whole point.
+  const availableCredit =
+    creditLines.length > 0 ? money(creditLines.reduce((s, l) => s + l.available, 0)) : null
+
   // ---- Chart series, derived from the ENGINE's own days ----
   //
   // This previously re-implemented the projection loop by hand, which is precisely how a
@@ -179,5 +227,7 @@ export const getSpendingCapacity = cache(async (): Promise<SpendingCapacity> => 
     today,
     cardPayments,
     blockedCardPayments,
+    availableCredit,
+    creditLines,
   }
 })

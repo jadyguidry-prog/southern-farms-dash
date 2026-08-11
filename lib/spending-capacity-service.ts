@@ -382,6 +382,17 @@ export type CapacityResult = {
   /** Lowest cautious balance across the window. */
   lowestBalance: number
   lowestBalanceDate: string
+  /**
+   * Lowest TYPICAL-week balance across the window, reported purely for context.
+   *
+   * Nothing is solved against this — the headline and every warning stay on the cautious
+   * basis. It exists because quoting only the pessimistic trough made the forecast
+   * unbelievable: the owner had no way to tell a four-slow-weeks worst case from the
+   * expected path, so a defensible number looked like a broken one. Showing both is what
+   * makes "cautious" legible as a stress case rather than a prediction.
+   */
+  typicalLowestBalance: number
+  typicalLowestBalanceDate: string
   /** True if the cautious projection dips under the reserve at any point. */
   breachesReserve: boolean
   reserveShortfall: number
@@ -445,6 +456,8 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
   let typicalBalance = cashOnHand
   let lowestBalance = Number.POSITIVE_INFINITY
   let lowestBalanceDate = today
+  let typicalLowestBalance = Number.POSITIVE_INFINITY
+  let typicalLowestBalanceDate = today
   let nearTermLowestBalance = Number.POSITIVE_INFINITY
   let nearTermLowestBalanceDate = today
 
@@ -503,6 +516,14 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
       lowestBalanceDate = date
     }
 
+    // Tracked on its own date, NOT read off `lowestBalanceDate`. The two scenarios can
+    // bottom out on different days, and reporting the typical balance as of the cautious
+    // trough's date would be a figure that appears nowhere in the projection.
+    if (typicalBalance < typicalLowestBalance) {
+      typicalLowestBalance = typicalBalance
+      typicalLowestBalanceDate = date
+    }
+
     if (i < nearTerm && cautiousBalance < nearTermLowestBalance) {
       nearTermLowestBalance = cautiousBalance
       nearTermLowestBalanceDate = date
@@ -521,6 +542,7 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
   }
 
   if (!Number.isFinite(lowestBalance)) lowestBalance = cashOnHand
+  if (!Number.isFinite(typicalLowestBalance)) typicalLowestBalance = cashOnHand
   if (!Number.isFinite(nearTermLowestBalance)) nearTermLowestBalance = cashOnHand
 
   // The headline uses the LOWEST point in the NEAR-TERM window, not the closing balance. A
@@ -546,6 +568,8 @@ export function deriveSpendingCapacity(input: CapacityInput): CapacityResult {
     perDayAllowance: money(safeToSpendToday / nearTerm),
     lowestBalance,
     lowestBalanceDate,
+    typicalLowestBalance,
+    typicalLowestBalanceDate,
     breachesReserve: horizonHeadroom < 0,
     reserveShortfall: money(Math.max(0, -horizonHeadroom)),
     nearTermLowestBalance,

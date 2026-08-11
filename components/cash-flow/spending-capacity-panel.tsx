@@ -70,6 +70,8 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
     horizonDays,
     cardPayments,
     blockedCardPayments,
+    availableCredit,
+    creditLines,
   } = capacity
 
   // The table shows the spendable window. Everything beyond it is listed separately as
@@ -87,6 +89,18 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
   // under the reserve on day 6 AND fell further weeks later, only the distant warning
   // rendered and the immediate one vanished.
   const breachIsNearTerm = capacity.breachesReserveNearTerm
+
+  // The typical-week low point WITHIN the spendable window, read off the engine's own days
+  // rather than recomputed. Kept window-consistent with the banner it appears in: pairing
+  // this week's cautious dip with a horizon-wide typical trough would attach an unrelated
+  // date to "this week" — the same two-standards confusion the near-term split exists to
+  // avoid.
+  const typicalNearTermLow = nearTermRows.length
+    ? nearTermRows.reduce(
+        (lowest, d) => (d.typicalBalance < lowest.typicalBalance ? d : lowest),
+        nearTermRows[0],
+      )
+    : null
 
   // Dated events beyond the spendable window — the cliff the old 7-day view could not see.
   //
@@ -170,18 +184,34 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                 {/* Near-term figures, not horizon ones: this banner is about the window
                     the headline covers, so quoting a low point from weeks later would
                     attach an unrelated date to "this week". */}
-                <p className="text-sm text-foreground text-pretty">
-                  On a slow week your cash dips to{' '}
-                  <span className="font-medium tabular-nums">
-                    {formatCurrency(capacity.nearTermLowestBalance)}
-                  </span>{' '}
-                  by {dayLabel(capacity.nearTermLowestBalanceDate)} &mdash;{' '}
-                  <span className="font-medium tabular-nums">
-                    {formatCurrency(capacity.nearTermReserveShortfall)}
-                  </span>{' '}
-                  under your {formatCurrency(minCashReserve)} reserve. There is
-                  nothing spare to spend this week.
-                </p>
+                <div className="text-sm text-foreground text-pretty">
+                  <p>
+                    On a slow week your cash dips to{' '}
+                    <span className="font-medium tabular-nums">
+                      {formatCurrency(capacity.nearTermLowestBalance)}
+                    </span>{' '}
+                    by {dayLabel(capacity.nearTermLowestBalanceDate)} &mdash;{' '}
+                    <span className="font-medium tabular-nums">
+                      {formatCurrency(capacity.nearTermReserveShortfall)}
+                    </span>{' '}
+                    under your {formatCurrency(minCashReserve)} reserve. There is
+                    nothing spare to spend this week.
+                  </p>
+                  {/* The expected path, stated straight after the stress case. Without it the
+                      headline reads as a prediction of the worst week rather than a
+                      deliberately conservative floor, which is what made a defensible $0
+                      look like a broken number. */}
+                  {typicalNearTermLow ? (
+                    <p className="mt-1.5 text-muted-foreground">
+                      On a typical week it holds at{' '}
+                      <span className="font-medium tabular-nums text-foreground">
+                        {formatCurrency(typicalNearTermLow.typicalBalance)}
+                      </span>{' '}
+                      ({dayLabel(typicalNearTermLow.date)}). The figure above is the
+                      cautious case, so it stays safe in a bad week.
+                    </p>
+                  ) : null}
+                </div>
               </div>
             ) : null}
 
@@ -194,38 +224,79 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
                   className="size-4 shrink-0 text-destructive"
                   aria-hidden
                 />
-                <p className="text-sm text-foreground text-pretty">
-                  {breachIsNearTerm
-                    ? 'It gets worse beyond this week: on a slow week your cash falls to '
-                    : 'Spendable today, but not for long: on a slow week your cash falls to '}
-                  <span className="font-medium tabular-nums">
-                    {formatCurrency(lowestBalance)}
-                  </span>{' '}
-                  by {dayLabel(lowestBalanceDate)} &mdash;{' '}
-                  <span className="font-medium tabular-nums">
-                    {formatCurrency(reserveShortfall)}
-                  </span>{' '}
-                  under your {formatCurrency(minCashReserve)} reserve.{' '}
-                  {/* "Hold back X of it" is only coherent when there is something to hold
-                      back. At $0 spendable the shortfall has to be closed by bringing money
-                      in, so telling the owner to withhold cash they do not have would be
-                      advice they cannot act on. */}
-                  {breachIsNearTerm ? (
-                    <>
-                      Closing that gap needs money coming in, not just spending less
-                      &mdash; there is nothing spare to hold back.
-                    </>
-                  ) : (
-                    <>
-                      The figure above only looks {nearTermDays} days ahead, so it does
-                      not yet account for that. Hold back at least{' '}
-                      <span className="font-medium tabular-nums">
-                        {formatCurrency(reserveShortfall)}
+                <div className="text-sm text-foreground text-pretty">
+                  <p>
+                    {breachIsNearTerm
+                      ? 'It gets worse beyond this week: on a slow week your cash falls to '
+                      : 'Spendable today, but not for long: on a slow week your cash falls to '}
+                    <span className="font-medium tabular-nums">
+                      {formatCurrency(lowestBalance)}
+                    </span>{' '}
+                    by {dayLabel(lowestBalanceDate)} &mdash;{' '}
+                    <span className="font-medium tabular-nums">
+                      {formatCurrency(reserveShortfall)}
+                    </span>{' '}
+                    under your {formatCurrency(minCashReserve)} reserve.{' '}
+                    {/* "Hold back X of it" is only coherent when there is something to hold
+                        back. At $0 spendable the shortfall has to be closed by bringing money
+                        in, so telling the owner to withhold cash they do not have would be
+                        advice they cannot act on. */}
+                    {breachIsNearTerm ? (
+                      <>
+                        Closing that gap needs money coming in, not just spending less
+                        &mdash; there is nothing spare to hold back.
+                      </>
+                    ) : (
+                      <>
+                        The figure above only looks {nearTermDays} days ahead, so it does
+                        not yet account for that. Hold back at least{' '}
+                        <span className="font-medium tabular-nums">
+                          {formatCurrency(reserveShortfall)}
+                        </span>{' '}
+                        of it.
+                      </>
+                    )}
+                  </p>
+
+                  {/* Names what "slow week" actually assumes. A trough built on repeated
+                      lower-quartile weeks is defensible, but unlabelled it looks like a
+                      forecast of the likely outcome, which is not what it is. */}
+                  <p className="mt-1.5 text-muted-foreground">
+                    That assumes {estimate.weeksObserved >= 8 ? 'every' : 'each'} week
+                    brings only{' '}
+                    <span className="font-medium tabular-nums text-foreground">
+                      {formatCurrency(estimate.cautiousInflow)}
+                    </span>{' '}
+                    in, for {horizonDays} days straight. On typical weeks (
+                    <span className="font-medium tabular-nums text-foreground">
+                      {formatCurrency(estimate.typicalInflow)}
+                    </span>{' '}
+                    a week) the low point is{' '}
+                    <span className="font-medium tabular-nums text-foreground">
+                      {formatCurrency(capacity.typicalLowestBalance)}
+                    </span>{' '}
+                    on {dayLabel(capacity.typicalLowestBalanceDate)}.
+                  </p>
+
+                  {/* Borrowing capacity as context only. Stated as "not counted above" so it
+                      can never be read as spendable cash — the projection deliberately
+                      excludes it, and a buffer shown without that caveat would undercut the
+                      warning it sits inside. */}
+                  {availableCredit !== null && availableCredit > 0 ? (
+                    <p className="mt-1.5 text-muted-foreground">
+                      Not counted above:{' '}
+                      <span className="font-medium tabular-nums text-foreground">
+                        {formatCurrency(availableCredit)}
                       </span>{' '}
-                      of it.
-                    </>
-                  )}
-                </p>
+                      still undrawn on your{' '}
+                      {creditLines.length === 1
+                        ? creditLines[0].accountName
+                        : `${creditLines.length} credit lines`}
+                      . That is borrowing, not cash, so the forecast leaves it out
+                      &mdash; but it is there if the gap has to be bridged.
+                    </p>
+                  ) : null}
+                </div>
               </div>
             ) : null}
 
