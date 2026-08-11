@@ -14,6 +14,7 @@
 import {
   classifyFlow,
   buildWeeklyFlows,
+  completeWeeks,
   estimateWeeklyFlow,
   buildDayOfWeekProfile,
   deriveSpendingCapacity,
@@ -225,6 +226,79 @@ check('week starts on Monday', weekStart('2026-08-02'), '2026-07-27')
     excludeMatchers: ['CO'],
   })
   check('a too-short matcher is ignored rather than nuking the baseline', tooShort[0]?.outflow, 6_000)
+}
+
+{
+  // Import gaps, not slow trade. This ledger really does have two multi-month holes, and the
+  // weeks touching their edges held 1–3 days of data while reading as $2–3k weeks. Because
+  // they sank to the bottom of the sample they landed in the LOWER QUARTILE — the figure the
+  // headline is solved against — so missing history was making the business look unable to
+  // pay its bills.
+  const rows: LedgerRow[] = []
+  // History begins on a Friday, so that first week holds two days of trade, not seven.
+  rows.push(row({ date: '2026-01-09', amount: 3_000, type: 'income' }))
+  // Eight genuinely complete weeks, deliberately varied so the quartile is a real quartile.
+  const fullWeeks = [10_000, 11_000, 12_000, 13_000, 14_000, 15_000, 16_000, 17_000]
+  fullWeeks.forEach((amount, i) => {
+    const monday = addDays('2026-01-12', i * 7)
+    rows.push(row({ date: monday, amount: amount / 2, type: 'income' }))
+    rows.push(row({ date: addDays(monday, 4), amount: amount / 2, type: 'income' }))
+  })
+  // History then stops on a Monday, clipping that final week too.
+  rows.push(row({ date: '2026-03-09', amount: 13_500, type: 'income' }))
+
+  const kept = buildWeeklyFlows(rows, { operatingAccounts: ACCOUNTS, today: '2026-04-06' })
+  const raw = buildWeeklyFlows(rows, {
+    operatingAccounts: ACCOUNTS,
+    today: '2026-04-06',
+    dropPartialWeeks: false,
+  })
+
+  check('only the fully-covered weeks survive', kept.length, fullWeeks.length)
+  ok(
+    'the clipped weeks are the ones removed',
+    !kept.some((w) => w.weekStart === '2026-01-05' || w.weekStart === '2026-03-09'),
+  )
+  ok(
+    'every surviving week carries a full week of trade',
+    kept.every((w) => fullWeeks.includes(w.inflow)),
+  )
+  // The point of the whole exercise: the cautious figure must stop being set by absent data.
+  ok(
+    'the cautious estimate is no longer dragged down by missing history',
+    estimateWeeklyFlow(kept).cautiousInflow > estimateWeeklyFlow(raw).cautiousInflow,
+  )
+
+  const covered = completeWeeks(rows, { operatingAccounts: ACCOUNTS })
+  ok('a week inside a covered span counts', covered.has('2026-01-12'))
+  ok('a week clipped by a mid-week start does not', !covered.has('2026-01-05'))
+  ok('a week clipped where history stops does not', !covered.has('2026-03-09'))
+}
+
+{
+  // A quiet fortnight is NOT missing data. Inferring a gap too eagerly would discard real
+  // slow weeks, which is the opposite error and would make the forecast over-optimistic.
+  const rows = [
+    row({ date: '2026-06-01', amount: 9_000, type: 'income' }),
+    row({ date: '2026-06-07', amount: 1_000, type: 'income' }),
+    row({ date: '2026-06-15', amount: 9_000, type: 'income' }),
+    row({ date: '2026-06-21', amount: 1_000, type: 'income' }),
+  ]
+  const covered = completeWeeks(rows, { operatingAccounts: ACCOUNTS })
+  ok('a fully-covered week with little activity is kept', covered.has('2026-06-01'))
+  ok('an 8-day quiet stretch is not treated as an import gap', covered.has('2026-06-15'))
+}
+
+{
+  // With no complete week anywhere, a noisy sample still beats refusing to estimate — but the
+  // fallback is all-or-nothing, because a sample that silently mixed the two bases would be
+  // one nobody could describe.
+  const rows = [
+    row({ date: '2026-07-01', amount: 4_000, type: 'income' }),
+    row({ date: '2026-07-02', amount: 4_000, type: 'income' }),
+  ]
+  const weeks = buildWeeklyFlows(rows, { operatingAccounts: ACCOUNTS, today: '2026-07-13' })
+  check('a ledger with no complete week still yields an estimate', weeks.length, 1)
 }
 
 check('quantile of an empty list is 0, not NaN', quantile([], 0.5), 0)

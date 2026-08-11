@@ -197,19 +197,107 @@ export type WeeklyFlow = { weekStart: string; inflow: number; outflow: number }
  * look like a catastrophic revenue collapse and drag the median down. `today`
  * marks the current (incomplete) week, which is therefore excluded.
  */
+/**
+ * Week starts the ledger covers from Monday through Sunday.
+ *
+ * History here arrives by CSV import and has holes in it — as of Aug 2026, 64 days missing
+ * across Jul–Aug 2025 and 91 across Jan–Mar 2026. A week straddling the edge of a hole holds
+ * only a day or two of activity, so its inflow reads as a catastrophically slow week when
+ * nothing was wrong with trade at all: the data simply stops. Three such weeks ($2,405,
+ * $3,404, $7,165) were sitting in the sample.
+ *
+ * That matters more than it looks. Those weeks land in the LOWER QUARTILE, which is exactly
+ * the figure the "safe to spend" headline is solved against — so an import gap was quietly
+ * making the business look less able to pay its bills. Absent data must never read as a bad
+ * week.
+ *
+ * A gap is only inferred after `minGapDays` of silence, so a genuinely quiet stretch is not
+ * mistaken for missing history.
+ */
+export function completeWeeks(
+  rows: LedgerRow[],
+  options: { operatingAccounts: string[]; minGapDays?: number },
+): Set<string> {
+  const { operatingAccounts, minGapDays = 14 } = options
+
+  const dates = [
+    ...new Set(
+      rows
+        .filter((r) => r.date && operatingAccounts.some((n) => n && r.accountName === n))
+        .map((r) => r.date),
+    ),
+  ].sort()
+
+  const complete = new Set<string>()
+  if (dates.length === 0) return complete
+
+  // Contiguous spans of real coverage, split wherever the ledger goes quiet for too long.
+  const spans: { start: string; end: string }[] = []
+  let spanStart = dates[0]
+  let prev = dates[0]
+  for (const d of dates) {
+    if (daysBetween(prev, d) > minGapDays) {
+      spans.push({ start: spanStart, end: prev })
+      spanStart = d
+    }
+    prev = d
+  }
+  spans.push({ start: spanStart, end: prev })
+
+  // A week counts only when BOTH its Monday and its Sunday fall inside one span. Weeks
+  // clipped by a span edge are the partial ones this exists to remove.
+  for (const span of spans) {
+    let wk = weekStart(span.start)
+    if (wk < span.start) wk = addDays(wk, 7)
+    for (; addDays(wk, 6) <= span.end; wk = addDays(wk, 7)) complete.add(wk)
+  }
+
+  return complete
+}
+
+function daysBetween(from: string, to: string) {
+  return Math.round((parseDate(to).getTime() - parseDate(from).getTime()) / 86_400_000)
+}
+
 export function buildWeeklyFlows(
   rows: LedgerRow[],
-  options: { operatingAccounts: string[]; today: string; excludeMatchers?: string[] },
+  options: {
+    operatingAccounts: string[]
+    today: string
+    excludeMatchers?: string[]
+    /**
+     * Drop weeks the ledger only partly covers. On by default: a partial week is bad data,
+     * and keeping it understates what the business earns. Callers auditing raw history can
+     * turn it off.
+     */
+    dropPartialWeeks?: boolean
+    minGapDays?: number
+  },
 ): WeeklyFlow[] {
-  const { operatingAccounts, today, excludeMatchers = [] } = options
+  const {
+    operatingAccounts,
+    today,
+    excludeMatchers = [],
+    dropPartialWeeks = true,
+    minGapDays = 14,
+  } = options
   const currentWeek = weekStart(today)
   const byWeek = new Map<string, WeeklyFlow>()
+
+  const covered = dropPartialWeeks
+    ? completeWeeks(rows, { operatingAccounts, minGapDays })
+    : null
 
   for (const row of rows) {
     if (!row.date) continue
     const wk = weekStart(row.date)
     // Drop the in-progress week so a half-finished week can't skew the median.
     if (wk >= currentWeek) continue
+    // Skip weeks the ledger only partly covers — unless doing so would leave nothing to
+    // estimate from, in which case a noisy sample beats no sample. The fallback is
+    // deliberately all-or-nothing: silently dropping SOME partial weeks while keeping
+    // others would produce a sample whose basis nobody could describe.
+    if (covered && covered.size > 0 && !covered.has(wk)) continue
 
     const cls = classifyFlow(row, operatingAccounts)
     if (cls !== 'in' && cls !== 'out') continue
