@@ -27,6 +27,14 @@ export function StatCard({
 }) {
   const showChange = typeof change === 'number' && trend
   const isPositive = trend === goodDirection
+  // A changeLabel DESCRIBES the change badge ("vs last month"), so it must never
+  // render without it. Cash on Hand printed a bare "vs last month" with no
+  // percentage for exactly this reason: its stored KPI row has no change/trend,
+  // but the label was rendered unconditionally — promising a comparison the card
+  // could not make, and pushing the real hint down to a second line. Gating it
+  // here fixes every card at once and is self-healing: the label reappears the
+  // moment a genuine change value exists.
+  const comparisonLabel = showChange ? changeLabel : undefined
 
   return (
     <Card className="gap-0 py-0">
@@ -64,14 +72,14 @@ export function StatCard({
               {Math.abs(change!).toFixed(1)}%
             </span>
           )}
-          {(changeLabel || hint) && (
+          {(comparisonLabel || hint) && (
             <span className="truncate text-xs text-muted-foreground">
-              {changeLabel ?? hint}
+              {comparisonLabel ?? hint}
             </span>
           )}
         </div>
         {/* Show the hint on its own line when a change label already took the slot above. */}
-        {changeLabel && hint && (
+        {comparisonLabel && hint && (
           <p className="mt-1 truncate text-xs text-muted-foreground">{hint}</p>
         )}
       </CardContent>

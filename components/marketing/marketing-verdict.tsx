@@ -73,6 +73,14 @@ export function MarketingVerdict({
             <p className="max-w-2xl text-sm leading-relaxed text-foreground text-pretty">
               {recommendation.summary}
             </p>
+            {/* Present only when the direction word contradicts recent recorded
+                spend, so "Reduce by $459" can't read as a cut when the target is
+                in fact above what the books show lately. */}
+            {recommendation.baselineNote && (
+              <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground text-pretty">
+                {recommendation.baselineNote}
+              </p>
+            )}
           </div>
 
           <div className="flex shrink-0 flex-col gap-2 sm:items-end">
@@ -118,8 +126,12 @@ export function MarketingVerdict({
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Change
             </p>
+            {/* Sign comes off the amount itself. `amount` is the delta
+                (recommended - current), so a cut is NEGATIVE; testing `> 0` for the
+                minus meant a reduction printed as a bare "$459", indistinguishable
+                from an increase of the same size. */}
             <p className="mt-1 font-mono text-lg font-semibold text-foreground">
-              {recommendation.action === 'increase' ? '+' : recommendation.amount > 0 ? '-' : ''}
+              {recommendation.amount > 0 ? '+' : recommendation.amount < 0 ? '-' : ''}
               {formatCurrency(Math.abs(recommendation.amount))}
             </p>
           </div>

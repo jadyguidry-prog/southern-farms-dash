@@ -25,6 +25,8 @@ import {
   isCogsCategory,
   deriveMonthlyCogs,
   grossProfitReadiness,
+  marginWithheldReason,
+  marginWithheldLabel,
 } from '../lib/check-resolution-service'
 import { generateInsights, payrollHealth, type CheckInsightInput } from '../lib/health'
 import { SETTING_DEFAULTS } from '../lib/queries'
@@ -237,6 +239,28 @@ eq(
   'unresolved',
   'route: whitespace-only category is not a resolution',
 )
+/*
+ * The unreachable-check regression. The review queue treated a `rejected` overlay
+ * as settled while this predicate called it unresolved, so one real check ($500,
+ * no. 1623) was hidden from every tab yet counted in "still unknown" forever —
+ * the backlog could not reach zero. The route must live here, in the shared
+ * predicate, or the queue and the headline diverge again.
+ */
+eq(
+  checkResolvedVia(row({ id: 'r6', expenseCategory: '', reviewStatus: '' }), undefined, true),
+  'reviewed-not-cogs',
+  'route: a rejected overlay ("reviewed, not COGS") resolves a check',
+)
+eq(
+  checkResolvedVia(row({ id: 'r7', expenseCategory: 'Meat / COGS', reviewStatus: '' }), undefined, true),
+  'categorized',
+  'route: a real category outranks "not COGS" when a row carries both',
+)
+eq(
+  checkResolvedVia(row({ id: 'r8', expenseCategory: '', reviewStatus: '' }), undefined, false),
+  'unresolved',
+  'route: absent rejected overlay leaves a check unresolved',
+)
 
 // Excluded dollars must never reach COGS, even if a category was left behind.
 const exProg = checkResolutionProgress(
@@ -253,10 +277,31 @@ eq(exProg.categorizedCount, 1, 'progress: categorized check counted as categoriz
 eq(exProg.cogsAmount, 200, 'progress: an EXCLUDED check never adds COGS dollars')
 eq(exProg.pendingCount, 0, 'progress: neither check is still an open question')
 eq(
-  exProg.overlayAmount + exProg.categorizedAmount + exProg.excludedAmount + exProg.pendingAmount,
+  exProg.overlayAmount +
+    exProg.categorizedAmount +
+    exProg.excludedAmount +
+    exProg.reviewedNotCogsAmount +
+    exProg.pendingAmount,
   1000,
   'progress: buckets partition total dollars',
 )
+
+/*
+ * "Reviewed, not COGS" must count as resolved, must NOT add COGS dollars, and must
+ * NOT be folded into `excluded` — excluded claims "not business spend", which is a
+ * different statement about the money and would overstate that bucket.
+ */
+const njProg = checkResolutionProgress(
+  [row({ id: 'n1', amount: 500, expenseCategory: '', reviewStatus: '' })],
+  [res({ financialTransactionId: 'n1', reviewStatus: 'rejected' })],
+  isCogsCategory,
+)
+eq(njProg.reviewedNotCogsCount, 1, 'progress: rejected overlay counted as reviewed-not-COGS')
+eq(njProg.reviewedNotCogsAmount, 500, 'progress: its dollars tracked in their own bucket')
+eq(njProg.excludedAmount, 0, 'progress: reviewed-not-COGS is NOT folded into excluded')
+eq(njProg.cogsAmount, 0, 'progress: reviewed-not-COGS never adds COGS dollars')
+eq(njProg.pendingCount, 0, 'progress: the once-unreachable check is no longer open')
+eq(njProg.pendingAmount, 0, 'progress: its $500 no longer blocks the readiness gate')
 
 // ---------- monthly COGS overlay ----------
 
@@ -307,6 +352,130 @@ const gapMonths = deriveMonthlyCogs(
 eq(gapMonths.length, 1, 'monthly: a sales-only month is not dropped')
 eq(gapMonths[0].baseCogs, 0, 'monthly: sales-only month reports zero COGS')
 ok(gapMonths[0].salesComplete === true, 'monthly: completeness verdict is carried through')
+
+// ---------- bank-data guard ----------
+//
+// The failure this prevents: a month where only a CARD statement was imported has
+// full Square sales but a fragment of the real spend, so the margin computes to
+// ~99% and reads as a spectacular month rather than as missing data. This was
+// live — Jan/Feb/Mar 2026 showed 90.9%/99.9%/95.5% against $62–$5,557 of COGS.
+
+const bankMap = new Map([['2026-06', true]])
+const cardOnlyMap = new Map([['2026-06', false]])
+
+// Baseline: with bank data present and every check attributed, a margin IS quoted.
+// Asserted first, because a guard that blocks everything would also pass the
+// negative tests below while being useless.
+const quotableClean = deriveMonthlyCogs(
+  txns.slice(0, 3),
+  [],
+  sales,
+  bankMap,
+)
+ok(quotableClean[0].quotable, 'bank guard: a complete month with bank data is quotable')
+eq(quotableClean[0].withheldReason, null, 'bank guard: nothing withheld on a clean month')
+approx(
+  quotableClean[0].marginPct ?? 0,
+  ((79093.03 - 33425.66) / 79093.03) * 100,
+  0.01,
+  'bank guard: margin is sales less COGS over sales',
+)
+
+// The real-data shape: sales present, bank data absent, COGS a thin fragment.
+const cardOnly = deriveMonthlyCogs(
+  [{ id: 'x1', transactionDate: '2026-06-05', amount: 62.51, expenseCategory: 'Meat / COGS', isCheck: false }],
+  [],
+  sales,
+  cardOnlyMap,
+)
+eq(
+  cardOnly[0].withheldReason,
+  'bank-data-missing',
+  'bank guard: a card-only month is withheld as an IMPORT gap',
+)
+eq(cardOnly[0].marginPct, null, 'bank guard: no margin computed without bank data')
+eq(cardOnly[0].grossProfit, null, 'bank guard: gross profit is null, never a misleading 0')
+ok(
+  !cardOnly[0].quotable,
+  'bank guard: the 99.9% margin that would have been printed is suppressed',
+)
+
+// Ordering matters: missing bank data must be reported as the import gap it is,
+// NOT as a categorization gap, or the owner is sent to categorize transactions
+// that were never imported.
+const noCogsNoBank = deriveMonthlyCogs([], [], sales, cardOnlyMap)
+eq(
+  noCogsNoBank[0].withheldReason,
+  'bank-data-missing',
+  'bank guard: missing bank data outranks no-cogs, because it is the cause',
+)
+const noCogsWithBank = deriveMonthlyCogs([], [], sales, bankMap)
+eq(
+  noCogsWithBank[0].withheldReason,
+  'no-cogs',
+  'bank guard: with bank data present, zero COGS is a genuine categorization gap',
+)
+
+// A month absent from the coverage map must be treated as NOT imported. The
+// conservative direction withholds; the alternative quotes a margin for a month
+// whose costs are unknown.
+const absentFromMap = deriveMonthlyCogs(txns.slice(0, 3), [], sales, new Map())
+eq(
+  absentFromMap[0].withheldReason,
+  'bank-data-missing',
+  'bank guard: a month missing from the coverage map defaults to withheld',
+)
+
+// Unresolved checks are still reported as such once bank data is present, so the
+// new guard has not swallowed the original one.
+const stillChecks = deriveMonthlyCogs(txns, [], sales, bankMap)
+eq(
+  stillChecks[0].withheldReason,
+  'unresolved-checks',
+  'bank guard: unattributed checks remain the reason when bank data is present',
+)
+
+// Partial sales must outrank both — a partial month understates sales and would
+// inflate the margin regardless of how complete the cost side is.
+const partialSales = deriveMonthlyCogs(
+  txns.slice(0, 3),
+  [],
+  new Map([['2026-06', { netSales: 79093.03, complete: false }]]),
+  bankMap,
+)
+eq(
+  partialSales[0].withheldReason,
+  'partial-sales',
+  'bank guard: incomplete sales outrank the cost-side reasons',
+)
+
+// The predicate is tested directly too, so a caller that assembles a month by
+// hand gets the same verdict the engine's own pass produces.
+eq(
+  marginWithheldReason({
+    netSales: 0,
+    salesComplete: true,
+    bankDataComplete: true,
+    totalCogs: 5000,
+    unresolvedCheckAmount: 0,
+  }),
+  'no-sales',
+  'bank guard: a month with costs but no sales cannot carry a margin',
+)
+
+// Every reason must have a human label — a missing case would render blank.
+for (const reason of [
+  'no-sales',
+  'partial-sales',
+  'bank-data-missing',
+  'no-cogs',
+  'unresolved-checks',
+] as const) {
+  ok(
+    marginWithheldLabel(reason).length > 0,
+    `bank guard: '${reason}' has a display label`,
+  )
+}
 
 // ---------- readiness gate ----------
 
@@ -390,6 +559,37 @@ ok(missing != null, 'advisor: months with sales but no COGS are raised')
 ok(
   /categorization gap/i.test(missing?.detail ?? ''),
   'advisor: names it a categorization gap rather than implying no purchases',
+)
+
+// Months with no bank data imported must raise their OWN insight, separate from
+// the categorization gap. Sending the owner to categorize a month that contains
+// no transactions is work that cannot be done.
+const bankGapInsights = generateInsights({
+  settings,
+  pillars,
+  checks: { ...checkInsight, monthsMissingBankData: ['2026-01', '2026-02', '2026-03'] },
+})
+const bankGap = bankGapInsights.find(
+  (i) => i.id === 'auto-checks-months-missing-bank-data',
+)
+ok(bankGap != null, 'advisor: months without imported bank data are raised')
+ok(
+  /import/i.test(bankGap?.detail ?? ''),
+  'advisor: names importing as the remedy, not categorizing',
+)
+ok(
+  !/categoriz(e|ation) (them|gap)/i.test(bankGap?.detail ?? ''),
+  'advisor: does not tell the owner to categorize a month with no transactions',
+)
+ok(
+  bankGap?.id !== bankGapInsights.find((i) => i.id === 'auto-checks-months-missing-cogs')?.id,
+  'advisor: the import gap and the categorization gap are distinct insights',
+)
+
+// Absent list must produce no insight — never an empty-list warning.
+ok(
+  !insights.some((i) => i.id === 'auto-checks-months-missing-bank-data'),
+  'advisor: no bank-data insight when every month has bank data',
 )
 
 // Below-parity ratio should warn rather than escalate.
@@ -500,7 +700,43 @@ async function reconcile() {
     reviewStatus: (r.review_status ?? '').trim(),
   }))
 
-  const months = deriveMonthlyCogs(prepared, [])
+  /*
+   * The REAL resolutions must be loaded and passed in. This block previously
+   * passed `[]`, which counted all 58 overlay-resolved checks as still open and
+   * made the printed readiness verdict ($73,815 unresolved / 22%) disagree with
+   * what the page actually computes ($51,572 / 15%). A script that re-implements
+   * the page's data assembly drifts from it, and this one drifted far enough to
+   * misstate how much work was left by $22,000.
+   */
+  const liveResRows = await all<Record<string, unknown>>(
+    'check_resolutions',
+    'financial_transaction_id, check_number, resolved_payee, resolved_vendor_id, resolved_category, memo, business_purpose, review_status, confidence, resolution_source, reviewed_by, reviewed_at, bulk_action_id',
+  )
+  const liveResolutions: CheckResolution[] = liveResRows.map((r) => ({
+    financialTransactionId: String(r.financial_transaction_id ?? ''),
+    checkNumber: (r.check_number as string | null) ?? null,
+    resolvedPayee: (r.resolved_payee as string | null) ?? null,
+    resolvedVendorId: (r.resolved_vendor_id as string | null) ?? null,
+    resolvedCategory: (r.resolved_category as string | null) ?? null,
+    memo: (r.memo as string | null) ?? null,
+    businessPurpose: (r.business_purpose as string | null) ?? null,
+    reviewStatus: String(r.review_status ?? ''),
+    confidence: (r.confidence as string | null) ?? null,
+    resolutionSource: (r.resolution_source as string | null) ?? null,
+    reviewedBy: (r.reviewed_by as string | null) ?? null,
+    reviewedAt: (r.reviewed_at as string | null) ?? null,
+    bulkActionId: (r.bulk_action_id as string | null) ?? null,
+  })) as CheckResolution[]
+  const approvedLive = liveResolutions.filter((r) => r.reviewStatus === 'approved')
+
+  /*
+   * ALL resolutions, not just approved ones — the page passes the full set and
+   * `deriveMonthlyCogs` filters by status internally. Handing it a pre-filtered
+   * list hid the rejected overlays from it, so it kept counting a reviewed check
+   * as unattributed while the rest of the script did not: the same drift that
+   * once made this file report a different business than the app.
+   */
+  const months = deriveMonthlyCogs(prepared, liveResolutions)
   const baseTotal = months.reduce((s, m) => s + m.baseCogs, 0)
   const unresolvedTotal = months.reduce((s, m) => s + m.unresolvedCheckAmount, 0)
   const directCogs = prepared
@@ -516,8 +752,20 @@ async function reconcile() {
    * answered. So reconcile against a direct sum of the checks that are genuinely
    * still open, using the shared predicate.
    */
+  const approvedById = new Map(approvedLive.map((r) => [r.financialTransactionId, r]))
+  // Must pass the rejected overlays too. Omitting them is exactly the drift that
+  // made this script describe a different business than the page.
+  const rejectedLiveIds = new Set(
+    liveResolutions
+      .filter((r) => r.reviewStatus === 'rejected')
+      .map((r) => r.financialTransactionId),
+  )
   const directUnresolved = liveChecks
-    .filter((r) => checkResolvedVia(r, undefined) === 'unresolved')
+    .filter(
+      (r) =>
+        checkResolvedVia(r, approvedById.get(r.id), rejectedLiveIds.has(r.id)) ===
+        'unresolved',
+    )
     .reduce((s, r) => s + r.amount, 0)
   approx(
     unresolvedTotal,
@@ -529,11 +777,12 @@ async function reconcile() {
   // The stronger property: every check dollar is either open or answered, never
   // both and never neither. This is what actually prevents the double-count the
   // old assertion was reaching for.
-  const progress = checkResolutionProgress(liveChecks, [], isCogsCategory)
+  const progress = checkResolutionProgress(liveChecks, liveResolutions, isCogsCategory)
   approx(
     progress.overlayAmount +
       progress.categorizedAmount +
       progress.excludedAmount +
+      progress.reviewedNotCogsAmount +
       progress.pendingAmount,
     directChecks,
     0.01,
@@ -543,9 +792,25 @@ async function reconcile() {
     progress.overlayCount +
       progress.categorizedCount +
       progress.excludedCount +
+      progress.reviewedNotCogsCount +
       progress.pendingCount,
     liveChecks.length,
     'live: every check falls in exactly one resolution bucket',
+  )
+  /*
+   * The unreachable-check guard, against live data: what the page's own queue
+   * counts as open must equal what the headline calls unknown. A gap of even one
+   * check means some row is impossible to act on, so the backlog can never reach
+   * zero — the bug that hid check 1623.
+   */
+  eq(
+    progress.pendingCount,
+    liveChecks.filter(
+      (r) =>
+        checkResolvedVia(r, approvedById.get(r.id), rejectedLiveIds.has(r.id)) ===
+        'unresolved',
+    ).length,
+    'live: every check the headline calls unknown is reachable in the queue',
   )
   // And the page can never claim more is unknown than is actually unknown.
   ok(
@@ -571,22 +836,41 @@ async function reconcile() {
   const categorizedChecks = liveChecks.filter((r) => r.expenseCategory.length > 0)
   const ledgerAudit = await all<{ transaction_id: string }>(
     'transaction_audit_log',
-    'transaction_id, field, action',
+    // `reverted_at` must be selected, or the filter below reads undefined on every
+    // row and quietly treats reverted categorizations as valid provenance.
+    'transaction_id, field, action, reverted_at',
   )
-  const fromLedger = new Set(
+  /*
+   * This assertion used to require that the 2025 ledger import was the ONLY thing
+   * that had ever written `expense_category` on a check. That held while the
+   * review page was unused, and broke the moment the owner actually resolved a
+   * cluster through it — checks 1608/1594/1600 ($2,677.50 Rent, 2026) were
+   * assigned by an audited `categorize_checks` action, which is the page working
+   * as designed, not corruption.
+   *
+   * Deleting it would have dropped the guard along with the stale expectation. The
+   * concern it really protected is PROVENANCE: no category may appear on a check
+   * without a record of who put it there and why, because such a row is
+   * indistinguishable from a silent mutation. So the test now accepts any
+   * non-reverted `expense_category` audit entry regardless of action, and still
+   * fails on a categorized check with no audit trail at all.
+   */
+  const explained = new Set(
     ledgerAudit
-      .filter(
-        (a) =>
-          (a as unknown as { field?: string }).field === 'expense_category' &&
-          (a as unknown as { action?: string }).action === 'categorize_from_2025_ledger',
-      )
+      .filter((a) => {
+        const r = a as unknown as {
+          field?: string
+          reverted_at?: string | null
+        }
+        return r.field === 'expense_category' && !r.reverted_at
+      })
       .map((a) => String(a.transaction_id)),
   )
-  const unexplained = categorizedChecks.filter((r) => !fromLedger.has(String(r.id)))
+  const unexplained = categorizedChecks.filter((r) => !explained.has(String(r.id)))
   eq(
     unexplained.length,
     0,
-    'live: every categorized CHECK row traces to the 2025 ledger import — none written by the overlay',
+    'live: every categorized CHECK row has an audit entry naming who categorized it',
   )
 
   const { count: resCount } = await db
@@ -601,8 +885,11 @@ async function reconcile() {
   const clusters = suggestCheckGroups(liveChecks).filter((s) => s.kind === 'amount-cluster')
   ok(clusters.length > 0, 'live: real repeating amounts are detected')
 
+  // `directChecks` is EVERY check dollar, resolved or not — it was previously
+  // printed as "unattributed", which overstated the backlog by the $249K already
+  // answered. Both figures are now labelled for what they are.
   console.log(
-    `\nLive data: ${liveChecks.length} checks, $${directChecks.toFixed(2)} unattributed against $${directCogs.toFixed(2)} categorized COGS (${(directChecks / directCogs).toFixed(2)}x).`,
+    `\nLive data: ${liveChecks.length} checks totalling $${directChecks.toFixed(2)}, of which $${directUnresolved.toFixed(2)} is still unattributed, against $${directCogs.toFixed(2)} of directly categorized COGS.`,
   )
   console.log(`Resolutions on file: ${resCount ?? 0}. Audit entries: ${auditCount ?? 0}.`)
   console.log(`Top clusters: ${clusters.slice(0, 3).map((c) => `${c.count}x $${(c.total / c.count).toFixed(2)}`).join(', ')}.`)

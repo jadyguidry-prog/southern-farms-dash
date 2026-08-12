@@ -419,10 +419,22 @@ export type CheckResolutionProgress = {
   /** Resolved because the owner marked the transaction `excluded`. */
   excludedCount: number
   excludedAmount: number
+  /**
+   * Resolved by a `rejected` overlay — reviewed and recorded as not cost of
+   * goods, with no payee named. Kept in its own bucket rather than folded into
+   * `excluded`, which means "not business spend" and would be a different claim.
+   */
+  reviewedNotCogsCount: number
+  reviewedNotCogsAmount: number
 }
 
 /** How a given check came to be answered — or that it has not been. */
-export type CheckResolvedVia = 'overlay' | 'categorized' | 'excluded' | 'unresolved'
+export type CheckResolvedVia =
+  | 'overlay'
+  | 'categorized'
+  | 'excluded'
+  | 'reviewed-not-cogs'
+  | 'unresolved'
 
 /**
  * The single definition of "this check is answered", shared by the review queue,
@@ -440,16 +452,31 @@ export type CheckResolvedVia = 'overlay' | 'categorized' | 'excluded' | 'unresol
  *                     e.g. applied from the accountant's General Ledger, which
  *                     identifies checks by check number.
  *
+ *  4. `reviewed-not-cogs` — a `rejected` overlay: the owner looked and recorded
+ *                     "not cost of goods" without naming a payee. This is a real
+ *                     answer to the question gross profit asks, so it must count.
+ *
  * Route 1 is checked first so an explicit resolution always wins over a category
  * that may have been applied in bulk.
+ *
+ * Route 4 exists because the review queue was already treating a rejected overlay
+ * as settled while this function — and therefore the progress figures, the COGS
+ * roll-up and the readiness gate — still called it unresolved. That split made a
+ * check unreachable: hidden from every tab, yet counted in "still unknown"
+ * forever, so the backlog could never reach zero. The caller must pass
+ * `hasRejectedOverlay` for the two surfaces to agree.
  */
 export function checkResolvedVia(
   row: Pick<CheckRow, 'expenseCategory' | 'reviewStatus'>,
   approvedOverlay: CheckResolution | undefined,
+  hasRejectedOverlay = false,
 ): CheckResolvedVia {
   if (approvedOverlay) return 'overlay'
   if ((row.reviewStatus ?? '').trim() === 'excluded') return 'excluded'
   if ((row.expenseCategory ?? '').trim().length > 0) return 'categorized'
+  // Checked after `categorized`: a real category is more informative than
+  // "not COGS", and a row can carry both.
+  if (hasRejectedOverlay) return 'reviewed-not-cogs'
   return 'unresolved'
 }
 
@@ -459,8 +486,8 @@ export function checkResolvedVia(
  * Reports dollars as well as counts, and leads with dollars: resolving 100 small
  * checks matters far less to gross profit than resolving five large ones.
  *
- * Each check lands in exactly one of the four buckets, so `overlayAmount +
- * categorizedAmount + excludedAmount + pendingAmount === totalAmount` always
+ * Each check lands in exactly one bucket, so `overlayAmount + categorizedAmount +
+ * excludedAmount + reviewedNotCogsAmount + pendingAmount === totalAmount` always
  * holds and no dollar can be double-counted.
  */
 export function checkResolutionProgress(
@@ -485,12 +512,20 @@ export function checkResolutionProgress(
   let categorizedAmount = 0
   let excludedCount = 0
   let excludedAmount = 0
+  let reviewedNotCogsCount = 0
+  let reviewedNotCogsAmount = 0
+
+  const rejectedIds = new Set(
+    resolutions
+      .filter((r) => r.reviewStatus === 'rejected')
+      .map((r) => r.financialTransactionId),
+  )
 
   for (const row of rows) {
     const amt = Math.abs(Number(row.amount) || 0)
     totalAmount += amt
     const res = approved.get(row.id)
-    const via = checkResolvedVia(row, res)
+    const via = checkResolvedVia(row, res, rejectedIds.has(row.id))
     if (via === 'unresolved') continue
 
     resolvedCount++
@@ -508,6 +543,11 @@ export function checkResolutionProgress(
       categorizedCount++
       categorizedAmount += amt
       category = row.expenseCategory ?? ''
+    } else if (via === 'reviewed-not-cogs') {
+      // Deliberately leaves `category` empty: "not COGS" is the whole content of
+      // the answer, so this can never reach the COGS test below.
+      reviewedNotCogsCount++
+      reviewedNotCogsAmount += amt
     } else {
       excludedCount++
       excludedAmount += amt
@@ -535,5 +575,7 @@ export function checkResolutionProgress(
     categorizedAmount,
     excludedCount,
     excludedAmount,
+    reviewedNotCogsCount,
+    reviewedNotCogsAmount,
   }
 }

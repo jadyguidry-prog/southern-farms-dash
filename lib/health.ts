@@ -1,5 +1,6 @@
 import type { BusinessSettings } from '@/lib/queries'
 import { formatCurrency, formatPercent } from '@/lib/data'
+import { deriveDueDate } from '@/lib/payment-terms'
 
 /**
  * Shared health-scoring logic. Every threshold comes from the owner's stored
@@ -8,6 +9,17 @@ import { formatCurrency, formatPercent } from '@/lib/data'
  * "unknown" is used when the underlying data hasn't been entered yet, so an
  * empty table never masquerades as a passing (or failing) grade.
  */
+/**
+ * "2026-08-18" -> "Aug 18". Split manually rather than `new Date(iso)`, because that
+ * parses a bare date as UTC midnight and renders the PREVIOUS day west of Greenwich —
+ * which would state the wrong due date for a payment.
+ */
+function formatDateLong(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  if (!y || !m || !d) return iso
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
 export type HealthStatus = 'green' | 'yellow' | 'red' | 'unknown'
 
 export type HealthResult = {
@@ -140,6 +152,13 @@ export function cashReserveHealth(
 /**
  * Weekly sales measured against the preferred goal and the minimum floor.
  * Green at/above preferred, yellow from minimum up to preferred, red below minimum.
+ *
+ * The caller MUST pass a FULL seven-day window (the trailing week), never a
+ * part-finished calendar week. The goal and floor are whole-week amounts, so a
+ * Monday-only figure would be judged against a $17,000 floor and reported as a
+ * severe shortfall on every Monday and Tuesday. The messages say "last 7 days"
+ * explicitly because the dashboard card next to this shows calendar
+ * week-to-date — two different windows, so each has to name its own.
  */
 export function weeklySalesHealth(
   weeklySales: number,
@@ -161,7 +180,7 @@ export function weeklySalesHealth(
     return {
       status: 'green',
       label: HEALTH_LABEL.green,
-      message: `Weekly sales of ${formatCurrency(weeklySales)} meet your ${formatCurrency(goal)} preferred target.`,
+      message: `Sales over the last 7 days of ${formatCurrency(weeklySales)} meet your ${formatCurrency(goal)} weekly target.`,
       score: 100,
     }
   }
@@ -170,7 +189,7 @@ export function weeklySalesHealth(
     return {
       status: 'yellow',
       label: HEALTH_LABEL.yellow,
-      message: `Weekly sales of ${formatCurrency(weeklySales)} clear your ${formatCurrency(floor)} floor but fall short of the ${formatCurrency(goal)} goal.`,
+      message: `Sales over the last 7 days of ${formatCurrency(weeklySales)} clear your ${formatCurrency(floor)} weekly floor but fall short of the ${formatCurrency(goal)} goal.`,
       score: 70,
     }
   }
@@ -178,7 +197,7 @@ export function weeklySalesHealth(
   return {
     status: 'red',
     label: HEALTH_LABEL.red,
-    message: `Weekly sales of ${formatCurrency(weeklySales)} are below your ${formatCurrency(floor)} minimum target.`,
+    message: `Sales over the last 7 days of ${formatCurrency(weeklySales)} are below your ${formatCurrency(floor)} weekly minimum.`,
     score: 30,
   }
 }
@@ -350,8 +369,17 @@ export type CheckInsightInput = {
   grossProfitReady: boolean
   /** Largest same-amount groups, the fastest way to clear dollars. */
   topClusters: { amount: number; count: number; total: number; cadence: string | null }[]
-  /** Complete months that have sales but no COGS at all. */
+  /**
+   * Complete months with imported bank data and sales but no COGS categorized —
+   * a genuine categorization gap.
+   */
   monthsMissingCogs: string[]
+  /**
+   * Months with sales whose bank transactions were never imported. Separate from
+   * `monthsMissingCogs` because the remedy differs: these need an import, not
+   * categorization. Optional so existing callers keep working.
+   */
+  monthsMissingBankData?: string[]
   /**
    * How many unresolved checks carry a check number. Optional so existing
    * callers keep working. This matters because a numbered check can be looked up
@@ -438,8 +466,146 @@ type InsightInput = {
    * farm not yet using Bill Pay gets no bill-pay insights rather than zeros.
    */
   billPay?: BillPayInsightInput
+  /**
+   * Weekly cash position from the spending-capacity engine. Omit when fewer than
+   * 8 complete weeks exist, so a thin ledger produces no verdict on solvency.
+   */
+  spending?: SpendingInsightInput
+  /**
+   * Growth Planner position. Omit when the planner has no data (no revenue or
+   * transaction history), so no commitment advice is generated from an empty
+   * database.
+   */
+  growth?: GrowthInsightInput
+  /**
+   * Credit-card exposure. Omit when no card accounts exist, so an empty setup
+   * produces no card advice.
+   */
+  cards?: CardInsightInput
+  /**
+   * Bills needing action and checks outstanding too long. Omit when nothing is due and
+   * nothing is stale, so a tidy week produces no nagging.
+   */
+  bills?: BillsInsightInput
   /** Injectable clock so staleness tests are deterministic. */
   now?: Date
+}
+
+export type BillsInsightInput = {
+  /** Bills past a real vendor due date. Self-scheduled bills are NEVER counted here. */
+  overdueCount: number
+  overdueTotal: number
+  /**
+   * Bills whose owner-chosen payment date has passed. Not late — no vendor deadline —
+   * but still needing a check. Kept separate so the advice can use the right word.
+   */
+  unpaidPlannedCount: number
+  unpaidPlannedTotal: number
+  /** Bills inside the reminder lead time. */
+  dueSoonCount: number
+  dueSoonTotal: number
+  /** Owner-set lead time, quoted in the advice so the number is never a mystery. */
+  leadDays: number
+  /** Checks outstanding beyond the staleness threshold. Still counted as owed. */
+  staleCheckCount: number
+  staleCheckTotal: number
+  staleAfterDays: number
+}
+
+/**
+ * Weekly money-in vs money-out, derived from bank deposits rather than invoices.
+ *
+ * This is the single most consequential input the advisor has: it answers whether
+ * the business is structurally covering its own costs. Both figures are medians,
+ * so a one-off loan advance or a large annual cheque cannot manufacture a
+ * surplus or a crisis that is not there.
+ */
+export type SpendingInsightInput = {
+  typicalWeeklyInflow: number
+  typicalWeeklyOutflow: number
+  /** Complete weeks behind the medians, for honest hedging in the copy. */
+  weeksObserved: number
+  /** Cash that could be spent now without breaching the reserve. */
+  safeToSpendToday: number
+  /**
+   * True when the projection dips under the reserve anywhere in the HORIZON (30 days by
+   * default), which is a longer window than `safeToSpendToday` is solved over. The two
+   * answer different questions on purpose, so any copy using both must say which is which.
+   */
+  breachesReserve: boolean
+  /**
+   * A dated card payment that drops cash under the reserve later in the horizon.
+   *
+   * Separate from `breachesReserve` because the cause matters to the advice: a shortfall
+   * caused by a known, dated payment is actionable (move the date, pay part of it, hold
+   * cash back), whereas a general downward drift needs sales or cost changes. Omitted
+   * entirely when no card payment is responsible, so no advice is invented.
+   */
+  cardCliff?: {
+    accountName: string
+    amount: number
+    dueDate: string
+    /** Cash left on the day it clears, on the cautious basis. */
+    balanceAfter: number
+    shortfall: number
+  }
+  /** Cards with a balance that could NOT be forecast, so the gap is stated not hidden. */
+  unforecastCards?: { accountName: string; reason: string }[]
+}
+
+/**
+ * Growth Planner position, for advisor insights about new commitments.
+ *
+ * `headlineRecurring` is the STRESSED recommendation (survives the mode's sales
+ * decline), never the unstressed edge — the advisor must not headline a number
+ * that breaks on a small dip. `edgeRecurring` is carried only so the copy can
+ * explain the gap when the stressed answer is $0.
+ */
+export type GrowthInsightInput = {
+  /** Recommended monthly commitment that still clears every gate under stress. */
+  headlineRecurring: number
+  /** Largest amount tolerated on the expected path, with no downturn applied. */
+  edgeRecurring: number
+  /** Sales decline the recommendation was stress-tested against. */
+  stressDeclinePct: number
+  modeLabel: string
+  /** Saved proposals whose verdict changed since they were saved. */
+  changedProposals: {
+    name: string
+    fromClassification: string
+    toClassification: string
+    /** True when the change is for the worse (was affordable, now is not). */
+    worsened: boolean
+  }[]
+  /** Approved commitments the owner has said yes to, for the review nudge. */
+  approvedCount: number
+}
+
+/**
+ * Credit-card exposure, for advisor insights about borrowed money on cards.
+ *
+ * Omitted entirely when no card accounts exist, so an empty setup produces no card
+ * advice rather than advice built on zeros.
+ *
+ * `totalOwed` is DELIBERATELY nullable and must never be coerced to 0. Null means
+ * "nobody has entered a balance", which on a card running thousands a month is a very
+ * different statement from "you owe nothing". The insights below branch on null and
+ * say which case it is.
+ */
+export type CardInsightInput = {
+  /** Confirmed amount owed across cards; null when no card balance is recorded. */
+  totalOwed: number | null
+  cardCount: number
+  /** How many cards have an owner-confirmed balance. */
+  confirmedCount: number
+  /** Whole calendar months between the newest card transaction and today. */
+  monthsBehind: number
+  /** Newest recorded card transaction date, null when there is no history. */
+  lastActivityDate: string | null
+  /** Typical monthly charge volume, for sizing the untracked gap. */
+  typicalMonthlyCharges: number | null
+  /** Cards whose utilization is known and above the safe threshold. */
+  highUtilization: { accountName: string; utilizationPct: number }[]
 }
 
 export type BillPayInsightInput = {
@@ -469,10 +635,106 @@ export function generateInsights({
   checks,
   marketing,
   billPay,
+  spending,
+  growth,
+  cards,
+  bills,
   now,
-  }: InsightInput): Insight[] {
+}: InsightInput): Insight[] {
   const out: Insight[] = []
   const { payroll, cash, sales } = pillars
+
+  // --- A dated card payment that breaks the reserve ---
+  // Placed above the weekly-gap insight because it is a specific amount on a specific
+  // date, which is more actionable than a structural trend. No history threshold applies:
+  // the amount and date come from the card itself, not from an estimate.
+  if (spending?.cardCliff) {
+    const c = spending.cardCliff
+    out.push({
+      id: 'auto-card-payment-breaks-reserve',
+      severity: 'critical',
+      category: 'Cash',
+      title: 'A card payment will take you under your cash reserve',
+      detail:
+        `${c.accountName} has ${formatCurrency(c.amount)} due on ` +
+        `${formatDateLong(c.dueDate)}. On a slow week that payment leaves about ` +
+        `${formatCurrency(c.balanceAfter)} in the bank — ${formatCurrency(c.shortfall)} below ` +
+        `your reserve. Spare cash shown as spendable today is measured over a shorter ` +
+        `window and does not hold this back for you. ` +
+        `Either set aside ${formatCurrency(c.shortfall)} now, plan to pay part of the ` +
+        `balance rather than all of it, or line up the payment behind your next deposit.`,
+      impact: `${formatCurrency(c.shortfall)} short on ${formatDateLong(c.dueDate)}`,
+    })
+  }
+
+  // A card carrying a balance that cannot be forecast is a hole in the number above, so
+  // it is reported rather than left to make the forecast quietly optimistic.
+  if (spending?.unforecastCards?.length) {
+    const cards = spending.unforecastCards
+    out.push({
+      id: 'auto-card-payment-not-forecast',
+      severity: 'warning',
+      category: 'Cash',
+      title:
+        cards.length === 1
+          ? 'A card payment is missing from your cash forecast'
+          : `${cards.length} card payments are missing from your cash forecast`,
+      detail:
+        `${cards.map((c) => `${c.accountName} (${c.reason})`).join('; ')}. ` +
+        `Until that is filled in, the forecast assumes no payment leaves your account for ` +
+        `${cards.length === 1 ? 'it' : 'them'}, so your real low point may be worse than shown. ` +
+        `Add the statement due date in Admin to include ${cards.length === 1 ? 'it' : 'them'}.`,
+      impact: 'Forecast is incomplete',
+    })
+  }
+
+  // --- Weekly cash position (bank-derived) ---
+  // Deliberately placed first among ESTIMATE-based insights: whether a typical week covers
+  // its own costs outranks every ratio below it. Requires 8+ complete weeks, so a partially
+  // imported ledger cannot trigger a solvency verdict.
+  if (spending && spending.weeksObserved >= 8) {
+    const gap = spending.typicalWeeklyInflow - spending.typicalWeeklyOutflow
+    const weeklyGap = Math.abs(gap)
+    if (gap < 0) {
+      // Runway in whole weeks: how long today's spare cash absorbs the gap.
+      const weeksOfCover = weeklyGap > 0 ? Math.floor(spending.safeToSpendToday / weeklyGap) : 0
+      out.push({
+        id: 'auto-weekly-cash-deficit',
+        severity: 'critical',
+        category: 'Cash',
+        title: 'A typical week spends more than it takes in',
+        detail:
+          `Across ${spending.weeksObserved} weeks of bank history, a typical week brings in ` +
+          `${formatCurrency(spending.typicalWeeklyInflow)} and pays out ` +
+          `${formatCurrency(spending.typicalWeeklyOutflow)} — about ${formatCurrency(weeklyGap)} ` +
+          `more out than in. ` +
+          (weeksOfCover < 1
+            ? `Your spare cash above the reserve is only ` +
+              `${formatCurrency(spending.safeToSpendToday)} — less than a single week of that ` +
+              `gap — so the reserve itself is now absorbing the shortfall. `
+            : `At that rate your spare cash of ` +
+              `${formatCurrency(spending.safeToSpendToday)} covers about ${weeksOfCover} ` +
+              `${weeksOfCover === 1 ? 'week' : 'weeks'} before the account runs short. `) +
+          `Closing the gap needs either higher sales or lower weekly costs — ` +
+          `trimming spending alone only buys time.`,
+        impact: `About ${formatCurrency(weeklyGap * 4)} a month`,
+      })
+    } else {
+      out.push({
+        id: 'auto-weekly-cash-surplus',
+        severity: 'opportunity',
+        category: 'Cash',
+        title: 'A typical week covers its own costs',
+        detail:
+          `Across ${spending.weeksObserved} weeks of bank history, a typical week brings in ` +
+          `${formatCurrency(spending.typicalWeeklyInflow)} against ` +
+          `${formatCurrency(spending.typicalWeeklyOutflow)} going out, leaving about ` +
+          `${formatCurrency(weeklyGap)} a week. Directing part of that to your cash ` +
+          `reserve builds a buffer for slow weeks.`,
+        impact: `About ${formatCurrency(weeklyGap * 4)} a month`,
+      })
+    }
+  }
 
   // --- Cash reserve ---
   if (cash.status === 'red') {
@@ -716,6 +978,24 @@ export function generateInsights({
     })
   }
 
+  /*
+   * Months whose bank statements were never imported. A DIFFERENT insight from
+   * the categorization gap above, and deliberately so: telling the owner to
+   * categorize cost of goods in a month that contains no bank transactions sends
+   * them to do work that cannot be done. The remedy here is an import.
+   */
+  if (checks && (checks.monthsMissingBankData?.length ?? 0) > 0) {
+    const list = checks.monthsMissingBankData ?? []
+    out.push({
+      id: 'auto-checks-months-missing-bank-data',
+      severity: 'warning',
+      category: 'Expenses',
+      title: 'Some months have sales but no bank transactions imported',
+      detail: `${list.length} ${list.length === 1 ? 'month has' : 'months have'} Square sales but no deposits or bank spending on file (${list.join(', ')}) — only card statements reached ${list.length === 1 ? 'it' : 'them'}. Cost of goods for ${list.length === 1 ? 'that month' : 'those months'} is therefore a fragment of what was really spent, and a margin would compute to almost pure profit. This is an import gap, not a categorization one: there are no transactions there to categorize. Importing the missing bank statements also closes the matching hole in net cash movement.`,
+      impact: `${list.length} ${list.length === 1 ? 'month' : 'months'} without bank data`,
+    })
+  }
+
   if (checks && checks.pendingCount === 0 && checks.resolvedCount > 0) {
     out.push({
       id: 'auto-checks-resolved',
@@ -900,9 +1180,10 @@ export function generateInsights({
       mistypedCategoryCount = 0,
     } = cashFlow
 
-    // Net movement for the newest trustworthy month. A card-only month is
-    // deliberately excluded upstream, since it shows spending with no deposits
-    // and would read as a total loss.
+    // Net movement for the newest trustworthy month. Upstream this is both
+    // FINISHED and deposit-bearing, so neither a card-only month (spending with
+    // no deposits, reading as a total loss) nor a month that is still running
+    // (a few days reading as an overspend) can reach this verdict.
     if (latestCompleteMonth) {
       const { month, inflow, outflow, net } = latestCompleteMonth
       if (net < 0) {
@@ -1136,15 +1417,241 @@ export function generateInsights({
       })
     }
 
-    // A check uncleared for a month is worth chasing — it may be lost.
-    if (billPay.oldestOutstandingDays != null && billPay.oldestOutstandingDays >= 30) {
+    // A stale-check warning used to live here with a HARDCODED 30-day threshold, keyed off
+    // only the single oldest check. It has been replaced by `auto-bills-stale-checks`
+    // below, which uses the owner's `account_data_stale_days` setting and reports every
+    // stale check with its amount.
+    //
+    // Deliberately removed rather than kept: two items describing the same check at two
+    // different thresholds (a hardcoded 30 vs the owner's 14) would contradict each other,
+    // and the owner would have no way to tell which threshold governed. One concept, one
+    // message, one owner-set number.
+  }
+
+  // --- Bills needing action ------------------------------------------------
+  // Three separate messages on purpose, because the REMEDY differs. A genuinely late
+  // bill is a problem; a self-scheduled bill past its planned date just needs a check
+  // written; a stale check needs confirming, not paying again. Merging them into one
+  // "bills need attention" item would tell the owner the wrong thing about all three.
+  if (bills) {
+    if (bills.overdueCount > 0) {
       out.push({
-        id: 'auto-billpay-stale-check',
+        id: 'auto-bills-overdue',
+        severity: 'critical',
+        category: 'Cash Flow',
+        title:
+          bills.overdueCount === 1
+            ? 'A bill is past its due date'
+            : `${bills.overdueCount} bills are past their due dates`,
+        detail:
+          `${formatCurrency(bills.overdueTotal)} is past due against dates the vendors set. ` +
+          `These are real deadlines, not planned payment dates, so late fees or holds are possible.`,
+        impact: `${formatCurrency(bills.overdueTotal)} past due`,
+      })
+    }
+
+    if (bills.unpaidPlannedCount > 0) {
+      out.push({
+        id: 'auto-bills-unpaid-planned',
         severity: 'warning',
-        category: 'Cash',
-        title: 'A written check has been uncleared for weeks',
-        detail: `The oldest outstanding check was written ${billPay.oldestOutstandingDays} days ago and still has not cleared. Confirm the payee received it before it is stale-dated, and reissue if it was lost.`,
-        impact: `Uncleared ${billPay.oldestOutstandingDays} days`,
+        category: 'Cash Flow',
+        title:
+          bills.unpaidPlannedCount === 1
+            ? 'A bill is waiting on a check'
+            : `${bills.unpaidPlannedCount} bills are waiting on checks`,
+        // Deliberately avoids "late"/"overdue": these invoices carry no vendor due date,
+        // so there is no deadline to have missed. Calling them late would be false.
+        detail:
+          `${formatCurrency(bills.unpaidPlannedTotal)} is past the date you planned to pay it. ` +
+          `No vendor deadline applies to these, so nothing is late — they just still need paying.`,
+        impact: `${formatCurrency(bills.unpaidPlannedTotal)} to pay`,
+      })
+    }
+
+    if (bills.dueSoonCount > 0) {
+      out.push({
+        id: 'auto-bills-due-soon',
+        severity: 'opportunity',
+        category: 'Cash Flow',
+        title: `${bills.dueSoonCount} ${bills.dueSoonCount === 1 ? 'bill is' : 'bills are'} due within ${bills.leadDays} days`,
+        detail:
+          `${formatCurrency(bills.dueSoonTotal)} comes due inside your ${bills.leadDays}-day ` +
+          `reminder window. Confirm the cash is there before writing the checks.`,
+        impact: `${formatCurrency(bills.dueSoonTotal)} due soon`,
+      })
+    }
+
+    if (bills.staleCheckCount > 0) {
+      out.push({
+        id: 'auto-bills-stale-checks',
+        severity: 'warning',
+        category: 'Cash Flow',
+        title:
+          bills.staleCheckCount === 1
+            ? 'A written check has not cleared'
+            : `${bills.staleCheckCount} written checks have not cleared`,
+        detail:
+          `${formatCurrency(bills.staleCheckTotal)} in checks has been outstanding more than ` +
+          `${bills.staleAfterDays} days. This is still counted as money you owe, because it has ` +
+          `not left the account. Confirm whether these cleared and mark them in Bill Pay — if ` +
+          `one already cleared, it is inflating today's outflow every day it stays open.`,
+        impact: `${formatCurrency(bills.staleCheckTotal)} unconfirmed`,
+      })
+    }
+  }
+
+  // --- Growth commitments -------------------------------------------------
+  // Every figure here is the STRESSED recommendation from the Growth Planner, so
+  // the advisor and the planner page can never headline different numbers.
+  if (growth) {
+    if (growth.headlineRecurring > 0) {
+      out.push({
+        id: 'auto-growth-capacity',
+        severity: 'opportunity',
+        category: 'Growth',
+        title: 'Room for a new monthly commitment',
+        detail:
+          `On ${growth.modeLabel}, you could take on about ` +
+          `${formatCurrency(growth.headlineRecurring)} a month and still stay above your ` +
+          `cash reserve even if sales fell ${growth.stressDeclinePct}%. ` +
+          `That is the amount that survives the downturn — not the most your limits ` +
+          `would technically allow today, which is higher and much closer to the edge.`,
+        impact: `Up to ${formatCurrency(growth.headlineRecurring)}/mo`,
+      })
+    } else if (growth.edgeRecurring > 0) {
+      // The stressed answer is $0 but the expected path allows something. Saying
+      // only "nothing fits" would be wrong; the honest version names what the
+      // expected path would allow and why it is not the recommendation.
+      out.push({
+        id: 'auto-growth-no-headroom',
+        severity: 'warning',
+        category: 'Growth',
+        title: 'No new commitment is safe against a downturn',
+        detail:
+          `If sales hold exactly as expected, your limits would tolerate about ` +
+          `${formatCurrency(growth.edgeRecurring)} a month. But nothing survives a ` +
+          `${growth.stressDeclinePct}% sales drop, so on ${growth.modeLabel} the ` +
+          `recommendation is to commit nothing new yet. Build cash first, or reconsider ` +
+          `once sales are steadier.`,
+        impact: `Recommended new commitment: ${formatCurrency(0)}`,
+      })
+    } else {
+      out.push({
+        id: 'auto-growth-none',
+        severity: 'warning',
+        category: 'Growth',
+        title: 'No room for a new commitment right now',
+        detail:
+          `Your current cash and obligations leave no room for new recurring spending ` +
+          `on ${growth.modeLabel} — not even before allowing for a downturn. ` +
+          `Rebuilding cash above your reserve is the first step.`,
+        impact: `Recommended new commitment: ${formatCurrency(0)}`,
+      })
+    }
+
+    // A saved proposal that flipped is the single most actionable growth signal:
+    // the owner already cared enough to save it, and the answer has since moved.
+    for (const p of growth.changedProposals) {
+      out.push({
+        id: `auto-growth-proposal-changed-${p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        severity: p.worsened ? 'warning' : 'opportunity',
+        category: 'Growth',
+        title: p.worsened
+          ? `"${p.name}" no longer fits as well as it did`
+          : `"${p.name}" fits better than when you saved it`,
+        detail:
+          `When you saved it the answer was "${p.fromClassification}". Against today's ` +
+          `cash it is "${p.toClassification}". ` +
+          (p.worsened
+            ? `Re-open it before committing — the version you remember is out of date.`
+            : `If you still want it, this is a better moment than when you first checked.`),
+        impact: `${p.fromClassification} → ${p.toClassification}`,
+      })
+    }
+  }
+
+  // --- Credit cards -------------------------------------------------------
+  // This whole block exists because a large real expense was invisible: card spend
+  // ran $3.3k-$11.2k a month, stopped being imported, and nothing said so. The
+  // advisor's job here is to make BOTH kinds of silence loud — a balance nobody has
+  // entered, and a feed that has stopped.
+  if (cards) {
+    // 1. A stale feed is the highest-value warning: it is the failure that hid the
+    //    expense in the first place, and it is silent by nature. Sized in dollars
+    //    using typical monthly charges so it reads as money, not as a data chore.
+    if (cards.monthsBehind >= 1 && cards.lastActivityDate) {
+      const monthWord = cards.monthsBehind === 1 ? 'month' : 'months'
+      const estimate =
+        cards.typicalMonthlyCharges === null
+          ? null
+          : cards.typicalMonthlyCharges * cards.monthsBehind
+      out.push({
+        id: 'auto-cards-feed-stale',
+        severity: cards.monthsBehind >= 2 ? 'critical' : 'warning',
+        category: 'Cards',
+        title: `Card spending is ${cards.monthsBehind} ${monthWord} behind`,
+        detail:
+          `The newest card transaction on file is ${cards.lastActivityDate}. ` +
+          (estimate === null
+            ? `Any spending since then is missing from every figure on this dashboard.`
+            : `At your typical ${formatCurrency(cards.typicalMonthlyCharges ?? 0)} a month, ` +
+              `roughly ${formatCurrency(estimate)} of spending is missing from every ` +
+              `figure on this dashboard.`) +
+          ` Import the latest card statement to close the gap.`,
+        impact:
+          estimate === null
+            ? `${cards.monthsBehind} ${monthWord} not imported`
+            : `~${formatCurrency(estimate)} untracked`,
+      })
+    }
+
+    // 2. No confirmed balance at all. Reported separately from staleness because the
+    //    fix is different — this one is a number to look up, not a file to import.
+    if (cards.totalOwed === null) {
+      out.push({
+        id: 'auto-cards-balance-unknown',
+        severity: 'warning',
+        category: 'Cards',
+        title:
+          cards.cardCount === 1
+            ? 'No balance recorded for your credit card'
+            : 'No balance recorded for any credit card',
+        detail:
+          `Nothing is on file for what is currently owed, so card debt is missing from ` +
+          `your total obligations. This is not the same as owing nothing — it means the ` +
+          `figure has never been entered. Add the current balance in Cash & Debt.`,
+        impact: 'Card debt not counted',
+      })
+    } else if (cards.confirmedCount < cards.cardCount) {
+      // A partial total is worse than none if it is read as complete, so name the gap.
+      const missing = cards.cardCount - cards.confirmedCount
+      out.push({
+        id: 'auto-cards-balance-partial',
+        severity: 'warning',
+        category: 'Cards',
+        title: `${missing} of ${cards.cardCount} cards have no balance recorded`,
+        detail:
+          `The ${formatCurrency(cards.totalOwed)} shown as owed covers only the ` +
+          `${cards.confirmedCount} card${cards.confirmedCount === 1 ? '' : 's'} with a ` +
+          `recorded balance. Real card debt is higher by an unknown amount until the ` +
+          `${missing === 1 ? 'other card' : 'other cards'} ${missing === 1 ? 'is' : 'are'} filled in.`,
+        impact: `Understates card debt`,
+      })
+    }
+
+    // 3. Utilization, only where the limit is actually known. Cards with no recorded
+    //    limit are excluded upstream rather than assumed unlimited.
+    for (const c of cards.highUtilization) {
+      out.push({
+        id: `auto-cards-utilization-${c.accountName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        severity: 'warning',
+        category: 'Cards',
+        title: `${c.accountName} is ${Math.round(c.utilizationPct)}% used`,
+        detail:
+          `Running a card near its limit removes the headroom you would need in a bad ` +
+          `month, and high utilization can affect borrowing terms. Paying this down ` +
+          `restores flexibility.`,
+        impact: `${Math.round(c.utilizationPct)}% of limit used`,
       })
     }
   }
@@ -1156,6 +1663,19 @@ export function generateInsights({
  * Advance a date by one recurrence interval. Used to project the next due date
  * for recurring obligations.
  */
+/**
+ * A Date -> "YYYY-MM-DD" using its LOCAL calendar fields.
+ *
+ * `toISOString().slice(0,10)` converts to UTC first, so a date built at local midnight
+ * reports the PREVIOUS day in any positive-offset timezone. Every due date in this app is
+ * a plain calendar day with no time component, so it must be read off local fields.
+ */
+function toLocalISO(d: Date): string {
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${m}-${day}`
+}
+
 export function addInterval(date: Date, frequency: string): Date {
   const d = new Date(date)
   switch (frequency) {
@@ -1183,17 +1703,51 @@ export function addInterval(date: Date, frequency: string): Date {
  * the past. Returns an ISO date string, or '' when nothing is scheduled.
  */
 export function resolveNextDueDate(
-  o: { dueDate: string; nextDueDate?: string; recurring: boolean; frequency: string },
+  o: {
+    dueDate: string
+    nextDueDate?: string
+    recurring: boolean
+    frequency: string
+    /** Date the vendor issued the invoice, when known. */
+    invoiceDate?: string | null
+    /** Net terms in days for THIS invoice (21 for Net 21). */
+    paymentTermsDays?: number | null
+  },
   today: Date,
 ): string {
-  if (o.nextDueDate) return o.nextDueDate
-  if (!o.dueDate) return ''
-  if (!o.recurring) return o.dueDate
+  // Terms win when they can actually be computed: invoice date + net days IS the deadline
+  // the vendor set, so it outranks any hand-typed date, which is usually a placeholder.
+  //
+  // `deriveDueDate` returns '' unless BOTH parts are present, so a bill with no invoice
+  // date (or a Prepaid vendor with no numeric term) falls through to the old behaviour
+  // untouched. This is what keeps the change additive for every existing row.
+  const derived = deriveDueDate(o.invoiceDate, o.paymentTermsDays)
+  if (derived) {
+    // Deliberately NOT rolled forward by frequency. A net-21 invoice is a one-time
+    // deadline attached to one delivery — even from a vendor billed many times a month.
+    // Rolling it would invent a due date for an invoice that does not exist yet, and for
+    // a vendor delivering weekly it would collapse many separate invoices into one
+    // recurring phantom. Each delivery is its own record with its own clock.
+    return derived
+  }
 
-  let d = new Date(o.dueDate + 'T00:00:00')
+  // An explicit next_due_date is the authority for WHICH DAY of the cycle this bill
+  // falls on, but it is not frozen in time. Nothing in the app advances that column, so
+  // returning it unconditionally pinned recurring bills in the past permanently: they
+  // read as more overdue every day, forever, even once paid. Roll it forward on the same
+  // frequency instead, which keeps the chosen day (the 15th stays the 15th) while
+  // tracking the calendar.
+  //
+  // A ONE-OFF is different: a non-recurring bill that is past due really is late, and
+  // advancing it would hide a genuine problem. So only recurring bills roll.
+  const anchor = o.nextDueDate || o.dueDate
+  if (!anchor) return ''
+  if (!o.recurring) return anchor
+
+  let d = new Date(anchor + 'T00:00:00')
   // Cap iterations so a bad frequency can never spin forever.
   for (let i = 0; i < 400 && d < today; i++) {
     d = addInterval(d, o.frequency || 'Monthly')
   }
-  return d.toISOString().slice(0, 10)
+  return toLocalISO(d)
 }

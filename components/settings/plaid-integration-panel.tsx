@@ -58,6 +58,47 @@ function dayAfter(date: string | null): string {
 }
 
 /**
+ * Plaid does not support Link inside an iframe — their docs are explicit that the
+ * session "may fail or close unexpectedly" because Link expects a top-level browsing
+ * context (it renders its own iframe internally, which cannot be nested inside a
+ * cross-origin one). The embedded preview pane is exactly that case, so Link can be
+ * launched there, accept an institution, and then vanish with no useful explanation.
+ */
+function inIframe() {
+  try {
+    return window.self !== window.top
+  } catch {
+    // Cross-origin access to window.top throws, which itself means we are framed.
+    return true
+  }
+}
+
+const IFRAME_MESSAGE =
+  'this page is running inside an embedded preview, which Plaid does not support. Open it in its own browser tab and connect again.'
+
+/**
+ * Plain-English remedies for Plaid exit codes that are *account configuration*
+ * problems rather than anything wrong in this app — raw codes give the owner no
+ * idea that the fix is a Plaid Dashboard setting.
+ */
+const EXIT_REMEDIES: Record<string, string> = {
+  // Since 2024-10-31 every new US/Canada account must pick a Data Transparency
+  // Messaging use case before Link works in Production. Ruled out by probe on
+  // 2026-08-10: the `default` customization EXISTS and matches US/en (a bogus name
+  // fails differently, with INVALID_FIELD "not found"), so the only remaining cause
+  // is a missing use case. The use-case picker is its OWN section, not inside the
+  // "Consent" row — link straight to it rather than describing where to click.
+  INVALID_LINK_CUSTOMIZATION:
+    'no Data Transparency Messaging use case is selected on the "default" Link customization. Open dashboard.plaid.com/link/data-transparency-v5, pick a use case, then "Publish changes". Required for Production; not an app problem.',
+  INVALID_LINK_TOKEN:
+    'the token expired or was already used — close this and click Connect again.',
+  INVALID_API_KEYS:
+    'PLAID_SECRET does not match PLAID_ENV. Check both in the project environment variables.',
+  INSTITUTION_NOT_RESPONDING:
+    "the bank's own connection is down right now. Nothing to fix here — try again later.",
+}
+
+/**
  * Mounts Plaid Link for exactly one token and opens it exactly once.
  *
  * This is deliberately a separate component. Previously `usePlaidLink` lived in the
@@ -99,11 +140,45 @@ function PlaidLinkLauncher({
       }
       onSuccess(publicToken)
     },
-    onExit: (err) => {
+    // Plaid passes a second `metadata` argument that this previously threw away,
+    // which is why a failure could only ever report "Plaid Link closed" with no
+    // way to tell a user cancelling from the institution refusing the session.
+    // `status` names the pane the owner exited from, and `request_id` /
+    // `link_session_id` are what Plaid Support needs to trace it.
+    onExit: (err, metadata) => {
+      if (!err) {
+        // No error: the owner closed Link deliberately. Silent, except when it
+        // died on the very first pane, which is what an iframe block looks like.
+        onExit(
+          metadata?.status === 'institution_not_found' || !metadata?.status
+            ? inIframe()
+              ? IFRAME_MESSAGE
+              : null
+            : null,
+        )
+        return
+      }
+
+      const parts = [
+        err.display_message ?? err.error_message ?? err.error_code ?? 'unknown error',
+      ]
+      if (err.error_code && err.error_code !== err.display_message) {
+        parts.push(`(${err.error_code})`)
+      }
+      if (metadata?.status) parts.push(`— closed at: ${metadata.status}`)
+
+      const remedy = err.error_code ? EXIT_REMEDIES[err.error_code] : undefined
+      if (remedy) parts.push(`· ${remedy}`)
+
+      const trace = [
+        metadata?.request_id ? `request ${metadata.request_id}` : null,
+        metadata?.link_session_id ? `session ${metadata.link_session_id}` : null,
+      ].filter(Boolean)
+
       onExit(
-        err
-          ? `Plaid Link closed: ${err.display_message ?? err.error_message ?? err.error_code ?? 'unknown error'}`
-          : null,
+        `Plaid Link closed: ${parts.join(' ')}${trace.length ? ` · ${trace.join(', ')}` : ''}${
+          inIframe() ? ` · ${IFRAME_MESSAGE}` : ''
+        }`,
       )
     },
   })
@@ -145,6 +220,11 @@ export function PlaidIntegrationPanel({
   const [oauthRedirectUri, setOauthRedirectUri] = useState<string | undefined>(undefined)
 
   const ready = overview.configured && overview.encryptionConfigured
+
+  // Resolved after mount: `window` is unavailable during SSR, and rendering the
+  // notice on the server would hydrate mismatched.
+  const [framed, setFramed] = useState(false)
+  useEffect(() => setFramed(inIframe()), [])
 
   /**
    * Resume an OAuth connection.
@@ -350,6 +430,25 @@ export function PlaidIntegrationPanel({
               <code className="font-mono text-xs">PLAID_ENCRYPTION_KEY</code> (
               <code className="font-mono text-xs">openssl rand -base64 32</code>) before
               connecting an account.
+            </p>
+          </div>
+        )}
+
+        {ready && framed && (
+          <div className="rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+            <p className="font-medium">Open this page in its own tab to connect</p>
+            <p className="mt-1 text-muted-foreground">
+              Plaid does not support its login window inside an embedded preview — it
+              will accept your bank and then close without connecting.{' '}
+              <a
+                href="/settings"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium underline underline-offset-2"
+              >
+                Open Settings in a new tab
+              </a>
+              , then use Connect there.
             </p>
           </div>
         )}

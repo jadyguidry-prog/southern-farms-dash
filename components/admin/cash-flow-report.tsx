@@ -1,5 +1,6 @@
 import { formatCurrency } from '@/lib/data'
 import { monthLabel, type CashFlowInsight } from '@/lib/cash-flow-service'
+import type { SpendingCapacity } from '@/lib/spending-capacity-data'
 
 /**
  * Reporting view of the bank-derived cash flow (rule 18's third consumer).
@@ -9,7 +10,18 @@ import { monthLabel, type CashFlowInsight } from '@/lib/cash-flow-service'
  * number comes from imported transactions, and months missing their deposit
  * account are labelled rather than quietly shown as losses.
  */
-export function CashFlowReport({ insight }: { insight: CashFlowInsight }) {
+export function CashFlowReport({
+  insight,
+  capacity,
+}: {
+  insight: CashFlowInsight
+  /**
+   * Optional so the report still renders where capacity is not loaded. The
+   * monthly tables above are history; this is the forward-looking weekly
+   * position, which is what tells the owner whether the trend is sustainable.
+   */
+  capacity?: SpendingCapacity
+}) {
   const { monthly, spendByCategory, transactionCount, dateRange } = insight
 
   if (transactionCount === 0) {
@@ -39,6 +51,12 @@ export function CashFlowReport({ insight }: { insight: CashFlowInsight }) {
     { inflow: 0, outflow: 0 },
   )
   const net = totals.inflow - totals.outflow
+
+  // Negative means a typical week spends more than it earns. Computed here so
+  // the heading, the figure, and the explanation below cannot disagree.
+  const weeklyGap = capacity
+    ? capacity.estimate.typicalInflow - capacity.estimate.typicalOutflow
+    : 0
 
   return (
     <section
@@ -126,6 +144,63 @@ export function CashFlowReport({ insight }: { insight: CashFlowInsight }) {
           cash in is understated:{' '}
           {monthly.incompleteMonths.map(monthLabel).join(', ')}.
         </p>
+      )}
+
+      {capacity && capacity.estimate.weeksObserved >= 8 && (
+        <>
+          <h3 className="mt-5 text-sm font-medium">Typical week</h3>
+          <p className="mt-1 text-xs text-muted-foreground text-pretty">
+            Median week across {capacity.estimate.weeksObserved} complete weeks of
+            deposits. Medians, not averages, so a single large cheque or loan
+            advance cannot make a normal week look better than it was.
+          </p>
+
+          {/* No min-width here, unlike the wider tables above: this one is just a
+              label and a figure, so it fits a 390px phone without sideways
+              scrolling. The owner reviews on mobile. */}
+          <div className="mt-3">
+            <table className="w-full border-collapse text-sm">
+              <caption className="sr-only">
+                Typical weekly money in, money out, and the resulting weekly
+                surplus or shortfall
+              </caption>
+              <tbody>
+                <tr className="border-b border-border/60">
+                  <th scope="row" className="py-2 pr-3 text-left font-normal">
+                    Money in, typical week
+                  </th>
+                  <td className="py-2 text-right font-mono text-xs">
+                    {formatCurrency(capacity.estimate.typicalInflow)}
+                  </td>
+                </tr>
+                <tr className="border-b border-border/60">
+                  <th scope="row" className="py-2 pr-3 text-left font-normal">
+                    Money out, typical week
+                  </th>
+                  <td className="py-2 text-right font-mono text-xs">
+                    {formatCurrency(capacity.estimate.typicalOutflow)}
+                  </td>
+                </tr>
+                <tr className="font-medium">
+                  <th scope="row" className="py-2 pr-3 text-left">
+                    {weeklyGap < 0 ? 'Weekly shortfall' : 'Weekly surplus'}
+                  </th>
+                  <td className="py-2 text-right font-mono text-xs">
+                    {formatCurrency(Math.abs(weeklyGap))}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          {weeklyGap < 0 && (
+            <p className="mt-2 text-xs text-muted-foreground text-pretty">
+              A typical week pays out more than it brings in, so cash reserves are
+              being drawn down even in months that look positive above. The
+              monthly totals can still show a gain when a one-off deposit lands.
+            </p>
+          )}
+        </>
       )}
 
       <h3 className="mt-5 text-sm font-medium">Spending by category</h3>

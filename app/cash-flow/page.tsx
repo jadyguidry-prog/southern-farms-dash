@@ -26,17 +26,18 @@ import {
   getBankAccounts,
   getCashDebtSummary,
   getCashFlowMonthly,
-  getCashForecast,
 } from '@/lib/queries'
 import { getCashFlowInsight, monthLabel } from '@/lib/cash-flow-service'
+import { getSpendingCapacity } from '@/lib/spending-capacity-data'
+import { SpendingCapacityPanel } from '@/components/cash-flow/spending-capacity-panel'
 
 export default async function CashFlowPage() {
-  const [bankAccounts, summary, cashFlowMonthly, cashForecast, insight] =
+  const [bankAccounts, summary, cashFlowMonthly, capacity, insight] =
     await Promise.all([
       getBankAccounts(),
       getCashDebtSummary(),
       getCashFlowMonthly(),
-      getCashForecast(),
+      getSpendingCapacity(),
       getCashFlowInsight(),
     ])
 
@@ -127,6 +128,10 @@ export default async function CashFlowPage() {
         />
       </div>
 
+      <div className="mt-4">
+        <SpendingCapacityPanel capacity={capacity} />
+      </div>
+
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
@@ -176,12 +181,16 @@ export default async function CashFlowPage() {
           <CardHeader>
             <CardTitle className="text-base">30-Day Cash Forecast</CardTitle>
             <CardDescription>
-              Projected daily position from today&apos;s cash, scheduled
-              obligations, and expected receipts
+              Projected daily position from today&apos;s cash, your typical sales
+              pattern, scheduled bills, and uncleared payments
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <CashForecastChart data={cashForecast} />
+            <CashForecastChart
+              data={capacity.thirtyDay}
+              minBuffer={capacity.minCashReserve}
+              showCautious
+            />
             {summary.unscheduledObligations > 0 && (
               <p className="mt-2 text-xs text-muted-foreground text-pretty">
                 {formatCurrency(summary.unscheduledObligations)}{' '}

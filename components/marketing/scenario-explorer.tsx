@@ -66,8 +66,8 @@ export function ScenarioExplorer({
       <CardHeader className="p-6 pb-0">
         <CardTitle>What if I spent more?</CardTitle>
         <CardDescription className="text-pretty">
-          Each amount is subtracted from the {formatCurrency(projectedCash)} projected to be left
-          after this month&apos;s known bills, then checked against your{' '}
+          Each amount is subtracted from the {formatCurrency(projectedCash)}{' '}
+          projected to be left after this month&apos;s known bills, then checked against your{' '}
           {formatCurrency(minCashReserve)} reserve target.
         </CardDescription>
       </CardHeader>

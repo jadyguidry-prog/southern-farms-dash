@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
+import { termsToDays } from '@/lib/payment-terms'
 
 async function requireUser() {
   const supabase = await createClient()
@@ -53,6 +54,14 @@ function collectFields(formData: FormData) {
   }
   if (formData.get('requires_1099') !== null) {
     row.requires_1099 = formData.get('requires_1099') === 'true'
+  }
+  // Keep the numeric terms in lockstep with the label, DERIVED rather than entered
+  // separately. Two independent inputs for one fact drift, and here that drift would be
+  // invisible: the vendor would read "Net 21" while every due date computed at 30 days.
+  // termsToDays returns null for Prepaid and for anything unrecognised, which correctly
+  // records "no derivable due date" instead of guessing one.
+  if (formData.get('payment_terms') !== null) {
+    row.payment_terms_days = termsToDays(text(formData, 'payment_terms'))
   }
   return row
 }

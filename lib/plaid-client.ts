@@ -23,10 +23,13 @@ export function isPlaidConfigured(): boolean {
 /**
  * The registered OAuth redirect URI, or null when not configured.
  *
- * Required for OAuth institutions, which now includes **American Express** —
- * credential-based login is unavailable for banks that have migrated to OAuth, so
- * without this the Amex card simply cannot be linked. Plaid sends the owner to the
- * bank's own site, and the bank returns them to this exact URI.
+ * NOT required for OAuth institutions on web, contrary to what this comment used to
+ * claim. **American Express** is OAuth-only (no credential login), but per Plaid's
+ * OAuth guide desktop and mobile web open the bank in a pop-up — or a new tab on
+ * mobile web — "regardless of whether a redirect_uri is provided", so Amex links
+ * without this set. What it actually enables is *webview* browsers (links opened
+ * inside Mail, Facebook, etc.), which cannot use pop-ups. Do not treat a missing
+ * value as a blocker for going to Production.
  *
  * The value must match the entry in the Plaid Dashboard (Developers > API >
  * Allowed redirect URIs) character for character, including `www` and any path, and

@@ -7,6 +7,85 @@ export type FieldDef = {
   required?: boolean
   options?: string[]
   placeholder?: string
+  /**
+   * Write NULL, not 0, when a numeric field is left blank.
+   *
+   * Only valid on columns that are actually nullable. Set it wherever the read path
+   * distinguishes "not recorded" from a real zero — a blank statement balance saved as
+   * `0` claims the card is paid off, which is a specific and expensive lie on an
+   * account that runs five figures a month.
+   *
+   * Deliberately opt-in per field: `credit_limit` and `available_credit` are
+   * `NOT NULL DEFAULT 0` in the database, so forcing NULL there would fail the write
+   * instead of recording the blank.
+   */
+  blankIsNull?: boolean
+}
+
+/**
+ * Coerce a raw form/CSV string to the correct JS type for its column.
+ *
+ * Lives here rather than in the server action so it can be tested directly. The rule it
+ * encodes is easy to regress and expensive when it does: a blank numeric field must not
+ * become 0 where the read path treats NULL as "not recorded". Saving a blank statement
+ * balance as 0 asserts the card is paid off.
+ */
+export function coerceFieldValue(
+  value: string | null,
+  type: FieldType | string,
+  blankIsNull = false,
+): unknown {
+  if (value == null || value === '') {
+    if (type !== 'number') return null
+    return blankIsNull ? null : 0
+  }
+  if (type === 'number') {
+    const n = Number(String(value).replace(/[$,%\s]/g, ''))
+    return Number.isFinite(n) ? n : 0
+  }
+  // Normalize boolean-like values (used by the "recurring" obligation flag).
+  if (value === 'true') return true
+  if (value === 'false') return false
+  return value
+}
+
+/**
+ * Turn a value read from the database back into the string an <input>/<Select> needs.
+ *
+ * The inverse of coerceFieldValue, and load-bearing for editing: `updateRecord` writes
+ * EVERY field in the table def on every save. Any field the edit form fails to prefill
+ * submits as an empty string and overwrites real data with NULL — a silent wipe of a
+ * column the owner never touched.
+ *
+ * Dates are the specific hazard. A Postgres `date` arrives as '2026-08-26', but a
+ * timestamp arrives as '2026-08-26T00:00:00+00:00', and <input type="date"> renders a
+ * value it cannot parse as BLANK. The field then looks legitimately empty and saving
+ * clears the due date. Truncating at 10 chars keeps both shapes working.
+ */
+export function toInputValue(value: unknown, type: FieldType | string): string {
+  if (value == null) return ''
+  if (type === 'date') {
+    if (value instanceof Date) return value.toISOString().slice(0, 10)
+    return String(value).slice(0, 10)
+  }
+  // Booleans back to the 'true'/'false' strings the select options use.
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  return String(value)
+}
+
+/**
+ * The options a select should offer when editing an existing row.
+ *
+ * If the stored value is not among the configured options, a Radix Select renders its
+ * placeholder — it looks like nothing was ever chosen, and saving writes NULL over a
+ * value that was perfectly valid. Legacy rows and hand-run SQL both produce values that
+ * predate the current option list, so surface the stored value instead of dropping it.
+ */
+export function selectOptionsFor(field: FieldDef, currentValue: unknown): string[] {
+  const options = field.options ?? []
+  const current = toInputValue(currentValue, field.type)
+  if (current === '' || options.includes(current)) return options
+  return [current, ...options]
 }
 
 export type TableDef = {
@@ -212,7 +291,10 @@ export const ADMIN_TABLES: TableDef[] = [
     key: 'bank_accounts',
     table: 'bank_accounts',
     label: 'Bank Accounts',
-    description: 'Operating, savings, and credit line balances.',
+    description:
+      'Operating, savings, credit line, and credit card balances. For a credit card, ' +
+      'Current Balance is what you OWE. Keep Last Updated current — the Growth ' +
+      'Planner lowers its confidence when a figure has gone stale.',
     fields: [
       { name: 'account_name', label: 'Account Name', type: 'text', required: true },
       { name: 'account_nickname', label: 'Account Nickname', type: 'text' },
@@ -227,6 +309,21 @@ export const ADMIN_TABLES: TableDef[] = [
       { name: 'current_balance', label: 'Current Balance', type: 'number', required: true },
       { name: 'available_credit', label: 'Available Credit', type: 'number' },
       { name: 'credit_limit', label: 'Credit Limit', type: 'number' },
+      // Card-only, and intentionally optional: left blank they stay NULL, which the
+      // planner reports as "not tracked" rather than treating as a paid-off card.
+      {
+        name: 'statement_balance',
+        label: 'Statement Balance (cards)',
+        type: 'number',
+        // Load-bearing. Without this a blank saves as 0, and the whole read path
+        // (queries.ts, card-safety.ts) treats 0 as a confirmed "nothing due".
+        blankIsNull: true,
+      },
+      {
+        name: 'statement_due_date',
+        label: 'Statement Due Date (cards)',
+        type: 'date',
+      },
       { name: 'last_updated', label: 'Last Updated', type: 'date' },
       { name: 'notes', label: 'Notes', type: 'text' },
     ],
@@ -234,6 +331,8 @@ export const ADMIN_TABLES: TableDef[] = [
       { name: 'account_name', label: 'Account' },
       { name: 'account_type', label: 'Type' },
       { name: 'current_balance', label: 'Balance', format: 'currency' },
+      // Surfaced in the list so a stale row is visible without opening it.
+      { name: 'last_updated', label: 'Updated' },
     ],
     orderBy: { column: 'current_balance', ascending: false },
   },
@@ -323,6 +422,22 @@ export const ADMIN_TABLES: TableDef[] = [
       },
       { name: 'vendor_name', label: 'Payee / Vendor', type: 'text' },
       { name: 'amount', label: 'Amount', type: 'number', required: true },
+      // Invoice date + terms DERIVE the due date (see resolveNextDueDate in health.ts).
+      // Fill both and the Due Date below is computed rather than trusted.
+      {
+        name: 'invoice_date',
+        label: 'Invoice Date (date the vendor billed us)',
+        type: 'date',
+      },
+      {
+        name: 'payment_terms_days',
+        label: 'Payment Terms in Days (21 = Net 21)',
+        type: 'number',
+        // MANDATORY here. Without it a blank saves as 0, and 0 means "Due on Receipt",
+        // so leaving terms empty would mark the bill due the day it was invoiced and
+        // report it overdue. NULL correctly means "no terms recorded".
+        blankIsNull: true,
+      },
       { name: 'due_date', label: 'Due Date', type: 'date', required: true },
       {
         name: 'frequency',
@@ -332,6 +447,15 @@ export const ADMIN_TABLES: TableDef[] = [
         options: ['One-time', 'Weekly', 'Biweekly', 'Monthly', 'Quarterly', 'Annually'],
       },
       { name: 'next_due_date', label: 'Next Due Date', type: 'date' },
+      // Previously unreachable: the column and the read path both existed, but there was
+      // no control, so a bill with no vendor deadline could not be marked as such and was
+      // reported "overdue" against a date the owner had picked themselves.
+      {
+        name: 'self_scheduled',
+        label: 'No vendor due date? (own payment plan - never overdue)',
+        type: 'select',
+        options: ['false', 'true'],
+      },
       {
         name: 'active',
         label: 'Active Status',

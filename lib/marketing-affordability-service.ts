@@ -16,6 +16,11 @@
 
 import { createClient } from '@/lib/supabase/server'
 import { canonicalCategory, type CategoryAliasMap } from '@/lib/categories'
+// Imported for this module's OWN use (windowSum etc.) AND re-exported below so
+// existing importers of `addMonths` from this path keep working. A bare
+// `export { addMonths } from ...` creates a binding for importers only, not a
+// local one the module body can call — which is exactly what broke here.
+import { addMonths } from '@/lib/month-key'
 import { SPEND_TYPES, SPEND_OFFSET_TYPES, type TransactionType } from '@/lib/transactions'
 import { fetchAllPages } from '@/lib/paginate'
 import { isGenericDescription } from '@/lib/transaction-groups'
@@ -97,7 +102,34 @@ export type LapsedChannel = {
   monthsSinceLastCharge: number
   /** Mean per active month while the channel WAS running. */
   typicalMonthly: number
+  /** Distinct calendar months this channel ever charged in. */
+  activeMonths: number
+  /** Individual charges recorded, so a single purchase is visible as such. */
+  chargeCount: number
+  /**
+   * True when any of this channel's charges came from a payee-less row the owner
+   * identified on Check Resolution.
+   *
+   * This decides whether a single active month is TRUSTWORTHY evidence of a
+   * one-off. For a card-fed channel it is: the feed carries every card charge, so
+   * one month means one purchase. For a check-resolved payee it is not — we only
+   * know about the checks that have been identified so far, so silence is
+   * unfinished work rather than proof the payee never recurred.
+   */
+  identifiedFromChecks: boolean
 }
+
+/**
+ * Minimum distinct months of activity before a quiet channel counts as
+ * "lapsed".
+ *
+ * Two is not a tuned threshold — it is the smallest number that can establish
+ * recurrence at all. One month of activity cannot lapse, because nothing was
+ * ever repeating. Below this a quiet payee is a ONE-OFF PURCHASE, which needs a
+ * different message: a lapsed retainer means "find the check or call them", a
+ * finished purchase means "nothing to do".
+ */
+export const MIN_MONTHS_FOR_RECURRENCE = 2
 
 export type SpendReconciliation = {
   /**
@@ -106,6 +138,17 @@ export type SpendReconciliation = {
    * (usually a check), not stopping.
    */
   lapsed: LapsedChannel[]
+  /**
+   * Quiet payees that never recurred — a single purchase, or charges confined to
+   * one month. Kept OUT of `lapsed` because the remedy differs: there is no
+   * subscription to chase and no missing check to hunt for.
+   *
+   * They were previously listed as channels that "billed for a while and then
+   * stopped", with their one purchase amount printed as a `/mo` rate. A single
+   * $222 cardboard-standee order was reported as "$222/mo" alongside advice to
+   * suspect it was still being paid by check.
+   */
+  oneOffPurchases: LapsedChannel[]
   /**
    * Outflows whose description carries no payee at all — `CHECK`, `DEPOSIT` and
    * friends. Structurally unattributable: the bank export has no payee, memo or
@@ -144,7 +187,17 @@ export function reconcileKnownSpend(
   resolutions: Map<string, ResolvedPayee> = new Map(),
 ): SpendReconciliation {
   const thisMonthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`
-  const perChannel = new Map<string, { last: string; months: Set<string>; total: number }>()
+  const perChannel = new Map<
+    string,
+    {
+      last: string
+      months: Set<string>
+      total: number
+      charges: number
+      /** Charges that came from an owner-identified payee-less row. */
+      fromChecks: number
+    }
+  >()
   let unTotal = 0
   let unCount = 0
   const unMonths = new Set<string>()
@@ -180,11 +233,15 @@ export function reconcileKnownSpend(
         MARKETING_PATTERNS.some((p) => p.confident && p.test.test(description.toUpperCase()))
       if (!resolvedIsMarketing) continue
       const resolvedName = marketingChannelName(description)
-      const re = perChannel.get(resolvedName) ?? { last: '', months: new Set<string>(), total: 0 }
+      const re =
+        perChannel.get(resolvedName) ??
+        { last: '', months: new Set<string>(), total: 0, charges: 0, fromChecks: 0 }
       const resolvedDate = r.transactionDate.slice(0, 10)
       if (resolvedDate > re.last) re.last = resolvedDate
       re.months.add(monthKey)
       re.total += Math.abs(r.amount)
+      re.charges += 1
+      re.fromChecks += 1
       perChannel.set(resolvedName, re)
       continue
     }
@@ -197,11 +254,14 @@ export function reconcileKnownSpend(
     if (!isMarketing) continue
 
     const name = marketingChannelName(description)
-    const e = perChannel.get(name) ?? { last: '', months: new Set<string>(), total: 0 }
+    const e =
+      perChannel.get(name) ??
+      { last: '', months: new Set<string>(), total: 0, charges: 0, fromChecks: 0 }
     const date = r.transactionDate.slice(0, 10)
     if (date > e.last) e.last = date
     e.months.add(monthKey)
     e.total += Math.abs(r.amount)
+    e.charges += 1
     perChannel.set(name, e)
   }
 
@@ -216,20 +276,34 @@ export function reconcileKnownSpend(
   }
 
   const lapsed: LapsedChannel[] = []
+  const oneOffPurchases: LapsedChannel[] = []
   for (const [channel, e] of perChannel) {
     const gap = monthsBetween(monthKeyOf(e.last), thisMonthKey)
     if (gap < lapsedAfterMonths) continue
-    lapsed.push({
+    const entry: LapsedChannel = {
       channel,
       lastDate: e.last,
       monthsSinceLastCharge: gap,
       typicalMonthly: e.total / Math.max(1, e.months.size),
-    })
+      activeMonths: e.months.size,
+      chargeCount: e.charges,
+      identifiedFromChecks: e.fromChecks > 0,
+    }
+    // Recurrence decides the bucket, but only where the evidence can support the
+    // call. A single month is proof of a one-off ONLY for a channel the feed sees
+    // in full; for a payee reconstructed from identified checks it just means one
+    // check has been identified so far, so it stays in the list that gets chased.
+    const provenOneOff =
+      e.months.size < MIN_MONTHS_FOR_RECURRENCE && e.fromChecks === 0
+    if (provenOneOff) oneOffPurchases.push(entry)
+    else lapsed.push(entry)
   }
   lapsed.sort((a, b) => b.typicalMonthly - a.typicalMonthly)
+  oneOffPurchases.sort((a, b) => b.typicalMonthly - a.typicalMonthly)
 
   return {
     lapsed,
+    oneOffPurchases,
     unattributable: {
       total: unTotal,
       count: unCount,
@@ -247,14 +321,12 @@ function monthKeyOf(date: string): string {
   return /^\d{4}-\d{2}/.test(date) ? date.slice(0, 7) : ''
 }
 
-/** Step back `n` whole months from a `YYYY-MM` key. */
-export function addMonths(monthKey: string, n: number): string {
-  const [y, m] = monthKey.split('-').map(Number)
-  const total = y * 12 + (m - 1) + n
-  const year = Math.floor(total / 12)
-  const month = (total % 12) + 1
-  return `${year}-${String(month).padStart(2, '0')}`
-}
+// `addMonths` now lives in the pure `@/lib/month-key` module (imported above): it
+// is a clock-free date helper with no server dependencies, and importing it FROM
+// here previously dragged this server service — and `next/headers` — into the
+// client bundle the moment a client component transitively reached it. Re-exported
+// so existing importers of this path keep working.
+export { addMonths }
 
 /**
  * Collapse a card descriptor to a readable channel name.
@@ -391,6 +463,9 @@ export function summarizeCurrentMarketingSpend(
   // Averages run over a fixed window of CALENDAR months, not over the months
   // that happen to contain rows. Dividing by the number of active months would
   // report a $200 average for a business that advertised once all year.
+  //
+  // RECENT_WINDOW_MONTHS drives both the `avg3Month` arithmetic and the wording
+  // that quotes it, so the label can never claim a window the maths didn't use.
   const windowSum = (months: number) => {
     let total = 0
     for (let i = 0; i < months; i += 1) {
@@ -442,7 +517,7 @@ export function summarizeCurrentMarketingSpend(
   return {
     currentMonth: byMonth.get(thisMonthKey) ?? 0,
     currentMonthKey: latestWithSpend?.monthKey ?? null,
-    avg3Month: windowSum(3) / 3,
+    avg3Month: windowSum(RECENT_WINDOW_MONTHS) / RECENT_WINDOW_MONTHS,
     avg12Month: annualTotal / 12,
     typicalMonthly,
     activeMonthsSpanned,
@@ -1344,6 +1419,19 @@ export type MarketingRecommendation = {
   reasons: string[]
   /** Safety rules that actively bound the answer. */
   blockers: string[]
+  /**
+   * States which baseline the direction word ("reduce"/"increase") is measured
+   * against — but ONLY when recent recorded spend contradicts that word, so the
+   * note appears exactly when it is needed and stays silent otherwise.
+   *
+   * Why: the baseline is the stale-proof long-run rate, deliberately not a
+   * trailing window. That is right for the arithmetic and misleading in the copy.
+   * Against a $1,045/mo long-run rate the page said "Reduce marketing by $459, to
+   * $586" while the last 3 recorded months averaged $355 and the last active month
+   * was $0 — so the "cut" was really close to a doubling of recent behaviour. Both
+   * figures are correct; only the unqualified word "reduce" was wrong.
+   */
+  baselineNote: string | null
 }
 
 export function buildRecommendation(input: {
@@ -1360,6 +1448,20 @@ export function buildRecommendation(input: {
   obligationsDue: number
   unscheduledObligations?: number
   boundBy: RecommendedBudget['boundBy']
+  /**
+   * Average monthly marketing RECORDED over the last RECENT_WINDOW_MONTHS. Used
+   * only to detect a misleading direction word — never as the baseline.
+   */
+  recentMonthlyRecorded?: number
+  /** Calendar months since the last recorded marketing charge, if any. */
+  monthsSinceLastSpend?: number | null
+  /**
+   * True when marketing is known to be arriving by a route the feed cannot
+   * attribute (lapsed channels, payee-less checks). Changes the REMEDY: with a
+   * gap the recent figure is a floor to be investigated, without one it is a real
+   * slowdown. Merging the two would send the owner to the wrong screen.
+   */
+  measurementGap?: boolean
 }): MarketingRecommendation {
   const reasons: string[] = []
   const blockers: string[] = []
@@ -1449,7 +1551,37 @@ export function buildRecommendation(input: {
     summary = `Maintain current marketing at ${formatMoney(input.currentMonthlyMarketing)} a month.`
   }
 
-  return { action, amount: roundCents(delta), summary, reasons, blockers }
+  // The note fires on CONTRADICTION, not on a size threshold: a "reduce" whose
+  // target sits above recent recorded spend, or an "increase" whose target sits
+  // below it. No arbitrary "materially diverges" cutoff to calibrate, and it stays
+  // silent whenever the word already matches recent behaviour.
+  let baselineNote: string | null = null
+  const recent = input.recentMonthlyRecorded
+  if (recent !== undefined && (action === 'reduce' || action === 'increase')) {
+    const contradicts =
+      action === 'reduce' ? input.recommended > recent : input.recommended < recent
+    if (contradicts) {
+      const lastSpend =
+        input.monthsSinceLastSpend === null || input.monthsSinceLastSpend === undefined
+          ? null
+          : input.monthsSinceLastSpend === 0
+            ? 'this month'
+            : input.monthsSinceLastSpend === 1
+              ? 'last month'
+              : `${input.monthsSinceLastSpend} months ago`
+      const direction = action === 'reduce' ? 'above' : 'below'
+      baselineNote =
+        `That change is measured against your ${formatMoney(input.currentMonthlyMarketing)}/month long-run rate. ` +
+        `Recorded marketing over the last ${RECENT_WINDOW_MONTHS} months averaged ${formatMoney(recent)}/month` +
+        (lastSpend ? `, with the last charge ${lastSpend}` : '') +
+        `, so ${formatMoney(input.recommended)} is actually ${direction} what the books show you spending lately. ` +
+        (input.measurementGap
+          ? 'Treat that recent figure as a floor, not the truth: marketing is also arriving by routes this feed cannot attribute, so identifying those on Check Resolution is what would settle it.'
+          : 'The long-run rate is used on purpose, so a lagging bank feed cannot argue you into a cut you never made.')
+    }
+  }
+
+  return { action, amount: roundCents(delta), summary, reasons, blockers, baselineNote }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1560,6 +1692,16 @@ export type MarketingAffordability = {
 
 /** Scenario increments offered by the slider, smallest first. */
 export const SCENARIO_INCREMENTS = [250, 500, 1000, 2000, 3000]
+
+/**
+ * Width of the "what have we spent lately" window, in calendar months.
+ *
+ * Deliberately NOT the baseline for any recommendation — a trailing window
+ * collapses toward zero whenever the bank feed lags, which is what produced the
+ * old "$16/month" figure. It is only used to warn when the recommendation's
+ * direction word disagrees with recent recorded spend.
+ */
+export const RECENT_WINDOW_MONTHS = 3
 
 async function fetchTransactions(): Promise<CashFlowInputRow[]> {
   const supabase = await createClient()
@@ -1900,6 +2042,13 @@ export async function getMarketingAffordability(
     obligationsDue: cash.obligations30,
     unscheduledObligations: cash.unscheduledObligations,
     boundBy: budget.boundBy,
+    recentMonthlyRecorded: spend.avg3Month,
+    monthsSinceLastSpend: spend.monthsSinceLastSpend,
+    // A gap exists if either channel has dropped out of the feed OR payee-less
+    // rows remain unidentified. Both mean recorded recent spend understates
+    // reality, and both are resolved on the same screen.
+    measurementGap:
+      reconciliation.lapsed.length > 0 || reconciliation.unattributable.count > 0,
   })
 
   // ---- Confidence ----

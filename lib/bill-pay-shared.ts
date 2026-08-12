@@ -35,12 +35,22 @@ export function paymentLabel(
  *
  * Returns an error message, or null when the input is acceptable.
  */
-export function validatePaymentBasics(input: {
-  amount: number
-  paymentDate: string
-  paymentMethod: string
-  checkNumber?: string
-}): string | null {
+export function validatePaymentBasics(
+  input: {
+    amount: number
+    paymentDate: string
+    paymentMethod: string
+    checkNumber?: string
+  },
+  opts: {
+    /**
+     * Permit `check` with no number yet — for logging a bill that WILL be paid by
+     * check before the check is actually written. Defaults to false so the
+     * "Write a Check" path keeps the strict rule; only invoice logging opts in.
+     */
+    allowUnwrittenCheck?: boolean
+  } = {},
+): string | null {
   const amount = Number(input.amount)
   if (!Number.isFinite(amount) || amount <= 0) {
     return 'Enter a payment amount greater than zero.'
@@ -51,12 +61,296 @@ export function validatePaymentBasics(input: {
   if (input.paymentMethod !== 'check' && input.paymentMethod !== 'ach') {
     return 'Choose check or ACH.'
   }
-  // A check with no number cannot be matched to the bank feed later, which is the
-  // whole reason the float number can be trusted. Same rule as check-resolution.
-  if (input.paymentMethod === 'check' && !(input.checkNumber ?? '').trim()) {
+  // A written check with no number cannot be matched to the bank feed later, which
+  // is the whole reason the float number can be trusted. Same rule as
+  // check-resolution. An invoice logged before the check exists is exempt: the
+  // number is captured later, when the check is actually written.
+  if (
+    input.paymentMethod === 'check' &&
+    !opts.allowUnwrittenCheck &&
+    !(input.checkNumber ?? '').trim()
+  ) {
     return 'Enter the check number.'
   }
   return null
+}
+
+/**
+ * The rules a pending bill (an invoice that is DUE but not yet paid) must satisfy.
+ *
+ * Deliberately separate from validatePaymentBasics: a bill has no payment date,
+ * no method and no check number, because nothing has been paid yet. Reusing the
+ * payment validator here would demand a check number for an unpaid invoice.
+ *
+ * Returns an error message, or null when the input is acceptable.
+ */
+export function validateBillDueBasics(input: {
+  obligationName: string
+  amount: number
+  dueDate: string
+}): string | null {
+  if (!(input.obligationName ?? '').trim()) {
+    return 'Enter what this bill is for.'
+  }
+  const amount = Number(input.amount)
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return 'Enter a bill amount greater than zero.'
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.dueDate ?? '')) {
+    return 'Choose a valid due date.'
+  }
+  return null
+}
+
+/**
+ * The fields an edit is allowed to change on an already-recorded payment.
+ *
+ * A separate validator from validatePaymentBasics because an edit is a CORRECTION of a
+ * payment that already exists, so it must not demand fields the original flow supplies
+ * itself (obligation, method, bank account). What it does still enforce is the part that
+ * makes a payment meaningful: a real amount and a real date.
+ */
+export function validatePaymentEdit(input: {
+  amount: number
+  paymentDate: string
+}): string | null {
+  const amount = Number(input.amount)
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return 'Enter a payment amount greater than zero.'
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.paymentDate ?? '')) {
+    return 'Choose a valid payment date.'
+  }
+  return null
+}
+
+/**
+ * Whether an edit breaks the bank match a CLEARED payment was reconciled against.
+ *
+ * A cleared payment is tied to a specific bank transaction, so its amount and date are
+ * not just data — they are the assertion that this record equals that transaction.
+ * Editing either one makes the app disagree with the bank statement, and the owner
+ * asked to be warned rather than blocked.
+ *
+ * Amount and date are the ONLY fields that matter here. Payee, memo, purpose and check
+ * number are descriptive: correcting a misspelled payee does not change which
+ * transaction this is, so warning about it would train the owner to dismiss the warning
+ * that actually counts.
+ */
+export function editBreaksReconciliation(
+  before: { amount: number; paymentDate: string; status: string },
+  after: { amount: number; paymentDate: string },
+): boolean {
+  if (before.status !== 'cleared') return false
+  // Compare in cents. A numeric column round-tripping through a float can differ in the
+  // last bit without anything having actually changed, which would warn on every save.
+  const amountChanged =
+    Math.round(Number(before.amount) * 100) !== Math.round(Number(after.amount) * 100)
+  const dateChanged = String(before.paymentDate).slice(0, 10) !== String(after.paymentDate).slice(0, 10)
+  return amountChanged || dateChanged
+}
+
+/**
+ * Cent tolerance when deciding whether a bill is fully covered. Amounts are
+ * numeric in Postgres but arrive through JS floats, so an exact `>=` can leave a
+ * bill a hundredth of a cent short and permanently "unpaid".
+ */
+export const BILL_COVERAGE_TOLERANCE = 0.01
+
+/**
+ * Is this bill fully covered by what has been paid against it?
+ *
+ * Used to decide whether a ONE-TIME bill should close. Partial payments must NOT
+ * close it: paying $400 of a $1,000 invoice leaves $600 genuinely owed, and
+ * closing the bill would erase that from every payable total. This is the reason
+ * the check is on the SUM of payments rather than on "a payment happened".
+ *
+ * Callers must pass the total of NON-VOID payments only — a voided check never
+ * left the account, so counting it would close a bill nobody paid.
+ */
+export function billFullyCovered(amount: number, paidTotal: number): boolean {
+  const owed = Number(amount)
+  const paid = Number(paidTotal)
+  if (!Number.isFinite(owed) || !Number.isFinite(paid)) return false
+  // A zero/negative bill amount is not a bill; refuse to call it covered rather
+  // than closing something whose real amount was never recorded.
+  if (owed <= 0) return false
+  return paid + BILL_COVERAGE_TOLERANCE >= owed
+}
+
+/**
+ * The status a one-time bill should hold after its payments are totalled.
+ *
+ * Recurring bills are NEVER routed through here — they roll their due date
+ * forward instead of closing, so that a monthly bill never vanishes from the
+ * forecast (see recordPayment). Passing a recurring bill in would silently
+ * delete it from the payable list after its first payment.
+ */
+export function resolveOneTimeBillStatus(
+  amount: number,
+  paidTotal: number,
+): 'Paid' | 'Pending' {
+  return billFullyCovered(amount, paidTotal) ? 'Paid' : 'Pending'
+}
+
+/**
+ * What is still owed on a ONE-TIME bill after prior payments.
+ *
+ * ONLY valid for one-time bills, and the restriction is the whole point rather
+ * than a caveat. A RECURRING bill's payment history spans every period it has
+ * ever been paid for, so summing it against the single-period `amount` is
+ * meaningless: twelve months of $1,000 rent would report $12,000 paid against
+ * $1,000 owed and a remaining balance of MINUS $11,000. Each recurring period is
+ * a fresh charge, so its correct default payment is the full period amount —
+ * which is why `paymentDefaultAmount` below branches on `recurring` instead of
+ * subtracting a paid total for every bill.
+ *
+ * Mirrors billFullyCovered: same non-void requirement on `paidTotal`, and the
+ * result is floored at zero so an overpaid bill reports nothing remaining rather
+ * than a negative figure that would read as a credit the business doesn't have.
+ */
+export function remainingOnOneTimeBill(amount: number, paidTotal: number): number {
+  const owed = Number(amount)
+  const paid = Number(paidTotal)
+  if (!Number.isFinite(owed) || owed <= 0) return 0
+  if (!Number.isFinite(paid) || paid <= 0) return owed
+  return Math.max(0, round2(owed - paid))
+}
+
+/** Round to cents, so subtraction can't surface float dust as a payable amount. */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+/**
+ * Total of non-void payments recorded against one obligation.
+ *
+ * Filters `void` defensively even though the server query already excludes it:
+ * this helper is the basis of the amount pre-filled into the payment form, and a
+ * voided check that slipped in would understate what's still owed.
+ */
+export function sumPaymentsForObligation(
+  payments: readonly { obligationId: string | null; amount: number; status: string }[],
+  obligationId: string,
+): number {
+  return round2(
+    payments
+      .filter(
+        (p) =>
+          p.obligationId === obligationId &&
+          p.status !== 'void' &&
+          Number.isFinite(Number(p.amount)),
+      )
+      .reduce((sum, p) => sum + Number(p.amount), 0),
+  )
+}
+
+/**
+ * The amount the Record Payment form should offer by default.
+ *
+ * The bug this fixes: the form always seeded the FULL `obligation.amount`, with
+ * no knowledge of prior payments. After paying $400 of a $1,450 invoice, opening
+ * it again offered $1,450 — so accepting the default recorded $1,850 against a
+ * $1,450 bill. Nothing blocked it, and the bill would close while $400 of
+ * phantom spend sat in the outstanding-check total.
+ *
+ * Recurring bills keep the full amount for the reason given in
+ * remainingOnOneTimeBill: their history is not a balance.
+ */
+export function paymentDefaultAmount(
+  bill: { amount: number; recurring: boolean },
+  paidTotal: number,
+): number {
+  if (bill.recurring) return Number(bill.amount)
+  const remaining = remainingOnOneTimeBill(bill.amount, paidTotal)
+  // A fully covered bill shouldn't be payable at all, but if it is reached (a
+  // stale list, a race) offer nothing rather than silently re-billing the total.
+  return remaining
+}
+
+/**
+ * Is this payment more than the bill still owes? Advisory only.
+ *
+ * Deliberately NOT a hard block. Overpaying can be legitimate — a late fee, or an
+ * invoice entered below the real figure — and refusing the write would send the
+ * owner to edit records to write down what actually left the account. The form
+ * warns and lets it through, which keeps the books matching reality while making
+ * an accidental double-payment obvious before it is saved.
+ *
+ * Recurring bills are never flagged: paying a period is not overpaying a balance.
+ */
+export function isOverpayment(
+  bill: { amount: number; recurring: boolean },
+  paidTotal: number,
+  proposedAmount: number,
+): boolean {
+  if (bill.recurring) return false
+  const proposed = Number(proposedAmount)
+  if (!Number.isFinite(proposed) || proposed <= 0) return false
+  const remaining = remainingOnOneTimeBill(bill.amount, paidTotal)
+  return proposed > remaining + BILL_COVERAGE_TOLERANCE
+}
+
+/**
+ * Is this payment still WAITING to leave the bank, with no physical instrument in
+ * existence yet?
+ *
+ * Two cases, both "money promised, nothing written":
+ *   - an ACH draft that hasn't been taken yet, and
+ *   - a bill logged as pay-by-check, before the check is written.
+ *
+ * Both must be described as "expected", never "written".
+ *
+ * Keyed on `checkWritten`, NOT on a missing check number. A written check whose
+ * number simply wasn't recorded is still written: its payment date is a fact, so it
+ * stays eligible for amount+date bank matching. Only an unwritten check has a date
+ * that is merely an intention. Conflating the two would silently change matching
+ * behaviour for checks the owner wrote but didn't fully log.
+ *
+ * Note this deliberately does NOT change the cash math: `sumOutstanding` counts
+ * every outstanding row regardless, which is correct — the money is owed and the
+ * bank balance still includes it either way.
+ */
+export function isAwaitingPayment(p: {
+  paymentMethod: string
+  checkWritten?: boolean
+}): boolean {
+  if (p.paymentMethod === 'ach') return true
+  // Absent flag means "written": matches the column default, so a caller reading an
+  // older row (or a partial object) never gets silently downgraded to unwritten.
+  return p.checkWritten === false
+}
+
+/**
+ * Total actually PAID OUT in the given month (`YYYY-MM`).
+ *
+ * Exported and shared with the page rather than computed inline, so a test cannot
+ * quietly drift from what the owner sees on screen.
+ *
+ * Excludes:
+ *   - void payments — they never happened, and
+ *   - anything still awaiting its money (ACH not yet drafted, check not yet
+ *     written), whose payment date is an intention rather than a fact.
+ *
+ * Cleared and outstanding-but-written payments both count: the money has left, or
+ * the instrument exists and is in flight.
+ */
+export function sumPaidInMonth(
+  payments: Array<{
+    amount: number
+    paymentDate: string
+    status: string
+    paymentMethod: string
+    checkWritten?: boolean
+  }>,
+  month: string,
+): number {
+  return payments
+    .filter(
+      (p) =>
+        p.status !== 'void' && !isAwaitingPayment(p) && p.paymentDate.startsWith(month),
+    )
+    .reduce((s, p) => s + p.amount, 0)
 }
 
 // ---------------------------------------------------------------------------

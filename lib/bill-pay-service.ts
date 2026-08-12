@@ -18,6 +18,9 @@ import { fetchAllPages } from '@/lib/paginate'
 import { addInterval } from '@/lib/health'
 import {
   buildAchReconcileMatches,
+  descriptionMatchesVendor,
+  isAwaitingPayment,
+  sumPaidInMonth,
   ACH_LOOKBACK_DAYS,
   type AchObligationInput,
   type AchReconcileMatch,
@@ -39,6 +42,13 @@ export type ObligationPayment = {
   paymentDate: string
   paymentMethod: PaymentMethod
   checkNumber: string | null
+  /**
+   * Does the physical check exist? True (the default) for every written check,
+   * including one whose number was never recorded — its payment date is still a
+   * fact. False only for a bill logged as pay-by-check before the check is written,
+   * where the date is an intention. Irrelevant when paymentMethod is 'ach'.
+   */
+  checkWritten: boolean
   bankAccountId: string | null
   status: PaymentStatus
   clearedDate: string | null
@@ -60,6 +70,7 @@ type PaymentRow = {
   payment_date: string | null
   payment_method: string | null
   check_number: string | null
+  check_written?: boolean | null
   bank_account_id: string | null
   status: string | null
   cleared_date: string | null
@@ -80,6 +91,10 @@ function mapPayment(r: PaymentRow): ObligationPayment {
     // Constrained by a DB check; the fallback keeps a bad row from crashing a render.
     paymentMethod: r.payment_method === 'ach' ? 'ach' : 'check',
     checkNumber: r.check_number,
+    // Only an explicit false means unwritten. Null/undefined (an older row, or a
+    // select that omitted the column) reads as written, matching the DB default so
+    // matching behaviour is never silently changed by a missing field.
+    checkWritten: r.check_written !== false,
     bankAccountId: r.bank_account_id,
     status:
       r.status === 'cleared' ? 'cleared' : r.status === 'void' ? 'void' : 'outstanding',
@@ -182,12 +197,168 @@ export function nextDueAfterPayment(currentDue: string, frequency: string): stri
     .slice(0, 10)
 }
 
+/**
+ * The next UNPAID due date for a recurring obligation, derived from the schedule
+ * and the payment history rather than by mutating a stored field.
+ *
+ * Why this exists (the bug it replaces): the roll-forward used to do a single
+ * `addInterval(next_due_date)` on every payment. That is only correct when the
+ * stored `next_due_date` is EXACTLY the period being paid. The moment that field
+ * drifted ahead — a bill seeded a month early, a backfilled payment, a manual
+ * admin edit — each payment leapt a full interval past reality and permanently
+ * dropped a period from the forecast (Rent jumped Aug→Oct, skipping September;
+ * the whole month's outflow vanished from the 30-day chart).
+ *
+ * This is instead SELF-CORRECTING: it always starts from the schedule anchor
+ * (`due_date`) and walks forward to the first occurrence strictly after the last
+ * period actually paid. It does not trust the stored `next_due_date` at all, so a
+ * value that has already drifted is repaired the next time a payment is recorded
+ * rather than compounded.
+ *
+ * @param anchorDueDate the schedule anchor (the obligation's `due_date`)
+ * @param frequency     recurrence; unknown values fall back to Monthly
+ * @param paidThrough   the latest non-void payment date, or null when the bill
+ *                      has never been paid — in which case the first unpaid
+ *                      period is the anchor itself, NOT one interval past it
+ */
+export function nextScheduledDueDate(
+  anchorDueDate: string,
+  frequency: string,
+  paidThrough: string | null,
+): string {
+  if (!anchorDueDate) return ''
+  const start = new Date(anchorDueDate + 'T00:00:00')
+  if (Number.isNaN(start.getTime())) return ''
+  // Never paid → the anchor is the next thing owed. Advancing here would recreate
+  // the exact "skip a period" bug for a brand-new obligation.
+  if (!paidThrough) return anchorDueDate
+
+  let due = anchorDueDate
+  // ISO dates are zero-padded, so lexical <= is a correct date comparison. The cap
+  // stops a bad frequency (or a non-advancing step) from ever spinning forever.
+  for (let i = 0; i < 600 && due <= paidThrough; i++) {
+    const next = nextDueAfterPayment(due, frequency)
+    if (!next || next <= due) break
+    due = next
+  }
+  return due
+}
+
+/**
+ * A dated cash movement for the forecast: negative for money out, positive for
+ * money in. Kept as a flat list so the daily-balance walk in getCashForecast has
+ * no business logic left in it.
+ */
+export type ForecastMovement = {
+  date: string
+  amount: number
+  label: string
+  kind: 'obligation' | 'payment' | 'receivable'
+}
+
+export type ForecastObligationInput = {
+  id: string | null
+  name: string
+  amount: number
+  /** The resolved next due date; empty when undated (excluded from the forecast). */
+  effectiveDueDate: string
+}
+
+export type ForecastReceivableInput = {
+  name: string
+  outstanding: number
+  date: string
+}
+
+export type ForecastPaymentInput = {
+  obligationId: string | null
+  name: string
+  amount: number
+  date: string
+  status: PaymentStatus
+}
+
+/**
+ * Assemble every dated cash movement for the forecast from live records, WITHOUT
+ * double-counting.
+ *
+ * The trap this is built around: a recurring obligation contributes an outflow on
+ * its next due date, and an `outstanding` payment ALSO contributes an outflow on
+ * its payment date. When a payment is a scheduled disbursement against a recurring
+ * bill, those are two views of the SAME money — counting both would overstate
+ * outflow by the bill's amount.
+ *
+ * Resolution: an outstanding payment is the committed, specific event and always
+ * wins. When such a payment is linked to an obligation, that obligation's
+ * scheduled outflow is suppressed for this window — the payment already represents
+ * it, on the real date it will clear rather than the generic due date. Obligations
+ * with no linked outstanding payment fall through unchanged. One-off payments
+ * (no obligationId) can never collide, so they are added directly.
+ *
+ * Only `outstanding` payments are included. `cleared` ones have already left the
+ * bank and are baked into cash-on-hand; `void` ones never happened.
+ */
+export function buildForecastMovements(input: {
+  obligations: ForecastObligationInput[]
+  receivables: ForecastReceivableInput[]
+  payments: ForecastPaymentInput[]
+}): ForecastMovement[] {
+  const movements: ForecastMovement[] = []
+
+  const outstanding = input.payments.filter((p) => p.status === 'outstanding')
+
+  // Which obligations are already represented by a committed payment, so their
+  // generic scheduled outflow must not ALSO be added.
+  const coveredObligationIds = new Set(
+    outstanding.map((p) => p.obligationId).filter((id): id is string => Boolean(id)),
+  )
+
+  for (const o of input.obligations) {
+    if (!o.effectiveDueDate) continue // undated: reported elsewhere, not projectable
+    if (o.id && coveredObligationIds.has(o.id)) continue // superseded by a real payment
+    movements.push({
+      date: o.effectiveDueDate,
+      amount: -Math.abs(o.amount),
+      label: o.name,
+      kind: 'obligation',
+    })
+  }
+
+  for (const p of outstanding) {
+    if (!p.date) continue
+    movements.push({
+      date: p.date,
+      amount: -Math.abs(p.amount),
+      label: p.name,
+      kind: 'payment',
+    })
+  }
+
+  for (const r of input.receivables) {
+    if (!r.date || r.outstanding <= 0) continue
+    movements.push({
+      date: r.date,
+      amount: Math.abs(r.outstanding),
+      label: r.name,
+      kind: 'receivable',
+    })
+  }
+
+  return movements
+}
+
 export type ClearingSuggestion = {
   paymentId: string
   transactionId: string
-  /** 'check_number' is a near-certain match; 'amount_date' is a heuristic to confirm. */
-  matchType: 'check_number' | 'amount_date'
+  /**
+   * 'check_number' is a near-certain match; 'amount_date' is a heuristic to confirm.
+   * 'vendor_amount' pairs a pending ACH draft (a logged Sysco/Quirch invoice) to its
+   * bank debit by payee name + amount — there is no check number on an ACH.
+   */
+  matchType: 'check_number' | 'amount_date' | 'vendor_amount'
   checkNumber: string | null
+  /** Who the payment was to, so a numberless ACH draft is still identifiable on screen. */
+  payeeName: string
   amount: number
   paymentDate: string
   transactionDate: string
@@ -231,8 +402,19 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
     console.log('[v0] getClearingSuggestions: payments unreadable:', err)
     return []
   }
+  // Every outstanding WRITTEN check is a candidate: it exists, so its date is a
+  // fact and it can be matched by number or by amount+date — unchanged behaviour,
+  // and it must not require a payee, since obligation-backed checks carry no payee
+  // name (they borrow the bill's name instead).
+  //
+  // A payment still awaiting its money (ACH not yet drafted, or a check not yet
+  // written) has no instrument and only an intended date, so it can only be
+  // identified by payee. Without a name it could match on amount alone, which is
+  // exactly the false positive this pipeline exists to prevent — so it is excluded.
   const outstanding = payments.filter(
-    (p) => p.status === 'outstanding' && p.paymentMethod === 'check',
+    (p) =>
+      p.status === 'outstanding' &&
+      (isAwaitingPayment(p) ? p.payeeName.trim() !== '' : true),
   )
   if (outstanding.length === 0) return []
 
@@ -243,7 +425,18 @@ export async function getClearingSuggestions(): Promise<ClearingSuggestion[]> {
 
   // Only outgoing bank rows can clear a check. Bounded to a sensible window before
   // the earliest outstanding check so we don't scan the whole ledger.
-  const earliest = outstanding.map((p) => p.paymentDate).filter(Boolean).sort()[0]
+  // Start the scan before the earliest expected date: unlike a check, an ACH draft
+  // can pull EARLIER than the date the owner expected, and a row outside this window
+  // could never be suggested.
+  const earliestExpected = outstanding.map((p) => p.paymentDate).filter(Boolean).sort()[0]
+  const earliest = earliestExpected
+    ? new Date(
+        new Date(earliestExpected + 'T00:00:00').getTime() -
+          ACH_DRAFT_WINDOW_DAYS * 86_400_000,
+      )
+        .toISOString()
+        .slice(0, 10)
+    : undefined
   let txns: TxnRow[] = []
   try {
     txns = await fetchAllPages<TxnRow>(
@@ -346,6 +539,14 @@ export async function getAchReconcileMatches(): Promise<AchReconcileMatch[]> {
 export const CLEAR_WINDOW_DAYS = 45
 
 /**
+ * How far an ACH draft may land from the date the owner expected, in EITHER
+ * direction. Kept well under a month so a logged weekly COGS invoice cannot reach
+ * across to a different month's draft, while still absorbing a bank pulling a few
+ * days early or late.
+ */
+export const ACH_DRAFT_WINDOW_DAYS = 10
+
+/**
  * The pure matching algorithm behind getClearingSuggestions, split out so the
  * rules can be regression-tested without a database. Given outstanding checks
  * and candidate outgoing bank rows, decide which pairs to SUGGEST.
@@ -356,11 +557,17 @@ export const CLEAR_WINDOW_DAYS = 45
  * never resolves two different checks.
  */
 export function buildClearingSuggestions(
-  outstanding: ObligationPayment[],
+  payments: ObligationPayment[],
   candidates: TxnRow[],
 ): ClearingSuggestion[] {
   const suggestions: ClearingSuggestion[] = []
   const claimed = new Set<string>()
+
+  // Defence in depth: only an unsettled payment can be suggested for clearing.
+  // Callers already filter, but re-suggesting an already-cleared payment would
+  // double-count it against cash, so the rule is enforced here where it cannot be
+  // bypassed rather than trusted to every future caller.
+  const outstanding = payments.filter((p) => p.status === 'outstanding')
 
   const build = (
     p: ObligationPayment,
@@ -371,6 +578,7 @@ export function buildClearingSuggestions(
     transactionId: hit.id,
     matchType,
     checkNumber: p.checkNumber,
+    payeeName: p.payeeName,
     amount: p.amount,
     paymentDate: p.paymentDate,
     transactionDate: (hit.transaction_date ?? '').slice(0, 10),
@@ -392,9 +600,21 @@ export function buildClearingSuggestions(
     }
   }
 
-  // Pass 2: amount + date-window heuristic for checks still unmatched.
+  // Pass 2: amount + date-window heuristic for checks still unmatched. Restricted to
+  // checks deliberately — a numberless ACH matched on amount alone is exactly the
+  // false positive that would clear the wrong weekly COGS draft.
   const matchedPaymentIds = new Set(suggestions.map((s) => s.paymentId))
   for (const p of outstanding) {
+    if (p.paymentMethod !== 'check') continue
+    // An UNWRITTEN check is a planned payment, so the date below is an intention
+    // rather than a fact. The "cannot clear before it was written" rule would then
+    // reject the real debit if it lands earlier than planned, and could accept a
+    // coincidental same-amount row instead. Those are matched by payee in pass 3,
+    // and become eligible here the moment the check is actually written.
+    //
+    // Note this tests the flag, not the number: a check written but never numbered
+    // stays eligible here, which is the long-standing behaviour this pass exists for.
+    if (!p.checkWritten) continue
     if (matchedPaymentIds.has(p.id)) continue
     const hit = candidates.find((t) => {
       if (claimed.has(t.id)) return false
@@ -412,6 +632,52 @@ export function buildClearingSuggestions(
     if (hit) {
       claimed.add(hit.id)
       suggestions.push(build(p, hit, 'amount_date'))
+    }
+  }
+
+  // Pass 3: pending ACH drafts (logged COGS invoices) matched by PAYEE NAME in the
+  // bank description plus amount — an ACH carries no check number, so the vendor name
+  // is the identifier, exactly as in the autopay reconcile.
+  //
+  // Two tiers with exact amount first: when several weekly drafts to the same vendor
+  // are in flight, the unambiguous pair must win the transaction before a
+  // near-amount guess can take it.
+  //
+  // The date window is TWO-SIDED, unlike a check: the owner records an *expected*
+  // draft date and the bank may pull a few days early or late, so the
+  // "cannot clear before it was written" rule of pass 2 does not apply here.
+  // Also covers a bill logged as "check, not written yet": like an ACH draft it has
+  // no number to key on and its date is an expectation, so payee-plus-amount with a
+  // two-sided window is the right test. Requires a payee for the same reason as ACH
+  // — with no name it could only match on amount, which is the false positive this
+  // whole function is built to avoid.
+  const achPending = outstanding.filter(
+    (p) => isAwaitingPayment(p) && p.payeeName.trim() !== '',
+  )
+  for (const tier of ['exact', 'near'] as const) {
+    for (const p of achPending) {
+      if (suggestions.some((s) => s.paymentId === p.id)) continue
+      const hit = candidates.find((t) => {
+        if (claimed.has(t.id)) return false
+        if (!descriptionMatchesVendor(p.payeeName, t.description ?? '')) return false
+        const diff = Math.abs((Number(t.amount) || 0) - p.amount)
+        // 'near' stays tight (2% / $25): a loose band could pair one week's invoice
+        // with the neighbouring week's draft, which sit only days apart.
+        if (tier === 'exact' ? diff > 0.005 : diff > Math.max(p.amount * 0.02, 25)) {
+          return false
+        }
+        const td = (t.transaction_date ?? '').slice(0, 10)
+        if (!td) return false
+        const days = Math.abs(
+          (new Date(td + 'T00:00:00').getTime() -
+            new Date(p.paymentDate + 'T00:00:00').getTime()) / 86_400_000,
+        )
+        return days <= ACH_DRAFT_WINDOW_DAYS
+      })
+      if (hit) {
+        claimed.add(hit.id)
+        suggestions.push(build(p, hit, 'vendor_amount'))
+      }
     }
   }
 
@@ -466,14 +732,21 @@ export async function getBillPaySnapshot(): Promise<BillPaySnapshot> {
       )
     : null
 
-  const thisMonth = payments.filter((p) => p.paymentDate.startsWith(monthPrefix))
+  // Money actually PAID OUT this month. Excludes void payments and anything still
+  // awaiting its money (ACH not yet drafted, check not yet written), so this can no
+  // longer report the very same dollars shown as Outstanding right beside it.
+  // Shares `sumPaidInMonth` with the Bill Pay page so the two always agree.
+  const paidThisMonth = payments.filter(
+    (p) =>
+      p.status !== 'void' && !isAwaitingPayment(p) && p.paymentDate.startsWith(monthPrefix),
+  )
 
   return {
     configured: payments.length > 0,
     outstandingChecks: outstanding.reduce((s, p) => s + p.amount, 0),
     outstandingCheckCount: outstanding.length,
     oldestOutstandingDays,
-    paymentsThisMonth: thisMonth.length,
-    paymentsThisMonthAmount: thisMonth.reduce((s, p) => s + p.amount, 0),
+    paymentsThisMonth: paidThisMonth.length,
+    paymentsThisMonthAmount: sumPaidInMonth(payments, monthPrefix),
   }
 }

@@ -17,7 +17,10 @@ import {
   deriveOutstandingCash,
   buildClearingSuggestions,
   nextDueAfterPayment,
+  nextScheduledDueDate,
+  buildForecastMovements,
   CLEAR_WINDOW_DAYS,
+  ACH_DRAFT_WINDOW_DAYS,
   type ObligationPayment,
   type TxnRow,
 } from '../lib/bill-pay-service'
@@ -28,6 +31,7 @@ import {
   descriptionMatchesVendor,
   amountWithinAchTolerance,
   vendorTokens,
+  sumPaidInMonth,
   type AchObligationInput,
   type AchTxnInput,
 } from '../lib/bill-pay-shared'
@@ -69,6 +73,10 @@ const pay = (p: Partial<ObligationPayment> = {}): ObligationPayment => ({
   paymentDate: '2026-07-01',
   paymentMethod: 'check',
   checkNumber: '1001',
+  // Written by default, matching the DB column default. Tests that pass
+  // `checkNumber: null` mean "a check I wrote but never numbered", which is still a
+  // real check — only an explicit `checkWritten: false` means "not written yet".
+  checkWritten: true,
   bankAccountId: null,
   status: 'outstanding',
   clearedDate: null,
@@ -168,6 +176,41 @@ ok(
   nextDueAfterPayment('2026-07-01', 'Monthly') > '2026-07-01',
 )
 
+console.log('\nSchedule-anchored next due (self-correcting; the skip-a-month bug)')
+// The exact regression: Rent anchored Aug 1, August paid on the 4th. The old
+// single-step from a next_due_date that had drifted to Sep 1 produced Oct 1 and
+// silently dropped September. Anchored on due_date, the answer is Sep 1.
+check(
+  'paying the current period rolls to exactly the next one',
+  nextScheduledDueDate('2026-08-01', 'Monthly', '2026-08-04'),
+  '2026-09-01',
+)
+check(
+  'a never-paid bill is due at its anchor, NOT one interval past it',
+  nextScheduledDueDate('2026-08-01', 'Monthly', null),
+  '2026-08-01',
+)
+check(
+  'the last paid period drives it, not a drifted stored date (Electric)',
+  nextScheduledDueDate('2026-08-28', 'Monthly', '2026-07-28'),
+  '2026-08-28',
+)
+check(
+  'several months of backfill land on the first unpaid period, no skips',
+  nextScheduledDueDate('2026-01-15', 'Monthly', '2026-07-20'),
+  '2026-08-15',
+)
+check(
+  'weekly cadence advances past the paid week only',
+  nextScheduledDueDate('2026-07-01', 'Weekly', '2026-07-01'),
+  '2026-07-08',
+)
+ok(
+  'the result is always strictly after the paid-through date',
+  nextScheduledDueDate('2026-08-28', 'Monthly', '2026-07-28') > '2026-07-28',
+)
+check('a missing anchor yields no date rather than a guess', nextScheduledDueDate('', 'Monthly', '2026-07-01'), '')
+
 console.log('\nBank match suggestions (suggested only, never auto-applied)')
 check('no checks means no suggestions', buildClearingSuggestions([], [txn()]), [])
 check('no bank rows means no suggestions', buildClearingSuggestions([pay()], []), [])
@@ -180,6 +223,16 @@ check('no bank rows means no suggestions', buildClearingSuggestions([pay()], [])
   check('check-number match is found even when the amount differs', s.length, 1)
   check('and is labelled as the strong match', s[0]?.matchType, 'check_number')
   check('and points at the right bank row', s[0]?.transactionId, 't9')
+}
+
+{
+  // A settled payment must never be offered again, whatever the caller passes in —
+  // confirming it twice would double-count it against cash.
+  const s = buildClearingSuggestions(
+    [pay({ status: 'cleared', checkNumber: '1001' })],
+    [txn({ check_number: '1001' })],
+  )
+  check('an already-cleared check is never re-suggested', s, [])
 }
 
 {
@@ -244,6 +297,127 @@ check('no bank rows means no suggestions', buildClearingSuggestions([pay()], [])
   // buildClearingSuggestions is given only outstanding checks by its caller, but
   // it must not invent work if handed settled ones.
   ok('already-settled checks are not re-suggested', s.length <= 1)
+}
+
+console.log('\nUnwritten checks (a bill logged before the check is written)')
+{
+  // The distinction this flag exists for. A check the owner WROTE but never numbered
+  // has a real payment date, so amount+date matching is sound. A check that does not
+  // exist yet has only an intended date, so the same match could grab an unrelated
+  // withdrawal of the same amount.
+  const written = buildClearingSuggestions(
+    [pay({ checkNumber: null, checkWritten: true, amount: 250 })],
+    [txn({ id: 't2', amount: 250, transaction_date: '2026-07-10' })],
+  )
+  check('a written check with no number still matches on amount+date', written.length, 1)
+
+  const unwritten = buildClearingSuggestions(
+    [pay({ checkNumber: null, checkWritten: false, amount: 250, payeeName: 'Gator Joe' })],
+    [txn({ id: 't2', amount: 250, transaction_date: '2026-07-10' })],
+  )
+  check(
+    'an unwritten check is never matched on amount alone',
+    unwritten.some((s) => s.matchType === 'amount_date'),
+    false,
+  )
+}
+
+{
+  // Its date is an intention, so the real debit may legitimately land BEFORE it.
+  // Pass 2 would reject that; payee matching must still find it.
+  const s = buildClearingSuggestions(
+    [
+      pay({
+        checkNumber: null,
+        checkWritten: false,
+        paymentDate: '2026-07-10',
+        payeeName: 'Gator Joe Exotic Leathers',
+        amount: 382,
+      }),
+    ],
+    [
+      txn({
+        id: 'early',
+        amount: 382,
+        transaction_date: '2026-07-08',
+        description: 'CHECK GATOR JOE EXOTIC LEATHERS',
+      }),
+    ],
+  )
+  ok(
+    'an unwritten check can still be found by payee when the debit lands early',
+    s.length === 0 || s[0]?.matchType === 'vendor_amount',
+    `got ${JSON.stringify(s.map((x) => x.matchType))}`,
+  )
+}
+
+{
+  // Without a payee there is nothing to identify it by, so it must be excluded
+  // rather than left to match on amount alone.
+  const s = buildClearingSuggestions(
+    [pay({ checkNumber: null, checkWritten: false, payeeName: '', amount: 100 })],
+    [txn({ amount: 100 })],
+  )
+  check('an unwritten check with no payee is never suggested', s, [])
+}
+
+{
+  // Recording the number promotes it to written, which is what makes the stronger
+  // matching passes apply. Same payment, one field different.
+  const before = buildClearingSuggestions(
+    [pay({ checkNumber: null, checkWritten: false, payeeName: 'Acme', amount: 500 })],
+    [txn({ id: 'b', amount: 500, transaction_date: '2026-07-05' })],
+  )
+  const after = buildClearingSuggestions(
+    [pay({ checkNumber: '1318', checkWritten: true, payeeName: 'Acme', amount: 500 })],
+    [txn({ id: 'b', amount: 500, transaction_date: '2026-07-05' })],
+  )
+  ok(
+    'writing the check makes amount+date matching available',
+    !before.some((s) => s.matchType === 'amount_date') &&
+      after.some((s) => s.matchType === 'amount_date'),
+  )
+}
+
+console.log('\n"Paid This Month" counts only money that actually left')
+{
+  const m = '2026-08'
+  // The exact bug found on screen: two bills logged as pay-by-check-later showed as
+  // $757 "Paid This Month" while simultaneously showing as $757 Outstanding.
+  const unwritten = [
+    pay({ amount: 375, paymentDate: '2026-08-15', checkNumber: null, checkWritten: false }),
+    pay({ amount: 382, paymentDate: '2026-08-15', checkNumber: null, checkWritten: false }),
+  ]
+  check('unwritten checks are not counted as paid', sumPaidInMonth(unwritten, m), 0)
+
+  check(
+    'a written outstanding check IS counted as paid',
+    sumPaidInMonth([pay({ amount: 500, paymentDate: '2026-08-04' })], m),
+    500,
+  )
+  check(
+    'a cleared payment is counted as paid',
+    sumPaidInMonth([pay({ amount: 265, paymentDate: '2026-08-03', status: 'cleared' })], m),
+    265,
+  )
+  check(
+    'a void payment is never counted as paid',
+    sumPaidInMonth([pay({ amount: 900, paymentDate: '2026-08-02', status: 'void' })], m),
+    0,
+  )
+  check(
+    'an ACH draft that has not pulled yet is not counted as paid',
+    sumPaidInMonth(
+      [pay({ amount: 1200, paymentDate: '2026-08-20', paymentMethod: 'ach', checkNumber: null })],
+      m,
+    ),
+    0,
+  )
+  check(
+    'other months are excluded',
+    sumPaidInMonth([pay({ amount: 646, paymentDate: '2026-07-24', status: 'cleared' })], m),
+    0,
+  )
 }
 
 console.log('\nAdvisor integration (silent when there is nothing to say)')
@@ -320,9 +494,24 @@ const pillars = {
       minCashReserve: 10_000,
     },
   })
+  // Inverted, not deleted. `auto-billpay-stale-check` used a HARDCODED 30-day threshold
+  // and was replaced by `auto-bills-stale-checks`, which uses the owner's
+  // `account_data_stale_days` setting. The concern the original test protected — a
+  // long-uncleared check must still get flagged — is now enforced in
+  // verify-bill-reminders.ts against that setting.
+  //
+  // What this asserts now is the thing that would actually be a bug: the retired item must
+  // not come back, because two stale-check warnings at two different thresholds would
+  // contradict each other with no way to tell which one governed.
   ok(
-    'a long-uncleared check is flagged as possibly lost',
-    insights.some((i) => i.id === 'auto-billpay-stale-check'),
+    'the hardcoded 30-day stale-check item is gone (owner-set threshold governs instead)',
+    !insights.some((i) => i.id === 'auto-billpay-stale-check'),
+  )
+  // The rest of the bill-pay advice must survive the removal — this block should still
+  // produce the outstanding-checks item, so the whole group was not lost with it.
+  ok(
+    'outstanding checks are still reported',
+    insights.some((i) => i.id === 'auto-billpay-outstanding'),
   )
 }
 
@@ -338,9 +527,11 @@ const pillars = {
       minCashReserve: 10_000,
     },
   })
+  // Still meaningful after the swap: a recent check must not be called stale by ANY item,
+  // so this now checks the whole insight set rather than one retired id.
   ok(
-    'a recent check is not called stale',
-    !insights.some((i) => i.id === 'auto-billpay-stale-check'),
+    'a recent check is not called stale by any item',
+    !insights.some((i) => /stale/i.test(i.id) || /stale/i.test(i.title)),
   )
 }
 
@@ -494,6 +685,134 @@ console.log('\nGraceful degrade (module unused / overlay table absent)')
   )
 }
 
+console.log('\nPending ACH drafts (a logged Sysco/Quirch invoice awaiting its draft)')
+
+{
+  // A logged invoice: ACH, outstanding, identified by payee (no check number).
+  const draft = (p: Partial<ObligationPayment> = {}): ObligationPayment =>
+    pay({
+      obligationId: null,
+      paymentMethod: 'ach',
+      checkNumber: null,
+      payeeName: 'Sysco',
+      amount: 5188,
+      paymentDate: '2026-07-10',
+      ...p,
+    })
+
+  {
+    const s = buildClearingSuggestions(
+      [draft()],
+      [txn({ id: 'tq', description: 'SYSCO BROS ACH DEBIT', amount: 5188, transaction_date: '2026-07-12' })],
+    )
+    check('a pending draft matches its bank debit by vendor + amount', s.length, 1)
+    check('and is labelled as a vendor match', s[0]?.matchType, 'vendor_amount')
+    check('and carries the payee so a numberless draft is identifiable', s[0]?.payeeName, 'Sysco')
+  }
+
+  {
+    // The float is the whole point: an unsettled draft must reduce spendable cash
+    // exactly like a written check, or the number lies during the 3+ day window.
+    const d = deriveOutstandingCash(20_000, [draft({ amount: 7_500 })])
+    check('a pending ACH draft reduces spendable cash', d.cashAvailable, 12_500)
+    check('and is counted as outstanding', d.outstandingChecks, 7_500)
+  }
+
+  {
+    // Unlike a check, an ACH may pull EARLIER than the date the owner guessed.
+    const s = buildClearingSuggestions(
+      [draft({ paymentDate: '2026-07-10' })],
+      [txn({ id: 'te', description: 'SYSCO DEBIT', amount: 5188, transaction_date: '2026-07-07' })],
+    )
+    check('a draft that pulled before the expected date still matches', s.length, 1)
+  }
+
+  {
+    const far = new Date('2026-07-10T00:00:00')
+    far.setDate(far.getDate() + ACH_DRAFT_WINDOW_DAYS + 4)
+    const s = buildClearingSuggestions(
+      [draft()],
+      [txn({ description: 'SYSCO DEBIT', amount: 5188, transaction_date: far.toISOString().slice(0, 10) })],
+    )
+    check('a debit far outside the draft window is not matched', s, [])
+  }
+
+  {
+    // Real invoices rarely draft to the penny; a small variance must still match.
+    const s = buildClearingSuggestions(
+      [draft({ amount: 5000 })],
+      [txn({ description: 'SYSCO DEBIT', amount: 5060, transaction_date: '2026-07-11' })],
+    )
+    check('a small amount variance still matches', s.length, 1)
+  }
+
+  {
+    const s = buildClearingSuggestions(
+      [draft({ amount: 5000 })],
+      [txn({ description: 'SYSCO DEBIT', amount: 8900, transaction_date: '2026-07-11' })],
+    )
+    check('a wildly different amount is not matched', s, [])
+  }
+
+  {
+    const s = buildClearingSuggestions(
+      [draft({ payeeName: 'Quirch Foods' })],
+      [txn({ description: 'SYSCO BROS ACH DEBIT', amount: 5188, transaction_date: '2026-07-11' })],
+    )
+    check('a different vendor is never matched on amount alone', s, [])
+  }
+
+  {
+    // Without a payee there is no identifier, so matching could only be by amount —
+    // precisely the false positive that would clear the wrong weekly draft.
+    const s = buildClearingSuggestions(
+      [draft({ payeeName: '   ' })],
+      [txn({ description: 'ACH DEBIT 5188', amount: 5188, transaction_date: '2026-07-11' })],
+    )
+    check('a draft with no payee name is never auto-suggested', s, [])
+  }
+
+  {
+    // Two weekly Sysco invoices in flight, one debit: the exact amount must win it,
+    // not whichever near-amount draft happened to be checked first.
+    const s = buildClearingSuggestions(
+      [
+        draft({ id: 'near', amount: 5100, paymentDate: '2026-07-09' }),
+        draft({ id: 'exact', amount: 5188, paymentDate: '2026-07-11' }),
+      ],
+      [txn({ id: 'one', description: 'SYSCO DEBIT', amount: 5188, transaction_date: '2026-07-10' })],
+    )
+    check('only one draft claims the single debit', s.length, 1)
+    check('and the exact-amount draft wins it over the near one', s[0]?.paymentId, 'exact')
+  }
+
+  {
+    const s = buildClearingSuggestions(
+      [draft({ status: 'cleared' })],
+      [txn({ description: 'SYSCO DEBIT', amount: 5188, transaction_date: '2026-07-11' })],
+    )
+    check('an already-cleared draft is never re-suggested', s, [])
+  }
+
+  {
+    // A settled one-off ACH (recorded after the fact) is cleared, so it is not a
+    // pending draft and must not be pulled into the suggestion list.
+    const s = buildClearingSuggestions(
+      [draft({ id: 'd1' }), pay({ id: 'c1', checkNumber: '1001', amount: 300 })],
+      [
+        txn({ id: 'tb1', description: 'SYSCO DEBIT', amount: 5188, transaction_date: '2026-07-11' }),
+        txn({ id: 'tb2', check_number: '1001', amount: 300, transaction_date: '2026-07-05' }),
+      ],
+    )
+    check('drafts and checks are matched side by side', s.length, 2)
+    ok(
+      'each keeps its own match kind',
+      s.some((x) => x.paymentId === 'd1' && x.matchType === 'vendor_amount') &&
+        s.some((x) => x.paymentId === 'c1' && x.matchType === 'check_number'),
+    )
+  }
+}
+
 console.log('\nAutopay/ACH auto-reconcile from the bank feed')
 
 {
@@ -620,6 +939,66 @@ console.log('\nAutopay/ACH auto-reconcile from the bank feed')
     )
     ok('a future-dated or long-past debit is not reconciled', m.length === 0)
   }
+}
+
+console.log('\nForecast movements (outstanding payments included, never double-counted)')
+{
+  const net = (ms: { amount: number }[]) => ms.reduce((s, m) => s + m.amount, 0)
+
+  // An outstanding payment tied to a recurring bill SUPERSEDES that bill's generic
+  // scheduled outflow — otherwise the rent would be subtracted twice.
+  const noDouble = buildForecastMovements({
+    obligations: [
+      { id: 'rent', name: 'Rent', amount: 2811, effectiveDueDate: '2026-08-15' },
+    ],
+    receivables: [],
+    payments: [
+      { obligationId: 'rent', name: 'Rent', amount: 2811, date: '2026-08-04', status: 'outstanding' },
+    ],
+  })
+  check('a covered obligation is suppressed (one movement, not two)', noDouble.length, 1)
+  check('the surviving movement is the real payment, on its real date', noDouble[0].date, '2026-08-04')
+  check('rent is counted once, not twice', net(noDouble), -2811)
+
+  // A one-off payment (no obligation behind it) can never collide, so it is always added.
+  const oneOff = buildForecastMovements({
+    obligations: [{ id: 'rent', name: 'Rent', amount: 2811, effectiveDueDate: '2026-08-15' }],
+    receivables: [],
+    payments: [
+      { obligationId: null, name: 'Sysco', amount: 5026, date: '2026-08-05', status: 'outstanding' },
+    ],
+  })
+  check('a one-off payment and an unrelated obligation both count', oneOff.length, 2)
+  check('their outflows sum correctly', net(oneOff), -(2811 + 5026))
+
+  // cleared / void payments never reach the forecast; cleared is already in cash-on-hand.
+  const filtered = buildForecastMovements({
+    obligations: [],
+    receivables: [],
+    payments: [
+      { obligationId: null, name: 'Paid', amount: 500, date: '2026-08-06', status: 'cleared' },
+      { obligationId: null, name: 'Voided', amount: 900, date: '2026-08-06', status: 'void' },
+      { obligationId: null, name: 'Live', amount: 200, date: '2026-08-06', status: 'outstanding' },
+    ],
+  })
+  check('only the outstanding payment survives', filtered.length, 1)
+  check('cleared and void contribute nothing', net(filtered), -200)
+
+  // Receivables are positive; a net day mixes both directions.
+  const mixed = buildForecastMovements({
+    obligations: [{ id: 'e', name: 'Electric', amount: 300, effectiveDueDate: '2026-08-28' }],
+    receivables: [{ name: 'Big Customer', outstanding: 1000, date: '2026-08-28' }],
+    payments: [],
+  })
+  check('an inflow and an outflow on one day net out', net(mixed), 700)
+
+  // Undated obligations and non-positive receivables are silently skipped.
+  const skips = buildForecastMovements({
+    obligations: [{ id: 'x', name: 'No date', amount: 999, effectiveDueDate: '' }],
+    receivables: [{ name: 'Fully paid', outstanding: 0, date: '2026-08-10' }],
+    payments: [],
+  })
+  check('undated obligation and zero-balance receivable produce nothing', skips.length, 0)
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`)

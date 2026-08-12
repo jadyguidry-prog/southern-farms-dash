@@ -12,6 +12,7 @@ import {
   resolveDailyRows,
   summarizeDailyRows,
   computeWeeklySales,
+  computeWeekToDateSales,
 } from '../lib/square-sales-service'
 
 let passed = 0
@@ -249,6 +250,127 @@ const row = (
   const w = computeWeeklySales(rows)
   check('gaps do not inflate day count', w.daysCovered, 3)
   check('partial week sums only real days', w.netSales, 300)
+}
+
+// --- Prior-window coverage (guards the weekly % change) ----------------
+// The dashboard only reports a weekly change when daysCovered ===
+// priorDaysCovered, so these two numbers have to be reported accurately and
+// independently. Without that guard a short current week reads as a collapse.
+{
+  const days = resolveDailyRows(
+    Array.from({ length: 14 }, (_, i) => {
+      const d = new Date(Date.UTC(2026, 7, 1 + i)).toISOString().slice(0, 10)
+      return row(d, 'square_api', 100)
+    }),
+  ).rows
+  const w = computeWeeklySales(days)
+  check('full fortnight: both windows covered equally', w.priorDaysCovered, 7)
+  check('equal coverage means the change is comparable', w.daysCovered === w.priorDaysCovered, true)
+}
+{
+  // A closed day in EACH window (the real Southern Farms pattern: closed Sundays)
+  // still leaves the two windows comparable at 6 days apiece.
+  const dates = [
+    '2026-07-21', '2026-07-22', '2026-07-23', '2026-07-24', '2026-07-25', '2026-07-27',
+    '2026-07-28', '2026-07-29', '2026-07-30', '2026-07-31', '2026-08-01', '2026-08-03',
+  ]
+  const { rows } = resolveDailyRows(dates.map((d) => row(d, 'square_api', 100)))
+  const w = computeWeeklySales(rows)
+  check('matching closed day in both windows: current covered', w.daysCovered, 6)
+  check('matching closed day in both windows: prior covered', w.priorDaysCovered, 6)
+  check('still comparable, so a change may be shown', w.daysCovered === w.priorDaysCovered, true)
+}
+{
+  // Lopsided: a 2-day current week against a full prior week. Sums are correct,
+  // but the windows are NOT comparable — the caller must suppress the percentage.
+  const dates = [
+    '2026-07-21', '2026-07-22', '2026-07-23', '2026-07-24', '2026-07-25', '2026-07-26', '2026-07-27',
+    '2026-08-02', '2026-08-03',
+  ]
+  const { rows } = resolveDailyRows(dates.map((d) => row(d, 'square_api', 100)))
+  const w = computeWeeklySales(rows)
+  check('short current window is reported honestly', w.daysCovered, 2)
+  check('prior window still fully covered', w.priorDaysCovered, 7)
+  check('mismatch is detectable, so no % is claimed', w.daysCovered === w.priorDaysCovered, false)
+}
+{
+  const w = computeWeeklySales([])
+  check('empty prior coverage is 0', w.priorDaysCovered, 0)
+}
+
+// --- Calendar week to date --------------------------------------------
+// The exact live scenario that prompted this: Tue 4 Aug 2026, only Monday synced.
+{
+  const { rows } = resolveDailyRows([
+    row('2026-07-27', 'square_api', 2279.66), // prior Mon
+    row('2026-07-28', 'square_api', 8169.93), // prior Tue
+    row('2026-08-03', 'square_api', 2572.12), // this Mon
+  ])
+  const w = computeWeekToDateSales(rows, '2026-08-04')
+  check('week starts Monday', w.weekStart, '2026-08-03')
+  check('week to date is Monday only', w.netSales, 2572.12)
+  check('through date is the last synced day', w.throughDate, '2026-08-03')
+  check('one day covered so far', w.daysCovered, 1)
+  // THE TRAP: prior Mon+Tue is $10,449.59. Comparing the full prior span against a
+  // Monday-only current week reports -75%, a collapse that never happened. Matching
+  // weekday-for-weekday gives prior = Monday alone.
+  check('prior is the matching weekday only, not the whole span', w.priorNetSales, 2279.66)
+  check('prior coverage matches, so a % is allowed', w.priorDaysCovered, 1)
+  const pct = ((w.netSales! - w.priorNetSales!) / w.priorNetSales!) * 100
+  check('same-weekday change is a rise, not a collapse', Math.round(pct * 10) / 10, 12.8)
+}
+{
+  // Today is Monday and nothing has synced: must be null, NOT 0. A $0 headline
+  // would read as "we sold nothing" instead of "the week just started".
+  const { rows } = resolveDailyRows([row('2026-07-27', 'square_api', 2279.66)])
+  const w = computeWeekToDateSales(rows, '2026-08-03')
+  check('unsynced week is null, never zero', w.netSales, null)
+  check('no days covered', w.daysCovered, 0)
+  check('no prior sum when nothing is covered', w.priorNetSales, null)
+}
+{
+  // Mid-week, prior week fully present: sums both sides over matching weekdays.
+  const days = [
+    ['2026-07-27', 100], ['2026-07-28', 200], ['2026-07-29', 300],
+    ['2026-08-03', 150], ['2026-08-04', 250], ['2026-08-05', 350],
+  ] as const
+  const { rows } = resolveDailyRows(days.map(([d, v]) => row(d, 'square_api', v)))
+  const w = computeWeekToDateSales(rows, '2026-08-05')
+  check('Mon-Wed week to date', w.netSales, 750)
+  check('Mon-Wed prior week, same weekdays', w.priorNetSales, 600)
+  check('coverage matches on both sides', w.daysCovered === w.priorDaysCovered, true)
+}
+{
+  // A gap in the PRIOR week only. Coverage no longer matches, so the caller must
+  // suppress the percentage rather than compare 3 days against 2.
+  const days = [
+    ['2026-07-27', 100], ['2026-07-29', 300],
+    ['2026-08-03', 150], ['2026-08-04', 250], ['2026-08-05', 350],
+  ] as const
+  const { rows } = resolveDailyRows(days.map(([d, v]) => row(d, 'square_api', v)))
+  const w = computeWeekToDateSales(rows, '2026-08-05')
+  check('current week covers 3 days', w.daysCovered, 3)
+  check('prior week only matched 2', w.priorDaysCovered, 2)
+  check('mismatch is detectable, so no % is claimed', w.daysCovered === w.priorDaysCovered, false)
+}
+{
+  // Sunday is the LAST day of an ISO week, not the first. Getting this wrong would
+  // silently start the week on the wrong day and mis-sum every figure.
+  const { rows } = resolveDailyRows([row('2026-08-03', 'square_api', 100)])
+  const wSun = computeWeekToDateSales(rows, '2026-08-09')
+  check('Sunday still belongs to the Monday-start week', wSun.weekStart, '2026-08-03')
+  const wMon = computeWeekToDateSales(rows, '2026-08-10')
+  check('the next Monday starts a new week', wMon.weekStart, '2026-08-10')
+  check('and that new week has no data yet', wMon.netSales, null)
+}
+{
+  // Days after today must never be counted, even if a future row somehow exists.
+  const { rows } = resolveDailyRows([
+    row('2026-08-03', 'square_api', 100),
+    row('2026-08-06', 'square_api', 999),
+  ])
+  const w = computeWeekToDateSales(rows, '2026-08-04')
+  check('a future-dated row is excluded from week to date', w.netSales, 100)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

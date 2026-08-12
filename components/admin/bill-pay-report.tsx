@@ -31,8 +31,11 @@ export function BillPayReport({ snapshot }: { snapshot: BillPaySnapshot }) {
           Bill Payments
         </h2>
         <p className="text-xs text-muted-foreground">
+          {/* "paid", not "logged": the figure now counts only money that actually
+              left, so a bill entered as pay-by-check-later no longer appears here
+              while it is still sitting in Outstanding. */}
           {paymentsThisMonth.toLocaleString()}{' '}
-          {paymentsThisMonth === 1 ? 'payment' : 'payments'} this month ·{' '}
+          {paymentsThisMonth === 1 ? 'payment' : 'payments'} paid this month ·{' '}
           {formatCurrency(paymentsThisMonthAmount)}
         </p>
       </div>
@@ -47,18 +50,20 @@ export function BillPayReport({ snapshot }: { snapshot: BillPaySnapshot }) {
           hasOutstanding ? 'text-destructive' : 'text-muted-foreground'
         }`}
       >
+        {/* Counts written checks AND pending ACH drafts, so the wording stays
+            accurate for both rather than naming only checks. */}
         {hasOutstanding
           ? `${formatCurrency(
               outstandingChecks,
-            )} across ${outstandingCheckCount} written ${
-              outstandingCheckCount === 1 ? 'check has' : 'checks have'
+            )} across ${outstandingCheckCount} ${
+              outstandingCheckCount === 1 ? 'payment has' : 'payments have'
             } not cleared the bank yet — your spendable cash is this much below the bank balance.`
-          : 'No outstanding checks. Spendable cash equals your bank balance.'}
+          : 'Nothing outstanding. Spendable cash equals your bank balance.'}
       </p>
 
       <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
         <div className="rounded-md border border-border/60 p-3">
-          <p className="text-xs text-muted-foreground">Outstanding checks</p>
+          <p className="text-xs text-muted-foreground">Outstanding</p>
           <p className="mt-1 font-mono text-sm">{formatCurrency(outstandingChecks)}</p>
         </div>
         <div className="rounded-md border border-border/60 p-3">

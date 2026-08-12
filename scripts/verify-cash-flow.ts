@@ -396,6 +396,93 @@ eq(
 eq(summarizeSpendByCategory([], new Map()).totalSpend, 0, 'spend: empty input')
 eq(summarizeSpendByCategory([], new Map()).coverage, 0, 'spend: empty coverage is zero')
 
+/* ---------------- latestCompleteMonth must be a FINISHED month ---------------- */
+// The live bug: on 4 Aug 2026 the dashboard headlined "Net Cash Movement —
+// Aug '26  -$1,123" and the advisor warned the month had overspent, from four
+// days holding one $249.67 deposit against $1,372.73 of spending.
+{
+  const rows = [
+    // A full, finished July.
+    row({ transactionDate: '2026-07-05', amount: 102791.77, transactionType: 'income' }),
+    row({ transactionDate: '2026-07-06', amount: -95576.98 }),
+    // Four days of August, mirroring the real data.
+    row({ transactionDate: '2026-08-01', amount: 249.67, transactionType: 'income' }),
+    row({ transactionDate: '2026-08-02', amount: -1372.73 }),
+  ]
+  const result = deriveMonthlyCashFlow(rows, { todayISO: '2026-08-04' })
+  eq(
+    result.latestCompleteMonth?.month,
+    "Jul '26",
+    'latestCompleteMonth: skips the still-running month',
+  )
+  eq(
+    Math.round(result.latestCompleteMonth?.net ?? 0),
+    7215,
+    'latestCompleteMonth: reports the finished month net',
+  )
+  eq(
+    result.monthInProgress?.month,
+    "Aug '26",
+    'monthInProgress: the running month is still reported separately',
+  )
+  eq(
+    Math.round(result.monthInProgress?.net ?? 0),
+    -1123,
+    'monthInProgress: keeps its real partial figure',
+  )
+  // The running month still belongs to the chart series and still counts as
+  // `complete` for bank-coverage purposes — only the VERDICT excludes it.
+  eq(result.series.length, 2, 'series: still contains both months')
+  eq(
+    result.series[result.series.length - 1].complete,
+    true,
+    'series: per-month complete flag is unchanged',
+  )
+}
+{
+  // Once the month is over, the same August data IS quotable as a result.
+  const rows = [
+    row({ transactionDate: '2026-08-01', amount: 249.67, transactionType: 'income' }),
+    row({ transactionDate: '2026-08-02', amount: -1372.73 }),
+  ]
+  const result = deriveMonthlyCashFlow(rows, { todayISO: '2026-09-01' })
+  eq(
+    result.latestCompleteMonth?.month,
+    "Aug '26",
+    'latestCompleteMonth: a finished month is quotable',
+  )
+  eq(result.monthInProgress, null, 'monthInProgress: null when no rows this month')
+}
+{
+  // Only the running month exists: there is NO finished month to quote. Null is
+  // correct — better than presenting a few days as a monthly result.
+  const rows = [
+    row({ transactionDate: '2026-08-01', amount: 249.67, transactionType: 'income' }),
+  ]
+  const result = deriveMonthlyCashFlow(rows, { todayISO: '2026-08-04' })
+  eq(
+    result.latestCompleteMonth,
+    null,
+    'latestCompleteMonth: null rather than quoting a partial month',
+  )
+  eq(result.monthInProgress?.month, "Aug '26", 'monthInProgress: still exposed')
+}
+{
+  // A finished month with spending but NO deposits is still excluded, so the
+  // month-ended test did not replace the missing-deposits test.
+  const rows = [
+    row({ transactionDate: '2026-06-10', amount: 50000, transactionType: 'income' }),
+    row({ transactionDate: '2026-06-11', amount: -40000 }),
+    row({ transactionDate: '2026-07-10', amount: -9000 }),
+  ]
+  const result = deriveMonthlyCashFlow(rows, { todayISO: '2026-08-04' })
+  eq(
+    result.latestCompleteMonth?.month,
+    "Jun '26",
+    'latestCompleteMonth: card-only July still excluded',
+  )
+}
+
 /* ---------------- report ---------------- */
 console.log(`\ncash-flow-service: ${pass} passed, ${fail} failed`)
 if (failures.length > 0) {

@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dialog'
 import { createVendor, updateVendor } from '@/app/vendors/actions'
 import type { DirectoryVendor } from '@/lib/queries'
+import { PAYMENT_TERM_LABELS } from '@/lib/payment-terms'
 
 export const VENDOR_TYPES = [
   'Supplier',
@@ -26,14 +27,12 @@ export const VENDOR_TYPES = [
   'Other',
 ]
 
-export const PAYMENT_TERMS = [
-  'Due on Receipt',
-  'Net 15',
-  'Net 30',
-  'Net 45',
-  'Net 60',
-  'Prepaid',
-]
+/**
+ * Re-exported from lib/payment-terms so this dropdown and the numeric mapping used to
+ * DERIVE due dates can never disagree. When the list was hardcoded here, 'Net 21' simply
+ * did not exist as an option, and any label added here would have had no number behind it.
+ */
+export const PAYMENT_TERMS = PAYMENT_TERM_LABELS
 
 export const PAYMENT_METHODS = [
   'ACH',
@@ -98,7 +97,10 @@ export function VendorFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+      {/* The form itself scrolls (below) rather than this container, so the
+          "Add vendor" button stays pinned in view. Previously the whole dialog
+          scrolled and the button sat off-screen on a short window. */}
+      <DialogContent className="grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{isEdit ? 'Edit Vendor' : 'Add Vendor'}</DialogTitle>
           <DialogDescription>
@@ -108,7 +110,12 @@ export function VendorFormDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form action={onSubmit} className="space-y-5">
+        <form
+          action={onSubmit}
+          className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto] gap-5 overflow-hidden"
+        >
+          {/* Only the fields scroll; -mx-1/px-1 keeps focus rings from clipping. */}
+          <div className="-mx-1 space-y-5 overflow-y-auto px-1">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Vendor Name" htmlFor="name" required>
               <Input
@@ -294,14 +301,20 @@ export function VendorFormDialog({
             </label>
           </div>
 
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          </div>
 
-          <DialogFooter>
-            <Button type="submit" disabled={isPending}>
-              {isPending && <Loader2 className="size-4 animate-spin" />}
-              {isEdit ? 'Save changes' : 'Add vendor'}
-            </Button>
-          </DialogFooter>
+          {/* Outside the scroll box on purpose: a submit error must not be
+              scrolled out of view while the button is still visible. */}
+          <div className="space-y-3">
+            {error && <p className="text-sm text-destructive">{error}</p>}
+
+            <DialogFooter>
+              <Button type="submit" disabled={isPending}>
+                {isPending && <Loader2 className="size-4 animate-spin" />}
+                {isEdit ? 'Save changes' : 'Add vendor'}
+              </Button>
+            </DialogFooter>
+          </div>
         </form>
       </DialogContent>
     </Dialog>

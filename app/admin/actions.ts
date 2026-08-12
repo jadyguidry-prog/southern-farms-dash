@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
-import { getTableDef } from '@/lib/admin-config'
+import { getTableDef, coerceFieldValue } from '@/lib/admin-config'
 
 const REVALIDATE_PATHS = [
   '/',
@@ -32,18 +32,9 @@ async function requireUser() {
   return supabase
 }
 
-/** Coerce a raw string value to the correct JS type for its column. */
-function coerce(value: string | null, type: string) {
-  if (value == null || value === '') return type === 'number' ? 0 : null
-  if (type === 'number') {
-    const n = Number(String(value).replace(/[$,%\s]/g, ''))
-    return Number.isFinite(n) ? n : 0
-  }
-  // Normalize boolean-like values (used by the "recurring" obligation flag).
-  if (value === 'true') return true
-  if (value === 'false') return false
-  return value
-}
+// Single definition, imported from admin-config so the tested function and the one that
+// actually writes to the database cannot drift apart.
+const coerce = coerceFieldValue
 
 export async function addRecord(tableKey: string, formData: FormData) {
   const def = getTableDef(tableKey)
@@ -54,7 +45,7 @@ export async function addRecord(tableKey: string, formData: FormData) {
     const row: Record<string, unknown> = {}
     for (const field of def.fields) {
       const raw = formData.get(field.name)
-      row[field.name] = coerce(raw as string | null, field.type)
+      row[field.name] = coerce(raw as string | null, field.type, field.blankIsNull)
     }
     const { error } = await supabase.from(def.table).insert(row)
     if (error) return { error: error.message }
@@ -74,7 +65,7 @@ export async function updateRecord(tableKey: string, id: string, formData: FormD
     const row: Record<string, unknown> = {}
     for (const field of def.fields) {
       const raw = formData.get(field.name)
-      row[field.name] = coerce(raw as string | null, field.type)
+      row[field.name] = coerce(raw as string | null, field.type, field.blankIsNull)
     }
     const { error } = await supabase.from(def.table).update(row).eq('id', id)
     if (error) return { error: error.message }
@@ -144,10 +135,17 @@ export async function markPaid(
 const SETTING_LABELS: Record<string, { label: string; unit: string }> = {
   target_payroll_pct: { label: 'Target Payroll Percentage', unit: 'percent' },
   warning_payroll_pct: { label: 'Warning Payroll Percentage', unit: 'percent' },
+  target_gross_profit_pct: {
+    label: 'Target Gross Profit Percentage',
+    unit: 'percent',
+  },
   min_cash_reserve: { label: 'Target Minimum Cash Reserve', unit: 'currency' },
   preferred_weekly_sales: { label: 'Preferred Weekly Sales', unit: 'currency' },
   minimum_weekly_sales: { label: 'Minimum Weekly Sales', unit: 'currency' },
   avg_monthly_wholesale: { label: 'Average Monthly Wholesale Sales', unit: 'currency' },
+  // Must be registered HERE as well as in the form: this whitelist is what the save
+  // action iterates, so a field added only to the UI would silently never persist.
+  bill_reminder_lead_days: { label: 'Bill reminder lead time', unit: 'days' },
 }
 
 export async function saveBusinessSettings(formData: FormData) {
@@ -227,7 +225,8 @@ export async function importCsv(tableKey: string, formData: FormData) {
       const row: Record<string, unknown> = {}
       headers.forEach((h, idx) => {
         const field = fieldByName.get(h)
-        if (field) row[field.name] = coerce(cells[idx] ?? null, field.type)
+        if (field)
+          row[field.name] = coerce(cells[idx] ?? null, field.type, field.blankIsNull)
       })
       // require at least one required field to be present
       const hasRequired = def.fields

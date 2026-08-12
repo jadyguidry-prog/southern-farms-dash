@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import {
   Wallet,
+  PiggyBank,
   CreditCard,
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -27,12 +28,19 @@ import { formatCurrency, formatPercent } from '@/lib/data'
 import {
   kpi,
   asTrend,
-  getCashForecast,
   getCashFlowMonthly,
   getRecommendations,
   getHealthSnapshot,
 } from '@/lib/queries'
+import { getSpendingCapacity } from '@/lib/spending-capacity-data'
+import { getCardExposure } from '@/lib/card-exposure-service'
+import { CardExposurePanel } from '@/components/cards/card-exposure-panel'
+import { getBillReminders } from '@/lib/bill-reminders-service'
+import { BillRemindersCard } from '@/components/dashboard/bill-reminders-card'
 import { HEALTH_COLOR, HEALTH_TEXT } from '@/lib/health'
+// Reused rather than adding a second month formatter, so the Gross Profit card
+// labels months identically to the cash-flow chart beside it.
+import { monthLabel } from '@/lib/cash-flow-service'
 
 const severityStyles: Record<string, string> = {
   critical: 'bg-destructive/10 text-destructive',
@@ -41,12 +49,15 @@ const severityStyles: Record<string, string> = {
 }
 
 export default async function DashboardPage() {
-  const [snapshot, cashForecast, cashFlowMonthly, saved] = await Promise.all([
-    getHealthSnapshot(),
-    getCashForecast(),
-    getCashFlowMonthly(),
-    getRecommendations(),
-  ])
+  const [snapshot, capacity, cashFlowMonthly, saved, cardExposure, billReminders] =
+    await Promise.all([
+      getHealthSnapshot(),
+      getSpendingCapacity(),
+      getCashFlowMonthly(),
+      getRecommendations(),
+      getCardExposure(),
+      getBillReminders(),
+    ])
 
   const {
     kpis,
@@ -59,8 +70,14 @@ export default async function DashboardPage() {
     checks,
     marketing,
     billPay,
+    growthPlanner,
+    proposalReviews,
   } =
     snapshot
+  // Saved proposals whose live verdict no longer matches the one recorded at save
+  // time. Counted from the same shared review the advisor uses, so the card and the
+  // advisor can never report a different number of changed proposals.
+  const changedProposalCount = proposalReviews.filter((r) => r.changed).length
   // Generated insights lead, followed by anything entered manually.
   //
   // Sorted by severity because the highlights card shows only the first three. On
@@ -84,7 +101,12 @@ export default async function DashboardPage() {
           complete: m.complete,
         }))
       : cashFlowMonthly
+  // Last FINISHED month, so the headline is a real month's result. The
+  // still-running month is shown alongside it rather than hidden, because
+  // dropping it would leave the owner wondering where the current month went —
+  // but it is labelled "so far" so it can't be read as a monthly outcome.
   const latestComplete = cashFlow.monthly.latestCompleteMonth
+  const monthInProgress = cashFlow.monthly.monthInProgress
 
   const cashOnHand = kpi(kpis, 'cashOnHand')
   // When checks are written but not yet cleared, the bank balance overstates
@@ -98,6 +120,39 @@ export default async function DashboardPage() {
           billPay.outstandingCheckCount
         } outstanding ${billPay.outstandingCheckCount === 1 ? 'check' : 'checks'}`
       : undefined
+  // The "Safe to Spend" hint.
+  //
+  // The headline figure only looks at the near-term window, so a card payment due later in
+  // the month is NOT reflected in it. That payment has to be named right here: this tile is
+  // the screen decisions get made on, and an unqualified number (whether a surplus or a
+  // bare $0) hides the single largest thing about to leave the account.
+  const spendHint = (() => {
+    const dueLater = [...capacity.cardPayments]
+      .filter((p) => p.dueDate > capacity.today)
+      .sort((a, b) => b.amount - a.amount)[0]
+    const dueLaterNote = dueLater
+      ? ` · ${formatCurrency(dueLater.amount)} card payment due ${new Date(
+          `${dueLater.dueDate}T00:00:00`,
+        ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+      : ''
+
+    // At or below the reserve there is no allowance to quote, but the upcoming payment is
+    // still the most important fact — arguably more so, since there is no cushion for it.
+    if (capacity.safeToSpendToday <= 0) {
+      return `Cash is at or below your ${formatCurrency(capacity.minCashReserve)} reserve${dueLaterNote}`
+    }
+
+    const pace = `≈ ${formatCurrency(capacity.perDayAllowance)}/day for ${capacity.nearTermDays} days`
+
+    if (capacity.breachesReserve) {
+      return `${pace} · ${formatCurrency(capacity.reserveShortfall)} short of your reserve by ${new Date(
+        `${capacity.lowestBalanceDate}T00:00:00`,
+      ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}${dueLaterNote}`
+    }
+
+    return `${pace} · keeps ${formatCurrency(capacity.minCashReserve)} reserve${dueLaterNote}`
+  })()
+
   const lineOfCredit = kpi(kpis, 'lineOfCredit')
   const accountsReceivable = kpi(kpis, 'accountsReceivable')
   const accountsPayable = kpi(kpis, 'accountsPayable')
@@ -105,7 +160,13 @@ export default async function DashboardPage() {
   const weeklySales = kpi(kpis, 'weeklySales')
   const monthlySales = kpi(kpis, 'monthlySales')
   const payrollPct = kpi(kpis, 'payrollPct')
-  const grossProfitPct = kpi(kpis, 'grossProfitPct')
+  // Gross margin is DERIVED from the check-resolution snapshot, not read from a
+  // stored KPI. There is no `grossProfitPct` row in `kpis`, so `kpi()` returned
+  // the 0 fallback: the gauge would have drawn 0.0% and declared "Below target by
+  // 38%" the moment the readiness gate opened — a confident verdict built from an
+  // absent row. Reading the snapshot also means this card and the Reporting table
+  // are computed from one function and cannot disagree.
+  const quotableMonth = checks.latestQuotableMonth
 
   // Monthly sales provenance. The Square feed usually lags the calendar by a few
   // days, so the card names the month and says how far through it the figure
@@ -131,15 +192,37 @@ export default async function DashboardPage() {
         })} · ${monthlySales.meta.daysCovered ?? 0} days of sales`
     : undefined
 
+  // Weekly card provenance. The card reports the CALENDAR week so far, while the
+  // sales health pillar judges a full trailing 7 days against the weekly goal and
+  // floor. Both are named on the card: showing week-to-date beside a pillar verdict
+  // derived from a different window reads as a contradiction unless each window is
+  // stated. `hasData` distinguishes "no day of this week has synced yet" from a
+  // genuine zero, so the card never prints $0 for an unrecorded week.
+  const weeklyHasData = Number(weeklySales.meta.hasData ?? 0) === 1
+  const weeklyDaysCovered = Number(weeklySales.meta.daysCovered ?? 0)
+  const weeklyTrailing = Number(weeklySales.meta.trailingSevenDay ?? 0)
+  // Kept short enough to survive StatCard's `truncate`: the pillar label is
+  // deliberately omitted because it already appears in Business Health below and
+  // on the advisor, whereas the 7-day figure appears nowhere else on this card
+  // and is what reconciles the headline with the weekly floor.
+  const weeklyHint = weeklyHasData
+    ? `${weeklyDaysCovered} ${weeklyDaysCovered === 1 ? 'day' : 'days'} in · 7-day ${formatCurrency(weeklyTrailing, { compact: true })} vs ${formatCurrency(settings.minimum_weekly_sales, { compact: true })} floor`
+    : `Nothing recorded yet · 7-day ${formatCurrency(weeklyTrailing, { compact: true })} vs ${formatCurrency(settings.minimum_weekly_sales, { compact: true })} floor`
+
+  // Revolving line of credit only. Credit cards are reported by the Credit Card
+  // Exposure panel below, NOT blended in here — see the `lineOfCredit` KPI.
   const locTotal = lineOfCredit.value
   const locUsed = Number(lineOfCredit.meta.used ?? 0)
   const locAvailable = Number(lineOfCredit.meta.available ?? Math.max(locTotal - locUsed, 0))
-  const creditUsedPct = locTotal ? Math.round((locUsed / locTotal) * 100) : 0
+  // No approved limit means no line is set up, which is not the same as a line
+  // sitting at 0% drawn. Percentages are suppressed rather than shown as a real 0.
+  const hasLoc = locTotal > 0
+  const creditUsedPct = hasLoc ? Math.round((locUsed / locTotal) * 100) : null
   // Owner-defined thresholds from Admin → Business Settings.
   const payrollTarget = settings.target_payroll_pct
   const payrollWarning = settings.warning_payroll_pct
   const payrollOverTarget = payrollPct.value - payrollTarget
-  const gpTarget = Number(grossProfitPct.meta.target ?? 38)
+  const gpTarget = settings.target_gross_profit_pct
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -165,20 +248,35 @@ export default async function DashboardPage() {
           changeLabel="vs last month"
           hint={cashHint}
         />
+        {/* Placed directly after Cash on Hand because it qualifies it: cash on
+            hand is not spendable cash. Only shown once the engine has enough
+            history to stand behind a figure — a guess here would be acted on. */}
+        {capacity.confidence.level === 'ok' && (
+          <StatCard
+            label="Safe to Spend Today"
+            value={formatCurrency(capacity.safeToSpendToday)}
+            icon={PiggyBank}
+            hint={spendHint}
+          />
+        )}
         <StatCard
           label="Available Line of Credit"
-          value={formatCurrency(locAvailable)}
+          value={hasLoc ? formatCurrency(locAvailable) : 'Not set up'}
           icon={CreditCard}
-          hint={`${formatCurrency(locUsed, { compact: true })} drawn of ${formatCurrency(locTotal, { compact: true })}`}
+          hint={
+            hasLoc
+              ? `${formatCurrency(locUsed, { compact: true })} drawn of ${formatCurrency(locTotal, { compact: true })} · cards shown separately`
+              : 'No line of credit is set up'
+          }
         />
         <StatCard
-          label="Weekly Sales"
-          value={formatCurrency(weeklySales.value)}
+          label="Sales — Week to Date"
+          value={weeklyHasData ? formatCurrency(weeklySales.value) : 'Not recorded yet'}
           icon={TrendingUp}
           change={weeklySales.change ?? undefined}
           trend={asTrend(weeklySales.trend)}
-          changeLabel="vs prior week"
-          hint={`${pillars.sales.label} · goal ${formatCurrency(settings.preferred_weekly_sales)} · floor ${formatCurrency(settings.minimum_weekly_sales)}`}
+          changeLabel="vs same days last week"
+          hint={weeklyHint}
         />
         <StatCard
           label={
@@ -202,7 +300,11 @@ export default async function DashboardPage() {
           change={accountsReceivable.change ?? undefined}
           trend={asTrend(accountsReceivable.trend)}
           goodDirection="down"
-          changeLabel="owed to us"
+          // A `hint`, not a `changeLabel`: "owed to us" describes the value on its
+          // own and must show whether or not a month-over-month change exists.
+          // changeLabel is reserved for text that only makes sense beside a
+          // percentage ("vs last month"), which is now gated on having one.
+          hint="owed to us"
         />
         <StatCard
           label="Accounts Payable"
@@ -211,7 +313,7 @@ export default async function DashboardPage() {
           change={accountsPayable.change ?? undefined}
           trend={asTrend(accountsPayable.trend)}
           goodDirection="down"
-          changeLabel="we owe vendors"
+          hint="we owe vendors"
         />
         <StatCard
           label="Current Inventory Value"
@@ -219,17 +321,22 @@ export default async function DashboardPage() {
           icon={Package}
           change={inventoryValue.change ?? undefined}
           trend={asTrend(inventoryValue.trend)}
-          changeLabel="at cost"
+          hint="at cost"
         />
-        {/* Actual money in vs out for the last month with a full picture.
-            Rendered only when real transactions exist — a month missing its
-            deposit account would read as a loss rather than as missing data. */}
+        {/* Actual money in vs out for the last FINISHED month with a full
+            picture. Rendered only when real transactions exist — a month
+            missing its deposit account would read as a loss rather than as
+            missing data, and an in-progress month as an overspend. */}
         {latestComplete && (
           <StatCard
             label={`Net Cash Movement — ${latestComplete.month}`}
             value={formatCurrency(latestComplete.net)}
             icon={Scale}
-            hint={`${formatCurrency(latestComplete.inflow, { compact: true })} in · ${formatCurrency(latestComplete.outflow, { compact: true })} out`}
+            hint={`${formatCurrency(latestComplete.inflow, { compact: true })} in · ${formatCurrency(latestComplete.outflow, { compact: true })} out${
+              monthInProgress
+                ? ` · ${monthInProgress.month} so far ${formatCurrency(monthInProgress.net, { compact: true })}`
+                : ''
+            }`}
           />
         )}
         <Card className="gap-0 py-0">
@@ -240,21 +347,42 @@ export default async function DashboardPage() {
                   Line of Credit Utilization
                 </p>
                 <p className="mt-2 font-mono text-2xl font-bold text-foreground">
-                  {creditUsedPct}%
+                  {creditUsedPct === null ? 'Not set up' : `${creditUsedPct}%`}
                 </p>
               </div>
               <div className="flex size-10 items-center justify-center rounded-lg bg-secondary text-primary">
                 <CreditCard className="size-5" aria-hidden="true" />
               </div>
             </div>
-            <Progress value={creditUsedPct} className="mt-4" />
+            <Progress value={creditUsedPct ?? 0} className="mt-4" />
+            {/* States its scope explicitly. This percentage used to include the Amex
+                limit and balance, so card spending moved a figure labelled "line of
+                credit" — the note keeps the two facilities distinguishable now that
+                only the line is counted. */}
             <p className="mt-2 text-xs text-muted-foreground">
-              {creditUsedPct <= 50
-                ? 'Healthy — at or below the 50% target'
-                : `Above the 50% target — ${formatCurrency(locUsed)} drawn`}
+              {creditUsedPct === null
+                ? 'No line of credit is set up'
+                : `${
+                    creditUsedPct <= 50
+                      ? 'Healthy — at or below the 50% target'
+                      : `Above the 50% target — ${formatCurrency(locUsed)} drawn`
+                  } · revolving line only, credit cards below`}
             </p>
           </CardContent>
         </Card>
+      </div>
+
+      {/* Credit card exposure sits directly under the line-of-credit card because
+          both are borrowed money. It was previously invisible on every surface:
+          totalDebt counts loans only, and card balances lived in creditDrawn,
+          which this page never displayed. Card spend running $3.3k-$11.2k/month
+          was therefore absent from the dashboard entirely. */}
+      <CardExposurePanel exposure={cardExposure} className="mt-4" />
+
+      {/* Bills needing action. Placed with the money-owed panels rather than the health
+          ratios, because this is a do-something list, not a measurement. */}
+      <div className="mt-4">
+        <BillRemindersCard reminders={billReminders} />
       </div>
 
       {/* Health / ratios */}
@@ -380,55 +508,115 @@ export default async function DashboardPage() {
           </CardHeader>
           <CardContent className="pt-2">
             {/*
-              Gross margin is only drawn once unattributed checks are small
-              enough to trust it. Before that the card explains what is missing
-              instead of rendering a figure: the stored KPI is 0, so the gauge
-              would otherwise announce "Below target by 38%" — a verdict derived
-              from absent data rather than from the shop's actual performance.
+              The gauge is drawn from the newest month that passes EVERY guard —
+              complete sales, imported bank data, categorized COGS and no
+              unattributed checks — rather than from the business-wide readiness
+              flag. A single clean month is a real, defensible figure even while
+              older months are still being attributed; the alternative was
+              withholding a true number until the entire history was perfect.
+              The month is named so a figure from an older month can never be
+              read as the current one.
             */}
-            {checks.readiness.ready ? (
+            {quotableMonth?.marginPct != null ? (
               <>
                 <RadialStat
-                  value={grossProfitPct.value}
+                  value={quotableMonth.marginPct}
                   max={60}
-                  color="var(--chart-2)"
+                  /*
+                    Colored by the verdict, matching the payroll gauge beside it.
+                    It was pinned to a fixed red, so a margin 11.4% ABOVE target
+                    drew as an alarm while the caption underneath read "Above
+                    target" — the dial and the words disagreed.
+                  */
+                  color={
+                    HEALTH_COLOR[
+                      quotableMonth.marginPct >= gpTarget
+                        ? 'green'
+                        : quotableMonth.marginPct >= gpTarget - 5
+                          ? 'yellow'
+                          : 'red'
+                    ]
+                  }
                   label="margin"
-                  centerText={formatPercent(grossProfitPct.value)}
+                  centerText={formatPercent(quotableMonth.marginPct)}
                 />
                 <p className="text-center text-sm text-muted-foreground">
-                  {grossProfitPct.value >= gpTarget
-                    ? `Above target by ${formatPercent(grossProfitPct.value - gpTarget)}`
-                    : `Below target by ${formatPercent(gpTarget - grossProfitPct.value)}`}
+                  {quotableMonth.marginPct >= gpTarget
+                    ? `Above target by ${formatPercent(quotableMonth.marginPct - gpTarget)}`
+                    : `Below target by ${formatPercent(gpTarget - quotableMonth.marginPct)}`}
                 </p>
+                <p className="text-center text-xs text-muted-foreground">
+                  {monthLabel(quotableMonth.month)} ·{' '}
+                  {formatCurrency(quotableMonth.netSales)} sales less{' '}
+                  {formatCurrency(quotableMonth.totalCogs)} cost of goods
+                </p>
+                {/* A clean month inside an otherwise unresolved record needs the
+                    caveat attached, or it reads as a verdict on the business. */}
+                {!checks.readiness.ready ? (
+                  <p className="mt-1 text-pretty text-center text-xs text-muted-foreground">
+                    This month is fully attributed. Other months still have{' '}
+                    {formatCurrency(checks.progress.pendingAmount)} of
+                    unattributed checks, so this is not yet a trend.
+                  </p>
+                ) : null}
               </>
             ) : (
               <div className="flex min-h-[180px] flex-col justify-center gap-2 text-center">
                 <p className="text-2xl font-semibold text-muted-foreground">
                   Not yet measurable
                 </p>
-                <p className="text-pretty text-sm text-muted-foreground">
-                  {checks.progress.pendingCount.toLocaleString()} check payments
-                  worth {formatCurrency(checks.progress.pendingAmount)} have no
-                  payee, so cost of goods is incomplete
-                  {checks.readiness.unresolvedVsCogsRatio != null
-                    ? ` — ${checks.readiness.unresolvedVsCogsRatio.toFixed(1)}x the ${formatCurrency(checks.readiness.identifiedCogs)} identified`
-                    : ''}
-                  . A margin now would overstate profit.
-                </p>
-                <Link
-                  href="/check-resolution"
-                  className="text-sm font-medium underline"
-                >
-                  Resolve checks
-                </Link>
+                {/*
+                  Name the reason that actually applies. Unattributed checks are
+                  the usual cause, but a month can also be unmeasurable because
+                  its bank statements were never imported — and pointing the
+                  owner at Check Resolution for THAT would be the wrong job
+                  entirely.
+                */}
+                {checks.progress.pendingCount > 0 ? (
+                  <>
+                    <p className="text-pretty text-sm text-muted-foreground">
+                      {checks.progress.pendingCount.toLocaleString()} check
+                      payments worth{' '}
+                      {formatCurrency(checks.progress.pendingAmount)} have no
+                      payee, so cost of goods is incomplete
+                      {checks.readiness.unresolvedVsCogsRatio != null
+                        ? ` — ${checks.readiness.unresolvedVsCogsRatio.toFixed(1)}x the ${formatCurrency(checks.readiness.identifiedCogs)} identified`
+                        : ''}
+                      . A margin now would overstate profit.
+                    </p>
+                    <Link
+                      href="/check-resolution"
+                      className="text-sm font-medium underline"
+                    >
+                      Resolve checks
+                    </Link>
+                  </>
+                ) : checks.monthsMissingBankData.length > 0 ? (
+                  <p className="text-pretty text-sm text-muted-foreground">
+                    {checks.monthsMissingBankData.length}{' '}
+                    {checks.monthsMissingBankData.length === 1
+                      ? 'month has'
+                      : 'months have'}{' '}
+                    sales but no bank transactions imported, so their cost of
+                    goods is a fragment of what was really spent. Importing those
+                    statements is what makes a margin measurable.
+                  </p>
+                ) : (
+                  <p className="text-pretty text-sm text-muted-foreground">
+                    No month yet has complete sales, imported bank data and
+                    categorized cost of goods together, so any margin would be
+                    built on partial records.
+                  </p>
+                )}
               </div>
             )}
           </CardContent>
         </Card>
       </div>
 
-      {/* Marketing affordability */}
-      <div className="mt-4">
+      {/* Marketing affordability + growth capacity, side by side: both answer
+          "what can this business afford to commit to", at different scopes. */}
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -500,6 +688,86 @@ export default async function DashboardPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Growth capacity. Reads the SAME snapshot the Growth Planner page uses,
+            so the headline figure here can never contradict that page. */}
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <CardTitle className="text-base">Growth Investment</CardTitle>
+                <CardDescription>
+                  What a new commitment can be, tested against a downturn
+                </CardDescription>
+              </div>
+              {growthPlanner.hasData ? (
+                <Badge variant="secondary">{growthPlanner.activeMode.label}</Badge>
+              ) : null}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {!growthPlanner.hasData ? (
+              <div className="flex flex-col gap-2">
+                <p className="text-lg font-semibold text-muted-foreground">
+                  Not yet measurable
+                </p>
+                <p className="text-pretty text-sm text-muted-foreground">
+                  Planning a new commitment needs imported bank transactions and
+                  revenue history. Without both, any figure here would be a guess.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <span className="text-3xl font-semibold tracking-tight">
+                    {formatCurrency(growthPlanner.maxRecurring)}
+                  </span>
+                  <span className="text-sm text-muted-foreground">
+                    per month recommended
+                  </span>
+                </div>
+                {/* The headline is the STRESSED figure. Saying so on the card matters:
+                    without it, this number and the higher ceiling on the planner page
+                    look like a contradiction rather than two different standards. */}
+                <p className="text-pretty text-sm text-muted-foreground">
+                  {growthPlanner.maxRecurring > 0
+                    ? `Still clears every limit even if sales fell ${growthPlanner.activeMode.headlineStressSalesDeclinePct}%.`
+                    : growthPlanner.edgeRecurring > 0
+                      ? `Nothing survives a ${growthPlanner.activeMode.headlineStressSalesDeclinePct}% sales drop. If sales held exactly as expected your limits would tolerate about ${formatCurrency(growthPlanner.edgeRecurring)} a month — but that is not a recommendation.`
+                      : 'Your current cash and obligations leave no room for new recurring spending yet.'}
+                </p>
+                {growthPlanner.maxRecurring > 0 ? (
+                  <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                    <span className="text-muted-foreground">
+                      One-time{' '}
+                      <span className="font-medium text-foreground">
+                        {formatCurrency(growthPlanner.maxOneTime)}
+                      </span>
+                    </span>
+                    <span className="text-muted-foreground">
+                      Ceiling{' '}
+                      <span className="font-medium text-foreground">
+                        {formatCurrency(growthPlanner.edgeRecurring)}/mo
+                      </span>
+                    </span>
+                  </div>
+                ) : null}
+                {/* A saved proposal whose answer moved is the most actionable thing
+                    on this card, so it outranks the figures above it. */}
+                {changedProposalCount > 0 ? (
+                  <p className="text-pretty text-sm font-medium text-amber-700">
+                    {changedProposalCount === 1
+                      ? '1 saved proposal has a different answer than when you saved it.'
+                      : `${changedProposalCount} saved proposals have different answers than when you saved them.`}
+                  </p>
+                ) : null}
+                <Link href="/growth" className="text-sm font-medium underline">
+                  Open the Growth Planner
+                </Link>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* 30-day forecast */}
@@ -512,7 +780,11 @@ export default async function DashboardPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <CashForecastChart data={cashForecast} />
+            <CashForecastChart
+              data={capacity.thirtyDay}
+              minBuffer={capacity.minCashReserve}
+              showCautious
+            />
           </CardContent>
         </Card>
 

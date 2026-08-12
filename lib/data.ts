@@ -27,6 +27,24 @@ export function formatPercent(value: number, digits = 1) {
   return `${value.toFixed(digits)}%`
 }
 
+/**
+ * "2026-08-03" -> "Mon 3 Aug".
+ *
+ * Parsed from the date PARTS rather than `new Date(iso)`, which would read the string
+ * as UTC midnight and render the previous day in any negative-offset timezone.
+ * Shared so the daily table and its expanded breakdown can never disagree about which
+ * day an item belongs to.
+ */
+export function formatDayLabel(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  if (!y || !m || !d) return iso
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  })
+}
+
 // ---------- Dashboard KPIs ----------
 export const kpis = {
   cashOnHand: { value: 428500, change: 6.2, trend: 'up' as const },

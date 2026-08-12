@@ -587,6 +587,62 @@ console.log('\nSpend reconciliation (why the average disagrees with reality)')
     JSON.stringify(r.lapsed),
   )
   check('neither resolved check is counted as unknown', r.unattributable.total, 0)
+  // A single IDENTIFIED check is not evidence of a one-off: only the checks the
+  // owner has got to so far are visible, so it must stay in the chased list.
+  ok(
+    'a lone resolved check is not dismissed as a one-off purchase',
+    r.oneOffPurchases.length === 0,
+    JSON.stringify(r.oneOffPurchases),
+  )
+  ok(
+    'and it is marked as reconstructed from checks',
+    r.lapsed[0]?.identifiedFromChecks === true,
+    JSON.stringify(r.lapsed),
+  )
+}
+{
+  // One-off vs lapsed, on the CARD-fed path where the feed is complete.
+  const r = reconcileKnownSpend(
+    [
+      // Single purchase, one month — genuinely finished.
+      { id: 'a', transactionDate: '2025-12-21', description: 'BT*CARDBOARD CUTOUT STANDEES', amount: -222, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: 'Marketing', vendorId: null },
+      // Same payee twice across two months — a real recurring channel.
+      { id: 'b', transactionDate: '2025-11-05', description: 'LAMAR BILLBOARD CO', amount: -535, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: 'Marketing', vendorId: null },
+      { id: 'c', transactionDate: '2025-12-05', description: 'LAMAR BILLBOARD CO', amount: -535, transactionType: 'expense', reviewStatus: 'reviewed', expenseCategory: 'Marketing', vendorId: null },
+    ] as never,
+    new Set<string>(),
+    new Date('2026-08-05T00:00:00'),
+    2,
+    {},
+    new Map(),
+  )
+  ok(
+    'a card-fed single-month payee is classed as a one-off purchase',
+    r.oneOffPurchases.some((o) => o.channel.includes('CARDBOARD') && o.activeMonths === 1),
+    JSON.stringify(r.oneOffPurchases),
+  )
+  ok(
+    'a one-off is kept OUT of the lapsed list that gets chased',
+    !JSON.stringify(r.lapsed).includes('CARDBOARD'),
+    JSON.stringify(r.lapsed),
+  )
+  ok(
+    'a payee billing across two months is genuinely lapsed',
+    r.lapsed.some((l) => l.activeMonths === 2 && l.chargeCount === 2),
+    JSON.stringify(r.lapsed),
+  )
+  ok(
+    'a card-fed channel is not marked as reconstructed from checks',
+    r.lapsed.every((l) => l.identifiedFromChecks === false),
+    JSON.stringify(r.lapsed),
+  )
+  // The one-off's amount is a single purchase, so it must never be presented as
+  // an ongoing monthly rate the owner might still be committed to.
+  ok(
+    'the one-off reports its purchase amount, not an invented rate',
+    r.oneOffPurchases.some((o) => o.typicalMonthly === 222 && o.chargeCount === 1),
+    JSON.stringify(r.oneOffPurchases),
+  )
 }
 {
   // With no overlay supplied, every payee-less row stays unknown. Nothing is
@@ -684,6 +740,147 @@ console.log('\nRecommendation wording')
   check('a strong position supports an increase', grow.action, 'increase')
   check('the increase is the delta, not the total', grow.amount, 1_030)
   ok('the reasons cite real drivers', grow.reasons.length >= 2, JSON.stringify(grow.reasons))
+}
+
+/* ------------------------------------------------------------------ */
+/* The baseline note — "reduce" that is really an increase             */
+/* ------------------------------------------------------------------ */
+{
+  console.log('\nBaseline note')
+
+  // The live shape: a $1,045/mo long-run rate, a $586 recommendation, but only
+  // $355/mo recorded over the recent window. "Reduce by $459" is arithmetically
+  // right against the long-run rate and reads as a cut when the target is in fact
+  // ABOVE recent recorded spend.
+  const misleading = buildRecommendation({
+    band: 'Healthy',
+    currentMonthlyMarketing: 1_045,
+    recommended: 586,
+    additionalSafe: 14_000,
+    reserveCoverage: 2,
+    revenueTrendPct: -27.9,
+    seasonalIndex: 0.81,
+    seasonalLabel: 'September',
+    payrollPct: 29,
+    targetPayrollPct: 15,
+    obligationsDue: 20_224,
+    boundBy: 'none',
+    recentMonthlyRecorded: 355,
+    monthsSinceLastSpend: 1,
+    measurementGap: true,
+  })
+  check('the direction word is still reduce', misleading.action, 'reduce')
+  ok('a contradiction produces a note', misleading.baselineNote !== null, 'note was null')
+  ok(
+    'the note says the target is above recent spend',
+    /above what the books show/i.test(misleading.baselineNote ?? ''),
+    misleading.baselineNote ?? '',
+  )
+  ok(
+    'the note names the long-run baseline being compared against',
+    (misleading.baselineNote ?? '').includes('1,045'),
+    misleading.baselineNote ?? '',
+  )
+  ok(
+    'the note quotes recent recorded spend',
+    (misleading.baselineNote ?? '').includes('355'),
+    misleading.baselineNote ?? '',
+  )
+  ok(
+    'a measurement gap sends the owner to Check Resolution, not to cut spend',
+    /Check Resolution/.test(misleading.baselineNote ?? ''),
+    misleading.baselineNote ?? '',
+  )
+
+  // Same contradiction, but nothing is missing from the feed. The remedy differs:
+  // the recent decline is REAL, so there is nothing to go and identify.
+  const noGap = buildRecommendation({
+    band: 'Healthy',
+    currentMonthlyMarketing: 1_045,
+    recommended: 586,
+    additionalSafe: 14_000,
+    reserveCoverage: 2,
+    revenueTrendPct: 0,
+    seasonalIndex: 1,
+    seasonalLabel: null,
+    payrollPct: 20,
+    targetPayrollPct: 25,
+    obligationsDue: 5_000,
+    boundBy: 'none',
+    recentMonthlyRecorded: 355,
+    monthsSinceLastSpend: 2,
+    measurementGap: false,
+  })
+  ok(
+    'with no data gap the note does not send the owner to Check Resolution',
+    !/Check Resolution/.test(noGap.baselineNote ?? ''),
+    noGap.baselineNote ?? '',
+  )
+
+  // The note must STAY SILENT when the wording already matches reality, or it
+  // becomes noise on every single recommendation.
+  const consistent = buildRecommendation({
+    band: 'Healthy',
+    currentMonthlyMarketing: 1_045,
+    recommended: 586,
+    additionalSafe: 14_000,
+    reserveCoverage: 2,
+    revenueTrendPct: 0,
+    seasonalIndex: 1,
+    seasonalLabel: null,
+    payrollPct: 20,
+    targetPayrollPct: 25,
+    obligationsDue: 5_000,
+    boundBy: 'none',
+    // Recent spend is ABOVE the recommendation, so "reduce" is honest.
+    recentMonthlyRecorded: 900,
+    monthsSinceLastSpend: 0,
+    measurementGap: true,
+  })
+  check('an honest reduce carries no note', consistent.baselineNote, null)
+
+  // Inverse direction: "increase" toward a figure BELOW recent recorded spend is
+  // the same lie mirrored, and must also be caught.
+  const mirrored = buildRecommendation({
+    band: 'Excellent',
+    currentMonthlyMarketing: 200,
+    recommended: 400,
+    additionalSafe: 40_000,
+    reserveCoverage: 3,
+    revenueTrendPct: 8,
+    seasonalIndex: 1,
+    seasonalLabel: null,
+    payrollPct: 20,
+    targetPayrollPct: 25,
+    obligationsDue: 5_000,
+    boundBy: 'none',
+    recentMonthlyRecorded: 900,
+    monthsSinceLastSpend: 0,
+    measurementGap: false,
+  })
+  check('the mirrored case is an increase', mirrored.action, 'increase')
+  ok(
+    'an increase below recent spend is flagged as below',
+    /below what the books show/i.test(mirrored.baselineNote ?? ''),
+    mirrored.baselineNote ?? '',
+  )
+
+  // Callers that pass no recent figure must not get a fabricated note.
+  const noRecent = buildRecommendation({
+    band: 'Healthy',
+    currentMonthlyMarketing: 1_045,
+    recommended: 586,
+    additionalSafe: 14_000,
+    reserveCoverage: 2,
+    revenueTrendPct: 0,
+    seasonalIndex: 1,
+    seasonalLabel: null,
+    payrollPct: 20,
+    targetPayrollPct: 25,
+    obligationsDue: 5_000,
+    boundBy: 'none',
+  })
+  check('no recent figure means no note', noRecent.baselineNote, null)
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

@@ -30,6 +30,10 @@ import {
   deriveSalesTaxReview,
   type SalesTaxReviewGroup,
 } from '@/lib/sales-tax-review'
+// Reused rather than re-derived: `deriveMonthlyCashFlow` already owns the one
+// definition of "this month's bank data was imported".
+import { deriveMonthlyCashFlow } from '@/lib/cash-flow-service'
+import type { TransactionType, ReviewStatus } from '@/lib/transactions'
 
 const PAGE_SIZE = 1000
 
@@ -304,6 +308,85 @@ export type MonthlyCogs = {
    * margin, so no margin is ever quoted on one.
    */
   salesComplete: boolean
+  /**
+   * Whether the month's BANK data was imported, via the SAME `inflow > 0` test
+   * `deriveMonthlyCashFlow` uses to decide a cash-flow month is complete.
+   *
+   * This is the guard that catches the worst failure mode. A month where only a
+   * card statement was imported has sales but almost no recorded spend, so its
+   * COGS is a fragment of the truth and the margin computes to ~99%. That reads
+   * as a spectacular month rather than as missing data. Reusing the cash-flow
+   * definition rather than inventing a ratio threshold means "complete month"
+   * cannot come to mean two different things in two modules.
+   */
+  bankDataComplete: boolean
+  /**
+   * Why no margin can be quoted, or `null` when one can. Computed here so the
+   * Dashboard, Reporting and the Advisor cannot apply different standards — the
+   * report table once showed a margin the gauge would have refused to draw.
+   */
+  withheldReason: MarginWithheldReason | null
+  /** Convenience for `withheldReason === null`. */
+  quotable: boolean
+  /** `netSales - totalCogs`, or null when not quotable. Never a misleading 0. */
+  grossProfit: number | null
+  /** Gross margin as a percentage, or null when not quotable. */
+  marginPct: number | null
+}
+
+/**
+ * The reasons a month's margin is withheld, ordered by how fundamental they are.
+ *
+ * Kept as a discriminated value rather than a boolean because the REMEDY differs
+ * for each: missing bank data needs an import, `no-cogs` needs categorization,
+ * and `unresolved-checks` needs the owner to name payees. Collapsing them into
+ * one "can't show this" bucket would tell the owner to do the wrong job.
+ */
+export type MarginWithheldReason =
+  | 'no-sales'
+  | 'partial-sales'
+  | 'bank-data-missing'
+  | 'no-cogs'
+  | 'unresolved-checks'
+
+/** Short human phrase for a withheld margin, for table cells and tooltips. */
+export function marginWithheldLabel(reason: MarginWithheldReason): string {
+  switch (reason) {
+    case 'no-sales':
+      return 'no sales recorded'
+    case 'partial-sales':
+      return 'sales cover only part of the month'
+    case 'bank-data-missing':
+      return 'bank transactions for this month not imported'
+    case 'no-cogs':
+      return 'no cost of goods categorized'
+    case 'unresolved-checks':
+      return 'checks in this month have no payee'
+  }
+}
+
+/**
+ * Whether a month can carry a margin, and if not, why.
+ *
+ * Pure and exported so verification scripts test the same predicate the UI uses
+ * instead of re-deriving it — a re-implementation would drift.
+ */
+export function marginWithheldReason(m: {
+  netSales: number
+  salesComplete: boolean
+  bankDataComplete: boolean
+  totalCogs: number
+  unresolvedCheckAmount: number
+}): MarginWithheldReason | null {
+  if (m.netSales <= 0) return 'no-sales'
+  if (!m.salesComplete) return 'partial-sales'
+  // Checked BEFORE `no-cogs`, because missing bank data is the CAUSE of the
+  // thin COGS figure. Reporting it as a categorization gap would send the owner
+  // to re-categorize transactions that were never imported.
+  if (!m.bankDataComplete) return 'bank-data-missing'
+  if (m.totalCogs <= 0) return 'no-cogs'
+  if (m.unresolvedCheckAmount > 0) return 'unresolved-checks'
+  return null
 }
 
 /**
@@ -333,11 +416,26 @@ export function deriveMonthlyCogs(
    * Optional so COGS-only callers (and tests) need not supply it.
    */
   sales: Map<string, { netSales: number; complete: boolean }> = new Map(),
+  /**
+   * Whether each month's bank data was imported, keyed `YYYY-MM`, from
+   * `deriveMonthlyCashFlow`. A month ABSENT from this map is treated as NOT
+   * imported, matching how `sales` defaults to incomplete: the conservative
+   * direction withholds a margin, and the alternative would quote one for a
+   * month whose costs are unknown.
+   */
+  bankCoverage: Map<string, boolean> = new Map(),
 ): MonthlyCogs[] {
   const approved = new Map(
     resolutions
       .filter((r) => r.reviewStatus === 'approved')
       .map((r) => [r.financialTransactionId, r]),
+  )
+  // "Reviewed — not cost of goods" answers this month's COGS question, so such a
+  // check must stop counting as unresolved here exactly as it does in progress.
+  const rejectedIds = new Set(
+    resolutions
+      .filter((r) => r.reviewStatus === 'rejected')
+      .map((r) => r.financialTransactionId),
   )
   const months = new Map<string, MonthlyCogs>()
   const bucket = (month: string): MonthlyCogs => {
@@ -352,6 +450,12 @@ export function deriveMonthlyCogs(
       unresolvedCheckCount: 0,
       netSales: sales.get(month)?.netSales ?? 0,
       salesComplete: sales.get(month)?.complete ?? false,
+      bankDataComplete: bankCoverage.get(month) ?? false,
+      // Filled in by the finalization pass below, once totals are known.
+      withheldReason: null,
+      quotable: false,
+      grossProfit: null,
+      marginPct: null,
     }
     months.set(month, fresh)
     return fresh
@@ -372,6 +476,7 @@ export function deriveMonthlyCogs(
       const via = checkResolvedVia(
         { expenseCategory: t.expenseCategory, reviewStatus: t.reviewStatus ?? '' },
         res,
+        rejectedIds.has(t.id),
       )
       if (via === 'unresolved') {
         b.unresolvedCheckAmount += amt
@@ -397,7 +502,21 @@ export function deriveMonthlyCogs(
     if (isCogsCategory(t.expenseCategory)) b.baseCogs += amt
   }
 
-  for (const b of months.values()) b.totalCogs = b.baseCogs + b.resolvedCheckCogs
+  // Finalize: totals first, then the single quotability verdict every surface
+  // reads. Computing the margin HERE — rather than in each component — is what
+  // stops the report table and the Dashboard gauge from disagreeing.
+  for (const b of months.values()) {
+    b.totalCogs = b.baseCogs + b.resolvedCheckCogs
+    b.withheldReason = marginWithheldReason(b)
+    b.quotable = b.withheldReason === null
+    // Null rather than 0 when withheld: a 0 here would render as a real
+    // break-even month instead of as an unknown.
+    b.grossProfit = b.quotable ? b.netSales - b.totalCogs : null
+    b.marginPct =
+      b.quotable && b.netSales > 0
+        ? ((b.netSales - b.totalCogs) / b.netSales) * 100
+        : null
+  }
   return [...months.values()].sort((a, b) => a.month.localeCompare(b.month))
 }
 
@@ -474,8 +593,24 @@ export type CheckResolutionSnapshot = {
   monthsWithUnresolved: number
   /** Largest same-amount groups still outstanding, biggest dollars first. */
   topClusters: { amount: number; count: number; total: number; cadence: string | null }[]
-  /** Complete months with sales but zero categorized cost of goods. */
+  /**
+   * Complete months with imported bank data and sales but zero categorized cost
+   * of goods — a genuine CATEGORIZATION gap the owner can fix by categorizing.
+   */
   monthsMissingCogs: string[]
+  /**
+   * Months with sales whose bank transactions were never imported. Kept separate
+   * from `monthsMissingCogs` because the remedy is completely different: these
+   * need a statement import, not categorization. Merging them told the owner to
+   * re-categorize months that contain no transactions to categorize.
+   */
+  monthsMissingBankData: string[]
+  /**
+   * The newest month a margin can honestly be quoted for, or null when none
+   * exists. The Dashboard gauge reads this instead of a stored KPI so it cannot
+   * render a figure the report table would refuse to show.
+   */
+  latestQuotableMonth: MonthlyCogs | null
   /**
    * Unresolved checks that carry a check number, so they can be looked up
    * directly in the bank portal rather than hunted by date and amount.
@@ -570,7 +705,33 @@ export async function getCheckResolutionSnapshot(): Promise<CheckResolutionSnaps
     })
   }
 
-  const monthlyCogs = deriveMonthlyCogs(prepared, resolutions, salesByMonth)
+  // Bank-data coverage comes from the cash-flow module's OWN completeness test
+  // (`inflow > 0`) rather than a second definition invented here. A month with
+  // only a card statement imported has sales and a fragment of the spend, which
+  // computes to a ~99% margin — indistinguishable from a real triumph.
+  // `months` is set past the series length so the whole history is classified;
+  // the default 12-month window would leave older months absent from the map and
+  // therefore treated as un-imported.
+  const cashFlowSeries = deriveMonthlyCashFlow(
+    txns.map((r) => ({
+      id: r.id,
+      transactionDate: (r.transaction_date ?? '').slice(0, 10),
+      description: r.description ?? '',
+      normalizedDescription: r.normalized_description ?? '',
+      amount: Number(r.amount) || 0,
+      transactionType: (r.transaction_type ?? '') as TransactionType,
+      reviewStatus: (r.review_status ?? '') as ReviewStatus,
+      vendorId: r.vendor_id ?? null,
+      expenseCategory: r.expense_category ?? '',
+      accountName: r.account_name ?? '',
+    })),
+    { months: Number.MAX_SAFE_INTEGER },
+  )
+  const bankCoverage = new Map(
+    cashFlowSeries.series.map((m) => [m.monthKey, m.complete]),
+  )
+
+  const monthlyCogs = deriveMonthlyCogs(prepared, resolutions, salesByMonth, bankCoverage)
   const progress = checkResolutionProgress(checkRows, resolutions, isCogsCategory)
   // Readiness is judged on what is still UNRESOLVED, not the lifetime total —
   // using the total would keep the gate closed forever even after every check
@@ -584,10 +745,17 @@ export async function getCheckResolutionSnapshot(): Promise<CheckResolutionSnaps
       .filter((r) => r.reviewStatus === 'approved')
       .map((r) => [r.financialTransactionId, r]),
   )
+  const rejectedIds = new Set(
+    resolutions
+      .filter((r) => r.reviewStatus === 'rejected')
+      .map((r) => r.financialTransactionId),
+  )
   // The same predicate the progress figures use, so the clusters offered for
   // review and the outstanding total can never describe different sets of rows.
   const pendingRows = checkRows.filter(
-    (r) => checkResolvedVia(r, approvedById.get(r.id)) === 'unresolved',
+    (r) =>
+      checkResolvedVia(r, approvedById.get(r.id), rejectedIds.has(r.id)) ===
+      'unresolved',
   )
   const topClusters = suggestCheckGroups(pendingRows)
     .filter((s) => s.kind === 'amount-cluster')
@@ -621,10 +789,18 @@ export async function getCheckResolutionSnapshot(): Promise<CheckResolutionSnaps
     unresolvedWithScan,
     monthsWithUnresolved: monthlyCogs.filter((m) => m.unresolvedCheckCount > 0).length,
     topClusters,
-    // Complete months with sales but nothing categorized as cost of goods — a
-    // different failure from unattributed checks, and a worse one for margin.
+    // The two lists are split by REMEDY, not merged into one "no margin" bucket.
+    // `no-cogs` means transactions exist but none are categorized as cost of
+    // goods; `bank-data-missing` means there are no transactions to categorize.
     monthsMissingCogs: monthlyCogs
-      .filter((m) => m.salesComplete && m.netSales > 0 && m.baseCogs <= 0)
+      .filter((m) => m.withheldReason === 'no-cogs')
       .map((m) => m.month),
+    monthsMissingBankData: monthlyCogs
+      .filter((m) => m.withheldReason === 'bank-data-missing')
+      .map((m) => m.month),
+    // Newest first match wins: scan from the end for the most recent month whose
+    // margin passes every guard.
+    latestQuotableMonth:
+      [...monthlyCogs].reverse().find((m) => m.quotable) ?? null,
   }
 }

@@ -67,10 +67,15 @@ export async function POST(request: Request) {
     }
 
     // OAuth institutions — American Express among them — send the owner to the
-    // bank's own site and return them to this exact registered URI. Omitting it
-    // makes those banks unselectable, so the Amex card could never be linked.
-    // Sent only when configured, because non-OAuth banks work without it and an
-    // empty string would be rejected outright.
+    // bank's own site and back to this exact registered URI.
+    //
+    // NOT required on desktop/mobile web, contrary to an earlier comment here.
+    // Per Plaid's OAuth guide, web integrations open the bank in a POP-UP (or a
+    // new tab on mobile web) whether or not a redirect_uri is supplied, so Amex
+    // links fine without one. What omitting it actually costs is webview
+    // browsers (links opened from Mail, Facebook, etc.), which can't do pop-ups.
+    // Sent only when configured: an empty string is rejected outright, and an
+    // unregistered value fails link creation, so absent is safer than guessed.
     const redirectUri = plaidRedirectUri()
 
     const response = await plaidClient().linkTokenCreate({
