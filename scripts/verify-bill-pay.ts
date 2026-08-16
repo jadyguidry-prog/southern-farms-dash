@@ -462,6 +462,64 @@ const pillars = {
 }
 
 {
+  // The check-match insight must NOT be gated on outstanding checks.
+  //
+  // This is the trap that shaped the design: `getHealthSnapshot` omits `billPay` entirely
+  // unless `outstandingCheckCount > 0`, so folding these findings into that object would
+  // silence them in the exact situation they exist to catch — no outstanding checks
+  // recorded BECAUSE the payments were never entered. `billPay: undefined` here is the
+  // whole point of the test, not incidental setup.
+  const insights = generateInsights({
+    settings,
+    pillars,
+    billPay: undefined,
+    checkMatches: {
+      likelyUnrecordedCount: 2,
+      likelyUnrecordedTotal: 575,
+      amountMismatchCount: 0,
+    },
+  })
+  const hit = insights.find((i) => i.id === 'auto-check-match-unrecorded')
+  ok('unmatched-check insight fires with no outstanding checks at all', Boolean(hit))
+  ok(
+    'and it is worded as a possibility, not a settled fact',
+    Boolean(hit && /may|matches|match/i.test(hit.detail) && !/were paid/i.test(hit.detail)),
+    hit?.detail,
+  )
+  ok(
+    'no amount-mismatch insight when none mismatch',
+    !insights.some((i) => i.id === 'auto-check-match-amount'),
+  )
+}
+
+{
+  const insights = generateInsights({ settings, pillars, checkMatches: undefined })
+  ok(
+    'a clean ledger produces no check-match insight',
+    !insights.some((i) => i.id.startsWith('auto-check-match')),
+  )
+}
+
+{
+  // Amount mismatch is its own message because the remedy differs: the bill is known,
+  // only the figure is wrong. It must not imply a payment needs confirming.
+  const insights = generateInsights({
+    settings,
+    pillars,
+    checkMatches: {
+      likelyUnrecordedCount: 0,
+      likelyUnrecordedTotal: 0,
+      amountMismatchCount: 1,
+    },
+  })
+  ok(
+    'a mismatch alone raises only the amount message',
+    insights.some((i) => i.id === 'auto-check-match-amount') &&
+      !insights.some((i) => i.id === 'auto-check-match-unrecorded'),
+  )
+}
+
+{
   // The dangerous case this feature exists to surface.
   const insights = generateInsights({
     settings,

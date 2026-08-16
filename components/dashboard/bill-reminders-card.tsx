@@ -1,4 +1,5 @@
-import { AlertTriangle, CalendarClock, CheckCircle2, Clock } from 'lucide-react'
+import Link from 'next/link'
+import { AlertTriangle, CalendarClock, CheckCircle2, Clock, Landmark } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatCurrency, formatDayLabel } from '@/lib/data'
 import { describeReminder, type BillReminderResult } from '@/lib/bill-reminders'
@@ -10,7 +11,15 @@ import { describeReminder, type BillReminderResult } from '@/lib/bill-reminders'
  * no vendor deadline exists for it to miss. Mixing the two would make "overdue" mean
  * nothing.
  */
-export function BillRemindersCard({ reminders }: { reminders: BillReminderResult }) {
+export function BillRemindersCard({
+  reminders,
+  // Optional and defaulted to 0 so a caller that has not wired the matcher renders the
+  // card exactly as before, rather than showing a "0 checks" line that reads as a finding.
+  likelyUnrecordedCount = 0,
+}: {
+  reminders: BillReminderResult
+  likelyUnrecordedCount?: number
+}) {
   const { due, upcoming, staleChecks, dueTotal } = reminders
   const hasOverdue = due.some((d) => d.urgency === 'overdue')
 
@@ -107,6 +116,28 @@ export function BillRemindersCard({ reminders }: { reminders: BillReminderResult
                 </p>
               ) : null}
             </div>
+          </div>
+        ) : null}
+
+        {/* Placed on THIS card on purpose. The figure above is what the owner still owes;
+            a cleared check that already paid one of these bills means that figure is
+            overstated. Naming it anywhere else would leave the total looking authoritative
+            while the qualification sat on another screen. */}
+        {likelyUnrecordedCount > 0 ? (
+          <div className="mt-4 flex items-start gap-2 border-t border-border pt-3">
+            <Landmark
+              className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+              aria-hidden
+            />
+            <p className="text-xs text-muted-foreground text-pretty">
+              {likelyUnrecordedCount} cleared bank{' '}
+              {likelyUnrecordedCount === 1 ? 'check matches a bill' : 'checks match bills'}{' '}
+              still marked unpaid. If confirmed, the total above is overstated.{' '}
+              <Link href="/bill-pay" className="font-medium underline">
+                Review in Bill Pay
+              </Link>
+              .
+            </p>
           </div>
         ) : null}
       </CardContent>
