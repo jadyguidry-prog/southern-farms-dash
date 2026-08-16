@@ -29,7 +29,9 @@ async function fetchTxns(db: DbLike, since: string): Promise<AutoClearTxn[]> {
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await db
       .from('financial_transactions')
-      .select('id, transaction_date, amount, description, check_number, transaction_type')
+      .select(
+        'id, transaction_date, amount, description, check_number, transaction_type, bill_match_dismissed_at',
+      )
       .is('deleted_at', null)
       .in('transaction_type', ['expense', 'payment'])
       .gte('transaction_date', since)
@@ -269,8 +271,9 @@ export async function runAutoClear(
   // getBusinessSettings (which builds a cookie-scoped client) is not always reachable.
   // Read the table directly and fall back to the shared defaults, which are the same
   // constants getBusinessSettings starts from — not invented numbers.
-  let orphanReviewDays = SETTING_DEFAULTS.orphan_check_review_days
-  let clearWindowDays = SETTING_DEFAULTS.check_clear_window_days
+  // Widened from the `as const` literal types so an owner-set override can replace them.
+  let orphanReviewDays: number = SETTING_DEFAULTS.orphan_check_review_days
+  let clearWindowDays: number = SETTING_DEFAULTS.check_clear_window_days
   try {
     const { data } = await db
       .from('business_settings')

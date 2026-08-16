@@ -184,10 +184,44 @@ section('The real Owner Draw tie: two bills at exactly $1,500')
   )
   check('two identical checks -> no automatic clear', r.autoClear.length === 0)
   check('both surface for review', r.review.length === 2)
+  // This is the CHECK being ambiguous, not the bill. Only one bill matches, so the
+  // 'more than one bill' wording would be factually wrong — the reason must differ.
+  // Found on the real ledger: Marketing - Billboard ($550) with checks #1614 and #1660
+  // was reported as "could belong to more than one bill" while naming one bill.
   check(
     'both flagged ambiguous, not silently assigned',
-    r.review.every((x) => x.reason === 'ambiguous_amount'),
+    r.review.every((x) => x.reason === 'ambiguous_check'),
   )
+  check(
+    'and it names the single matching bill instead of claiming several',
+    r.review.every(
+      (x) => /Rent/.test(x.explanation) && !/more than one bill/i.test(x.explanation),
+    ),
+    r.review[0]?.explanation,
+  )
+  check(
+    'while still saying which check is in doubt',
+    r.review.every((x) => /more than one check/i.test(x.explanation)),
+  )
+}
+
+{
+  // The bill-side ambiguity must keep its own wording, including when the two bills
+  // share a NAME. Both real Owner Draw bills are literally called "Owner Draw", which
+  // is what made the bug hard to see in a preview: two candidates print as one label.
+  const r = classifyClearCandidates(
+    [
+      ob({ id: 'd1', obligationName: 'Owner Draw', amount: 1500 }),
+      ob({ id: 'd2', obligationName: 'Owner Draw', amount: 1500 }),
+    ],
+    [],
+    [txn({ id: 'only', amount: 1500, description: 'CHECK 1753' })],
+    [],
+    TODAY,
+    OPTS,
+  )
+  check('identically named bills still read as bill-side ambiguity', r.review[0]?.reason === 'ambiguous_amount')
+  check('and both ids are offered even though the names match', r.review[0]?.candidateObligationIds.length === 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +361,47 @@ section('Safety invariants')
   const r = classifyClearCandidates([], [], [], [], TODAY, OPTS)
   check('empty input is not an error', r.autoClear.length === 0 && r.review.length === 0)
   check('and reads as nothing to do', describeAutoClearResult(r) === 'No bank checks needed matching.')
+}
+
+// ---------------------------------------------------------------------------
+section('A dismissed row stays dismissed')
+
+{
+  // An orphan check the owner has marked "not a bill" must not come back on every sync.
+  // A queue that keeps re-asking an answered question is one the owner stops reading.
+  const orphan = txn({ id: 'orph', description: 'CHECK 1753', amount: 240 })
+  const before = classifyClearCandidates([], [], [orphan], [], TODAY, OPTS)
+  check('an unmatched recent check is raised once', before.review.length === 1)
+
+  const after = classifyClearCandidates(
+    [],
+    [],
+    [{ ...orphan, bill_match_dismissed_at: '2026-08-15T00:00:00Z' }],
+    [],
+    TODAY,
+    OPTS,
+  )
+  check('and never again once dismissed', after.review.length === 0)
+}
+
+{
+  // Dismissal answers "nothing on record matches this", using the records as they were.
+  // If the owner then records a payment with that same check number AND amount, that is
+  // the strongest evidence the module has, so it should still clear. Pinning this stops
+  // a future refactor from "tidying" dismissal into a blanket skip.
+  const t = txn({ id: 'later', bill_match_dismissed_at: '2026-08-15T00:00:00Z' })
+  const r = classifyClearCandidates([ob()], [pay()], [t], [], TODAY, OPTS)
+  check('an exact check-number match still clears after a dismissal', r.autoClear.length === 1)
+  check('and it raises no review noise', r.review.length === 0)
+}
+
+{
+  // A dismissal must not suppress a DIFFERENT check that happens to be in the same pass.
+  const dismissedOne = txn({ id: 'd1', description: 'CHECK 1753', amount: 240, bill_match_dismissed_at: '2026-08-15T00:00:00Z' })
+  const otherOne = txn({ id: 'd2', description: 'CHECK 1754', amount: 310 })
+  const r = classifyClearCandidates([], [], [dismissedOne, otherOne], [], TODAY, OPTS)
+  check('only the dismissed row is silenced', r.review.length === 1)
+  check('and the other row still surfaces', r.review[0]?.transactionId === 'd2')
 }
 
 // ---------------------------------------------------------------------------

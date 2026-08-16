@@ -718,7 +718,7 @@ export async function resolveAutoClearItem(input: {
 
   const { data: obligation, error: obErr } = await supabase
     .from('cash_obligations')
-    .select('id, obligation_name, vendor_name, recurring, status')
+    .select('id, obligation_name, vendor_name, recurring, status, due_date, next_due_date, frequency')
     .eq('id', obligationId)
     .maybeSingle()
   if (obErr) return { ok: false, error: obErr.message }
@@ -757,8 +757,11 @@ export async function resolveAutoClearItem(input: {
   // matching recordPayment's owner-approved default so a monthly bill never vanishes
   // from the forecast.
   if (obligation.recurring) {
-    const next = await nextScheduledDueDate(obligationId)
-    if (next) {
+    // Anchored on the bill's own schedule, exactly as the manual and ACH paths do, so a
+    // next_due_date that had drifted is corrected rather than left stale.
+    const anchor = obligation.due_date || obligation.next_due_date || ''
+    const next = nextScheduledDueDate(anchor, obligation.frequency || 'Monthly', postedDate)
+    if (next && next !== obligation.next_due_date) {
       await supabase.from('cash_obligations').update({ next_due_date: next }).eq('id', obligationId)
     }
   } else {

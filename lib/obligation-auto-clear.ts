@@ -82,7 +82,14 @@ export type AutoClearMatch = {
 
 export type ReviewReason =
   | 'amount_mismatch'
+  /** Several open bills share this amount, so the BILL is the open question. */
   | 'ambiguous_amount'
+  /**
+   * One open bill, but several checks cleared for its amount, so the CHECK is the open
+   * question. Kept separate from `ambiguous_amount` because they need opposite wording:
+   * saying "could belong to more than one bill" when only one bill matches is false.
+   */
+  | 'ambiguous_check'
   | 'possible_unrecorded_payment'
   | 'unrecognized_check'
 
@@ -175,6 +182,22 @@ export function classifyClearCandidates(
 ): AutoClearResult {
   const linked = new Set(linkedTransactionIds)
 
+  /**
+   * Rows the owner has already said are not bill payments.
+   *
+   * These stay IN scope below rather than being filtered out, because dismissal and an
+   * exact check-number match answer different questions. Dismissal means "nothing on
+   * record matches this" — a judgement made with the records as they were. If the owner
+   * later records a payment carrying that same check number AND the same amount, that is
+   * the strongest evidence this module has, and it should still clear. What dismissal
+   * must do is stop the queue re-asking a question already answered, so it suppresses
+   * the uncertain tiers only (applied at the return, so every tier is covered by one
+   * rule rather than a guard repeated at each push).
+   */
+  const dismissed = new Set(
+    transactions.filter((t) => Boolean(t.bill_match_dismissed_at)).map((t) => t.id),
+  )
+
   // Bank rows in scope: outgoing, real date, not future, inside the window, carrying a
   // check number, and not already used as evidence for some other payment.
   const bankChecks = transactions
@@ -212,6 +235,26 @@ export function classifyClearCandidates(
   }
 
   const obligationNames = new Map(obligations.map((o) => [o.id, o.obligationName]))
+
+  /**
+   * Name a bill so the owner can tell WHICH one is meant.
+   *
+   * Both real Owner Draw bills are literally named "Owner Draw" (they differ only by
+   * vendor: Jady, Trent). Naming one of them "Owner Draw" in a prompt about a $1,500
+   * check is technically true and practically useless — the owner cannot act on it
+   * without opening the bill. Appends the vendor only when the name is genuinely shared,
+   * so ordinary bills keep their short label.
+   */
+  const nameCounts = new Map<string, number>()
+  for (const o of obligations) {
+    const k = o.obligationName.trim().toLowerCase()
+    nameCounts.set(k, (nameCounts.get(k) ?? 0) + 1)
+  }
+  const describe = (o: { obligationName: string; vendorName: string }): string => {
+    const shared = (nameCounts.get(o.obligationName.trim().toLowerCase()) ?? 0) > 1
+    const vendor = o.vendorName.trim()
+    return shared && vendor ? `${o.obligationName} (${vendor})` : o.obligationName
+  }
 
   // Bills that are genuinely still owed and have NO payment row at all. This is the gap
   // the existing suggestion engine cannot cover: it only looks at outstanding payments,
@@ -312,25 +355,35 @@ export function classifyClearCandidates(
         postedDate,
         description,
         reason: 'possible_unrecorded_payment',
-        explanation: `Check #${num} for ${money(bankAmt)} matches ${o.obligationName}, which is still marked unpaid. No payment was ever recorded for it.`,
+        explanation: `Check #${num} for ${money(bankAmt)} matches ${describe(o)}, which is still marked unpaid. No payment was ever recorded for it.`,
         candidateObligationIds: [o.id],
       })
       continue
     }
 
     if (sameAmount.length > 0) {
-      const why =
-        (obligationAmountCounts.get(amtKey) ?? 0) > 1
-          ? `${sameAmount.length} unpaid bills are for exactly ${money(bankAmt)}`
-          : `more than one check in this period cleared for ${money(bankAmt)}`
+      // Two genuinely different situations reach this point, and collapsing them into
+      // one "ambiguous" message makes at least one of them a false statement:
+      //
+      //  a) Several OPEN BILLS share the amount. Real case: two Owner Draw bills, both
+      //     exactly $1,500 (Jady, Trent). The bill is the open question.
+      //  b) ONE open bill, but several CHECKS cleared for that amount. Real case:
+      //     Marketing - Billboard at $550 with checks #1614 and #1660 — a monthly bill
+      //     paid twice in the window. The bill is NOT in doubt; which check pays which
+      //     month is. Telling the owner this "could belong to more than one bill" while
+      //     naming a single bill reads as a contradiction and teaches them to distrust
+      //     the queue.
+      const manyBills = sameAmount.length > 1
       review.push({
         transactionId: t.id,
         checkNumber: num,
         bankAmount: bankAmt,
         postedDate,
         description,
-        reason: 'ambiguous_amount',
-        explanation: `Check #${num} for ${money(bankAmt)} could belong to more than one bill — ${why}. Pick the right one.`,
+        reason: manyBills ? 'ambiguous_amount' : 'ambiguous_check',
+        explanation: manyBills
+          ? `Check #${num} for ${money(bankAmt)} could belong to more than one bill — ${sameAmount.length} unpaid bills are for exactly ${money(bankAmt)}. Pick the right one.`
+          : `Check #${num} for ${money(bankAmt)} matches ${describe(sameAmount[0])}, but more than one check in this period cleared for ${money(bankAmt)}, so it is not clear which one paid it. Confirm if this is the right check.`,
         candidateObligationIds: sameAmount.map((o) => o.id),
       })
       continue
@@ -353,7 +406,12 @@ export function classifyClearCandidates(
 
   return {
     autoClear: autoClear.sort((a, b) => b.postedDate.localeCompare(a.postedDate)),
-    review: review.sort((a, b) => b.postedDate.localeCompare(a.postedDate)),
+    // One rule covers every uncertain tier: a question the owner has already answered is
+    // not asked again. Certain matches above are deliberately NOT filtered — see the
+    // `dismissed` comment for why an exact check-number match outranks an earlier "no".
+    review: review
+      .filter((r) => !dismissed.has(r.transactionId))
+      .sort((a, b) => b.postedDate.localeCompare(a.postedDate)),
   }
 }
 
