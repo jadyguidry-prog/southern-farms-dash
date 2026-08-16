@@ -101,6 +101,16 @@ export const SETTING_DEFAULTS = {
   // the same as the horizon: spending is a decision about now, while the reserve warning
   // looks across the whole horizon.
   cash_near_term_days: 7,
+  // How far back to scan the bank feed when matching cleared checks to the bills they
+  // paid. A mailed check can take weeks to clear, so this is deliberately generous:
+  // matching keys on the check NUMBER, which is unique, so a wide window costs nothing
+  // in accuracy — unlike an amount-based scan, where a wide window invites collisions.
+  check_clear_window_days: 120,
+  // How far back to surface a cleared bank check that matches no bill on record. There
+  // are ~198 such checks in this ledger going back to May 2025, nearly all ordinary
+  // spending never tracked as a bill — surfacing them all would bury the few that
+  // matter under settled history. Older ones stay in Check Resolution.
+  orphan_check_review_days: 60,
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS

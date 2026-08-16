@@ -146,6 +146,7 @@ const SETTING_LABELS: Record<string, { label: string; unit: string }> = {
   // Must be registered HERE as well as in the form: this whitelist is what the save
   // action iterates, so a field added only to the UI would silently never persist.
   bill_reminder_lead_days: { label: 'Bill reminder lead time', unit: 'days' },
+  orphan_check_review_days: { label: 'Unmatched check review window', unit: 'days' },
 }
 
 export async function saveBusinessSettings(formData: FormData) {

@@ -450,6 +450,33 @@ export function amountWithinAchTolerance(scheduled: number, actual: number): boo
   return Math.abs(actual - scheduled) <= tol
 }
 
+/**
+ * Is this debit's amount acceptable for this bill?
+ *
+ * RECURRING bills keep the loose band, because that is what it was calibrated for: a
+ * variable utility never drafts at the scheduled figure (electric ran 1,926 -> 2,470
+ * against a 2,200 schedule), and tightening it would miss the very debits we most want
+ * to catch.
+ *
+ * NON-RECURRING bills require the amount to be EXACT. A one-off invoice is for a known
+ * figure, so exactness costs nothing — and the loose band is actively dangerous here.
+ * Real collision in this ledger: three Sysco obligations at $1,313.79, $5,871.88 and
+ * $5,025.70. The band on $5,871.88 is +/-$1,174, which reaches down and swallows the
+ * $5,025.70 invoice, so a single Sysco debit could clear the wrong bill. Extending the
+ * matcher to non-recurring bills without this would introduce a false-match risk, and a
+ * false match silently marks the wrong bill paid.
+ */
+export function amountAcceptableForBill(
+  scheduled: number,
+  actual: number,
+  recurring: boolean,
+): boolean {
+  if (recurring) return amountWithinAchTolerance(scheduled, actual)
+  // Integer cents: a stored 5025.7 can read back as 5025.7000000000003, and float
+  // noise must not defeat an exactness rule.
+  return Math.round(scheduled * 100) === Math.round(actual * 100)
+}
+
 function daysBetween(fromISO: string, toISO: string): number {
   return (
     (new Date(toISO + 'T00:00:00').getTime() - new Date(fromISO + 'T00:00:00').getTime()) /
@@ -473,10 +500,14 @@ export function buildAchReconcileMatches(
   const used = new Set(linkedTransactionIds)
   const claimed = new Set<string>()
 
+  // Non-recurring bills are included: a one-off ACH invoice is drafted by the bank just
+  // like a recurring one, so excluding it left real debits unmatched (Sysco Weekly COGS
+  // $1,313.79 and Sysco COGS $5,871.88 are both non-recurring ACH). The strict
+  // vendor-name requirement is what keeps this safe, and amountAcceptableForBill demands
+  // an EXACT amount for these so a loose band cannot reach a neighbouring invoice.
   const eligible = obligations.filter(
     (o) =>
       o.active &&
-      o.recurring &&
       o.paymentMethod.toUpperCase() === 'ACH' &&
       vendorTokens(o.vendorName).length > 0,
   )
@@ -505,7 +536,12 @@ export function buildAchReconcileMatches(
       if (claimed.has(t.id)) continue
       const amt = Number(t.amount) || 0
       if (!descriptionMatchesVendor(o.vendorName, t.description ?? '')) continue
-      if (!amountWithinAchTolerance(o.amount, amt)) continue
+      if (!amountAcceptableForBill(o.amount, amt, o.recurring)) continue
+      // A RECURRING bill may match several debits — each prior period is a genuine
+      // payment, which usefully backfills history. A ONE-OFF invoice is paid once, so
+      // it stops at the first debit; letting it claim more would report the same
+      // invoice as paid two or three times over.
+      if (!o.recurring && matches.some((m) => m.obligationId === o.id)) break
       claimed.add(t.id)
       matches.push({
         obligationId: o.id,

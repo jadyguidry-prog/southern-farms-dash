@@ -71,6 +71,12 @@ const FIELDS: FieldDef[] = [
     unit: 'days',
     hint: 'How many days ahead a bill starts showing in "Bills to pay".',
   },
+  {
+    key: 'orphan_check_review_days',
+    label: 'Unmatched Check Review Window',
+    unit: 'days',
+    hint: 'How far back to flag a cleared check that matches no bill on record.',
+  },
 ]
 
 // Accepts the whole settings object (which also carries a `rows` array) and

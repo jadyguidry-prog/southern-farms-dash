@@ -28,6 +28,7 @@ import {
   paymentLabel,
   validatePaymentBasics,
   buildAchReconcileMatches,
+  amountAcceptableForBill,
   descriptionMatchesVendor,
   amountWithinAchTolerance,
   vendorTokens,
@@ -938,6 +939,74 @@ console.log('\nAutopay/ACH auto-reconcile from the bank feed')
       TODAY,
     )
     ok('a future-dated or long-past debit is not reconciled', m.length === 0)
+  }
+
+  // --- Non-recurring ACH bills are eligible, but only on an EXACT amount ---
+  //
+  // Dropping the `recurring` requirement gains real bills (two Sysco COGS invoices are
+  // ACH and non-recurring). It also introduces a false-match risk that must be closed in
+  // the same change: the loose band exists for variable utilities, and on a large
+  // one-off invoice it is wide enough to reach a DIFFERENT invoice from the same vendor.
+  {
+    const syscoBig = ach({ id: 'sy-big', obligationName: 'Sysco COGS', vendorName: 'Sysco', amount: 5871.88, recurring: false })
+    const syscoMid = ach({ id: 'sy-mid', obligationName: 'Sysco Invoice', vendorName: 'Sysco', amount: 5025.7, recurring: false })
+
+    ok('a one-off invoice matches its exact amount', amountAcceptableForBill(5871.88, 5871.88, false))
+    // +/-20% of 5,871.88 is +/-$1,174, which reaches down past 5,025.70.
+    ok(
+      'the loose band WOULD have swallowed the neighbouring invoice',
+      amountWithinAchTolerance(5871.88, 5025.7),
+    )
+    ok(
+      'but a one-off invoice rejects it, so the wrong bill cannot clear',
+      !amountAcceptableForBill(5871.88, 5025.7, false),
+    )
+    ok('a recurring bill keeps the loose band', amountAcceptableForBill(2200, 1926.03, true))
+    // Float noise must not defeat exactness: a stored 5025.7 can read back as ...0003.
+    ok('exactness survives float noise', amountAcceptableForBill(5025.7, 5025.7000000000003, false))
+
+    const m = buildAchReconcileMatches(
+      [syscoBig, syscoMid],
+      [bank({ id: 'sy-debit', description: 'SYSCO BATON ROUG ACH DEBIT', amount: 5025.7, transaction_date: '2026-07-25' })],
+      [],
+      TODAY,
+    )
+    check('the Sysco debit clears exactly one bill', m.length, 1)
+    check('and it is the invoice for that exact amount', m[0]?.obligationId, 'sy-mid')
+
+    // A one-off invoice is paid once. Matching several debits would report the same
+    // invoice as paid two or three times over.
+    const twoDebits = buildAchReconcileMatches(
+      [syscoMid],
+      [
+        bank({ id: 'd1', description: 'SYSCO ACH DEBIT', amount: 5025.7, transaction_date: '2026-07-25' }),
+        bank({ id: 'd2', description: 'SYSCO ACH DEBIT', amount: 5025.7, transaction_date: '2026-07-11' }),
+      ],
+      [],
+      TODAY,
+    )
+    check('a one-off invoice claims at most one debit', twoDebits.length, 1)
+
+    // A recurring bill SHOULD still take each period's debit — that backfills history.
+    const recurringTwice = buildAchReconcileMatches(
+      [entergy],
+      [
+        bank({ id: 'e1', description: 'ENTERGY DRAFT', amount: 2193.23, transaction_date: '2026-07-28' }),
+        bank({ id: 'e2', description: 'ENTERGY DRAFT', amount: 2210.4, transaction_date: '2026-06-28' }),
+      ],
+      [],
+      TODAY,
+    )
+    check('a recurring bill still matches each period', recurringTwice.length, 2)
+
+    // The vendor name remains the real identifier for non-recurring bills too.
+    const noName = buildAchReconcileMatches(
+      [ach({ id: 'anon', vendorName: '', amount: 5025.7, recurring: false })],
+      [bank({ description: 'ACH DEBIT 5025.70', amount: 5025.7 })],
+      [],
+      TODAY,
+    )
+    ok('a non-recurring bill with no vendor name never matches', noName.length === 0)
   }
 }
 
