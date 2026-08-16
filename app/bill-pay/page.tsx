@@ -13,14 +13,28 @@ import {
   getAchReconcileMatches,
 } from '@/lib/bill-pay-service'
 import { sumPaidInMonth } from '@/lib/bill-pay-shared'
+import { getAutoClearCandidates } from '@/lib/obligation-auto-clear-service'
+import { buildObligationLabels } from '@/lib/obligation-auto-clear'
 import { formatCurrency } from '@/lib/data'
 import { BillPayClient } from '@/components/bill-pay/bill-pay-client'
+import {
+  CheckMatchReview,
+  type CheckMatchReviewItem,
+} from '@/components/bill-pay/check-match-review'
 
 // Bill Payments — Phase 1 (check + ACH). Server component: loads everything the
 // screen needs, then hands plain data to the client island for interaction.
 export default async function BillPayPage() {
-  const [summary, obligations, bankAccounts, payments, suggestions, vendors, detected] =
-    await Promise.all([
+  const [
+    summary,
+    obligations,
+    bankAccounts,
+    payments,
+    suggestions,
+    vendors,
+    detected,
+    autoClear,
+  ] = await Promise.all([
       getCashDebtSummary(),
       getCashObligations(),
       getBankAccounts(),
@@ -34,6 +48,9 @@ export default async function BillPayPage() {
       // Autopay/ACH bills a bank debit already paid. Read-only here — the actual
       // write happens behind the one-tap Reconcile button, never during this GET.
       getAchReconcileMatches(),
+      // Cleared bank checks the matcher could not resolve on its own. Read-only here:
+      // the certain matches are written during a bank sync, never during this GET.
+      getAutoClearCandidates(),
     ])
 
   // Only active, unpaid obligations are payable targets.
@@ -68,6 +85,24 @@ export default async function BillPayPage() {
     .sort((a, b) => a.name.localeCompare(b.name))
 
   const outstanding = payments.filter((p) => p.status === 'outstanding')
+
+  // Labels come from the same function that worded each explanation, so the picker in the
+  // review card and the sentence above it always name a bill identically — including the
+  // two Owner Draw bills that share a name and are told apart only by vendor.
+  const obligationLabels = buildObligationLabels(
+    obligations.map((o) => ({
+      id: o.id,
+      obligationName: o.obligationName,
+      vendorName: o.vendorName,
+    })),
+  )
+  const reviewItems: CheckMatchReviewItem[] = autoClear.review.map((r) => ({
+    ...r,
+    candidates: r.candidateObligationIds.map((id) => ({
+      id,
+      label: obligationLabels.get(id) ?? 'Unnamed bill',
+    })),
+  }))
 
   // Computed once so the tile can't straddle a month boundary mid-render.
   const currentMonth = new Date().toISOString().slice(0, 7)
@@ -114,6 +149,12 @@ export default async function BillPayPage() {
           hint={`${outstanding.length} awaiting clear`}
         />
       </div>
+
+      {reviewItems.length > 0 ? (
+        <div className="mt-6">
+          <CheckMatchReview items={reviewItems} />
+        </div>
+      ) : null}
 
       <div className="mt-6">
         <BillPayClient

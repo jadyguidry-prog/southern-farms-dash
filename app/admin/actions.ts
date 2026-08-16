@@ -147,6 +147,11 @@ const SETTING_LABELS: Record<string, { label: string; unit: string }> = {
   // action iterates, so a field added only to the UI would silently never persist.
   bill_reminder_lead_days: { label: 'Bill reminder lead time', unit: 'days' },
   orphan_check_review_days: { label: 'Unmatched check review window', unit: 'days' },
+  // Deliberately absent from the settings form: 120 days is a technical scan depth, not a
+  // business decision. Labelled anyway because the save action only persists keys the
+  // form actually submits, while a stored setting missing from this map renders as a
+  // blank row in Admin.
+  check_clear_window_days: { label: 'Check clearing scan window', unit: 'days' },
 }
 
 export async function saveBusinessSettings(formData: FormData) {

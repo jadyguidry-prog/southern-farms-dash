@@ -138,6 +138,36 @@ export function checkNumberOf(txn: {
   return null
 }
 
+/**
+ * Name every bill so the owner can tell WHICH one is meant.
+ *
+ * Both real Owner Draw bills are literally named "Owner Draw", differing only by vendor
+ * (Jady, Trent). Naming one of them "Owner Draw" in a prompt about a $1,500 check is
+ * technically true and practically useless — the owner cannot act on it without opening
+ * the bill. The vendor is appended ONLY when a name is genuinely shared, so ordinary
+ * bills keep their short label.
+ *
+ * Exported so the review UI's picker and the explanation text are generated from one
+ * function. Two surfaces labelling the same bill independently is how a dropdown ends up
+ * offering "Owner Draw" twice while the sentence above it says "Owner Draw (Trent)".
+ */
+export function buildObligationLabels(
+  obligations: { id: string; obligationName: string; vendorName: string }[],
+): Map<string, string> {
+  const nameCounts = new Map<string, number>()
+  for (const o of obligations) {
+    const k = o.obligationName.trim().toLowerCase()
+    nameCounts.set(k, (nameCounts.get(k) ?? 0) + 1)
+  }
+  const out = new Map<string, string>()
+  for (const o of obligations) {
+    const shared = (nameCounts.get(o.obligationName.trim().toLowerCase()) ?? 0) > 1
+    const vendor = o.vendorName.trim()
+    out.set(o.id, shared && vendor ? `${o.obligationName} (${vendor})` : o.obligationName)
+  }
+  return out
+}
+
 function isOutgoing(txn: AutoClearTxn): boolean {
   return OUTGOING_TYPES.has((txn.transaction_type ?? '').toLowerCase())
 }
@@ -236,25 +266,9 @@ export function classifyClearCandidates(
 
   const obligationNames = new Map(obligations.map((o) => [o.id, o.obligationName]))
 
-  /**
-   * Name a bill so the owner can tell WHICH one is meant.
-   *
-   * Both real Owner Draw bills are literally named "Owner Draw" (they differ only by
-   * vendor: Jady, Trent). Naming one of them "Owner Draw" in a prompt about a $1,500
-   * check is technically true and practically useless — the owner cannot act on it
-   * without opening the bill. Appends the vendor only when the name is genuinely shared,
-   * so ordinary bills keep their short label.
-   */
-  const nameCounts = new Map<string, number>()
-  for (const o of obligations) {
-    const k = o.obligationName.trim().toLowerCase()
-    nameCounts.set(k, (nameCounts.get(k) ?? 0) + 1)
-  }
-  const describe = (o: { obligationName: string; vendorName: string }): string => {
-    const shared = (nameCounts.get(o.obligationName.trim().toLowerCase()) ?? 0) > 1
-    const vendor = o.vendorName.trim()
-    return shared && vendor ? `${o.obligationName} (${vendor})` : o.obligationName
-  }
+  const labels = buildObligationLabels(obligations)
+  const describe = (o: { id: string; obligationName: string }): string =>
+    labels.get(o.id) ?? o.obligationName
 
   // Bills that are genuinely still owed and have NO payment row at all. This is the gap
   // the existing suggestion engine cannot cover: it only looks at outstanding payments,
