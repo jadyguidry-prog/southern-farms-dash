@@ -30,6 +30,7 @@ import { getLaborHealthSnapshot } from '@/lib/labor-service'
 import { getCheckResolutionSnapshot } from '@/lib/check-resolution-service'
 import { getOutstandingCheckSummary, getBillPaySnapshot } from '@/lib/bill-pay-service'
 import { getSpendingCapacity } from '@/lib/spending-capacity-data'
+import { getAutoClearCandidates } from '@/lib/obligation-auto-clear-service'
 
 // ---------- Types ----------
 export type KpiRow = {
@@ -101,6 +102,16 @@ export const SETTING_DEFAULTS = {
   // the same as the horizon: spending is a decision about now, while the reserve warning
   // looks across the whole horizon.
   cash_near_term_days: 7,
+  // How far back to scan the bank feed when matching cleared checks to the bills they
+  // paid. A mailed check can take weeks to clear, so this is deliberately generous:
+  // matching keys on the check NUMBER, which is unique, so a wide window costs nothing
+  // in accuracy — unlike an amount-based scan, where a wide window invites collisions.
+  check_clear_window_days: 120,
+  // How far back to surface a cleared bank check that matches no bill on record. There
+  // are ~198 such checks in this ledger going back to May 2025, nearly all ordinary
+  // spending never tracked as a bill — surfacing them all would bury the few that
+  // matter under settled history. Older ones stay in Check Resolution.
+  orphan_check_review_days: 60,
 } as const
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS
@@ -918,8 +929,9 @@ export async function getHealthSnapshot() {
   spendingCapacity,
   growthPlanner,
   proposalReviews,
-  cardExposure,
-  billReminders,
+    cardExposure,
+    billReminders,
+    autoClear,
   ] = await Promise.all([
   getKpis(),
   getCashDebtSummary(),
@@ -940,8 +952,23 @@ export async function getHealthSnapshot() {
   // `cache`-wrapped and the same loader the dashboard card calls, so the advisor
   // cannot name a bill or amount the panel disagrees with.
   getBillReminders(),
+  // `cache`-wrapped and the same loader /bill-pay renders, so the advisor's count can
+  // never disagree with the review card the owner is looking at.
+  getAutoClearCandidates(),
   ])
   const settings = summary.settings
+
+  // Derived once here so the advisor insight and the dashboard count are computed from a
+  // single expression. Two surfaces filtering the same array independently is how one
+  // ends up saying "2 checks" while the other says "28".
+  const likelyUnrecorded = autoClear.review.filter(
+    (r) => r.reason === 'possible_unrecorded_payment',
+  )
+  const autoClearReviewCounts = {
+    likelyUnrecordedCount: likelyUnrecorded.length,
+    likelyUnrecordedTotal: likelyUnrecorded.reduce((s, r) => s + r.bankAmount, 0),
+    amountMismatchCount: autoClear.review.filter((r) => r.reason === 'amount_mismatch').length,
+  }
 
   // Square is the only source that actually measures weekly sales. The stored
   // `weeklySales` KPI was never populated, so without this the sales pillar sat
@@ -1287,6 +1314,15 @@ export async function getHealthSnapshot() {
             minCashReserve: summary.minCashReserve,
           }
         : undefined,
+    // Counts only the two ACTIONABLE tiers. The ~26 orphan checks are ordinary untracked
+    // spending that Check Resolution already owns; including them would produce a
+    // permanent 28-item warning that buries the two findings worth acting on.
+    // Omitted entirely when both are zero, so a clean ledger yields no insight.
+    checkMatches:
+      autoClearReviewCounts.likelyUnrecordedCount > 0 ||
+      autoClearReviewCounts.amountMismatchCount > 0
+        ? autoClearReviewCounts
+        : undefined,
     // Needs 8+ complete weeks of deposits before it will pass judgement on
     // whether the business covers its costs; below that the group is omitted so
     // a thin ledger produces no verdict rather than a wrong one.
@@ -1417,6 +1453,10 @@ export async function getHealthSnapshot() {
     // tile, the advisor, and reporting all read this one snapshot so the
     // spendable-cash figure and the outstanding-check count never drift apart.
     billPay,
+    // Cleared checks the matcher could not resolve. Exposed from the same derivation the
+    // advisor used above, so the dashboard badge and the advisor insight cannot disagree
+    // about how many checks need a look.
+    checkMatches: autoClearReviewCounts,
     // Growth Planner position and every saved proposal re-checked live. Same
     // contract as the rest: the dashboard card, the advisor insights and the admin
     // report all read these two, so none of them can state a commitment figure the

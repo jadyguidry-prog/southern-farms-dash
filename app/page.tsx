@@ -70,6 +70,7 @@ export default async function DashboardPage() {
     checks,
     marketing,
     billPay,
+    checkMatches,
     growthPlanner,
     proposalReviews,
   } =
@@ -382,7 +383,10 @@ export default async function DashboardPage() {
       {/* Bills needing action. Placed with the money-owed panels rather than the health
           ratios, because this is a do-something list, not a measurement. */}
       <div className="mt-4">
-        <BillRemindersCard reminders={billReminders} />
+        <BillRemindersCard
+          reminders={billReminders}
+          likelyUnrecordedCount={checkMatches.likelyUnrecordedCount}
+        />
       </div>
 
       {/* Health / ratios */}

@@ -117,10 +117,17 @@ export function classifyFlow(
 
   // Financing first: an advance is an inflow that must never look like sales.
   if (FINANCING_PATTERN.test(d)) return 'financing'
-  // Internal moves next, since they can carry any transaction type. Direction comes
-  // from the wording because every amount in this ledger is stored positive.
+  // Internal moves next, since they can carry any transaction type. Every amount in this
+  // ledger is stored positive, so direction has to be inferred.
   if (type === 'transfer' || INTERNAL_PATTERN.test(d)) {
-    return INTERNAL_INBOUND_PATTERN.test(d) ? 'internal_in' : 'internal_out'
+    // Wording wins when it states a direction ("From Acct 2008275").
+    if (INTERNAL_INBOUND_PATTERN.test(d)) return 'internal_in'
+    // Otherwise fall back to the row's own type. "Square Fin Svcs Transfer" names no
+    // direction, so wording alone sent $15,000 of `credit` rows out instead of in —
+    // and because internal moves are honoured for balance, that is a $30,000 swing
+    // (never added, then subtracted). Only `transfer` is genuinely directionless.
+    if (INFLOW_TYPES.has(type)) return 'internal_in'
+    return 'internal_out'
   }
 
   return INFLOW_TYPES.has(type) ? 'in' : 'out'

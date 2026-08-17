@@ -8,6 +8,7 @@ import {
   isPlaidConfigured,
 } from './plaid-client'
 import { decryptToken } from './plaid-crypto'
+import { runAutoClear } from './obligation-auto-clear-service'
 import {
   PLAID_AMOUNT_CONVENTION,
   mapTransaction,
@@ -351,6 +352,28 @@ export async function syncAllItems(): Promise<{
     // Sequential on purpose: one failing institution must not abort the others,
     // and Plaid rate-limits per client.
     results.push(await syncItem(item, db))
+  }
+
+  // Fresh bank rows are exactly when a mailed check shows up as cleared, so match those
+  // checks to the bills they paid now rather than waiting for the owner to press
+  // anything.
+  //
+  // Hooked here rather than inside syncItem so it runs ONCE per sync against the whole
+  // ledger: a check written on one account can appear in another institution's feed, and
+  // per-item runs would re-scan the same rows N times.
+  //
+  // Wrapped so a matcher failure can never fail a bank sync. Getting transactions in is
+  // the primary job; matching is a convenience on top, and it retries on the next run.
+  try {
+    const summary = await runAutoClear(db, 'plaid-sync')
+    if (summary.cleared > 0 || summary.errors.length > 0) {
+      console.log(
+        `[v0] auto-clear: ${summary.cleared} cleared, ${summary.needsReview} to review, ${summary.skipped} skipped`,
+        summary.errors.length > 0 ? summary.errors : '',
+      )
+    }
+  } catch (err) {
+    console.log('[v0] auto-clear after sync failed (transactions still synced):', err)
   }
 
   return { results, configured: true }

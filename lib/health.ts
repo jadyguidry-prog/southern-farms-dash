@@ -466,6 +466,7 @@ type InsightInput = {
    * farm not yet using Bill Pay gets no bill-pay insights rather than zeros.
    */
   billPay?: BillPayInsightInput
+  checkMatches?: CheckMatchInsightInput
   /**
    * Weekly cash position from the spending-capacity engine. Omit when fewer than
    * 8 complete weeks exist, so a thin ledger produces no verdict on solvency.
@@ -621,6 +622,27 @@ export type BillPayInsightInput = {
 }
 
 /**
+ * Cleared bank checks the matcher could not resolve on its own.
+ *
+ * Deliberately its own field rather than part of `BillPayInsightInput`, which the caller
+ * omits entirely unless `outstandingCheckCount > 0`. Piggybacking there would silently
+ * drop this insight in the exact case it matters most: no outstanding checks recorded
+ * BECAUSE the payments were never entered, which is what the matcher detects.
+ */
+export type CheckMatchInsightInput = {
+  /**
+   * Checks that look like they paid a bill still marked unpaid. Counts only the
+   * actionable tiers — NOT the orphan checks, which are ordinary untracked spending
+   * handled in Check Resolution and would drown a real finding at ~26 rows.
+   */
+  likelyUnrecordedCount: number
+  /** Dollar total of those likely-unrecorded payments. */
+  likelyUnrecordedTotal: number
+  /** Checks whose recorded amount disagrees with what the bank cleared. */
+  amountMismatchCount: number
+}
+
+/**
  * Generate advisor warnings and positive notes directly from the owner's stored
  * thresholds. These sit alongside any manually entered recommendations.
  */
@@ -635,6 +657,7 @@ export function generateInsights({
   checks,
   marketing,
   billPay,
+  checkMatches,
   spending,
   growth,
   cards,
@@ -1426,6 +1449,45 @@ export function generateInsights({
     // different thresholds (a hardcoded 30 vs the owner's 14) would contradict each other,
     // and the owner would have no way to tell which threshold governed. One concept, one
     // message, one owner-set number.
+  }
+
+  // --- Cleared checks that look like unrecorded bill payments ---------------
+  // Outside the `billPay` block above on purpose: that block requires an outstanding
+  // check to exist, and the whole point here is a payment that was never recorded, so
+  // there is nothing outstanding to gate on.
+  //
+  // Stated as "look like" and never as a settled fact. The matcher only auto-writes on an
+  // exact check number AND exact amount; everything reaching the advisor is a suggestion
+  // the owner must confirm, so the wording must not imply the books are already wrong.
+  if (checkMatches && checkMatches.likelyUnrecordedCount > 0) {
+    out.push({
+      id: 'auto-check-match-unrecorded',
+      severity: 'opportunity',
+      category: 'Bills',
+      title: 'Some cleared checks may have paid bills still marked unpaid',
+      detail: `${checkMatches.likelyUnrecordedCount} cleared bank ${
+        checkMatches.likelyUnrecordedCount === 1 ? 'check matches a bill' : 'checks match bills'
+      } still marked unpaid, worth ${formatCurrency(
+        checkMatches.likelyUnrecordedTotal,
+      )}. The money already left the account, so those bills may be overstating what you still owe. Confirm each one in Bill Pay.`,
+      impact: `${formatCurrency(checkMatches.likelyUnrecordedTotal)} possibly already paid`,
+    })
+  }
+
+  // Kept as its own message because the REMEDY differs: the bill is known, only the
+  // figure is in question. Folding it into the message above would tell the owner to
+  // confirm a payment when what is actually needed is correcting an amount.
+  if (checkMatches && checkMatches.amountMismatchCount > 0) {
+    out.push({
+      id: 'auto-check-match-amount',
+      severity: 'opportunity',
+      category: 'Bills',
+      title: 'A recorded check amount disagrees with the bank',
+      detail: `${checkMatches.amountMismatchCount} ${
+        checkMatches.amountMismatchCount === 1 ? 'check' : 'checks'
+      } cleared for a different amount than what was recorded. The bank figure is what actually left the account, so the recorded amount is likely a typo.`,
+      impact: 'Recorded spending does not match the bank',
+    })
   }
 
   // --- Bills needing action ------------------------------------------------

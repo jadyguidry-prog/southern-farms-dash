@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { TableCell, TableRow } from '@/components/ui/table'
 import { formatCurrency, formatDayLabel } from '@/lib/data'
+import { classifyDayBalance } from '@/lib/day-balance-state'
 
 /**
  * Width of the horizontally-scrollable area the table sits in, but only when the table
@@ -88,11 +89,21 @@ export function DayOutflowRows({ day }: { day: DayOutflowRow }) {
     .filter((i) => i.daysOverdue > 0)
     .reduce((s, i) => s + i.amount, 0)
 
-  const balanceClass = day.breachesReserve ? 'text-destructive' : 'text-foreground'
+  const { overdrawn, belowReserve } = classifyDayBalance(day)
+
+  const balanceClass = overdrawn
+    ? 'text-destructive'
+    : belowReserve
+      ? 'text-amber-700'
+      : 'text-foreground'
 
   return (
     <>
-      <TableRow className={day.breachesReserve ? 'bg-destructive/5' : undefined}>
+      <TableRow
+        className={
+          overdrawn ? 'bg-destructive/5' : belowReserve ? 'bg-amber-500/5' : undefined
+        }
+      >
         <TableCell ref={setAnchor} className="whitespace-nowrap font-medium">
           {expandable ? (
             <button
@@ -139,6 +150,14 @@ export function DayOutflowRows({ day }: { day: DayOutflowRow }) {
 
         <TableCell className={`text-right tabular-nums font-medium ${balanceClass}`}>
           {formatCurrency(day.cautiousBalance)}
+          {/* Named in words, not signalled by colour alone: the distinction only matters
+              if it survives colour blindness, a greyscale print, and a glance on a phone
+              in daylight. Inherits the cell colour so the two channels always agree. */}
+          {overdrawn || belowReserve ? (
+            <span className="block text-xs font-normal">
+              {overdrawn ? 'overdrawn' : 'under reserve'}
+            </span>
+          ) : null}
         </TableCell>
       </TableRow>
 

@@ -28,6 +28,7 @@ import {
   paymentLabel,
   validatePaymentBasics,
   buildAchReconcileMatches,
+  amountAcceptableForBill,
   descriptionMatchesVendor,
   amountWithinAchTolerance,
   vendorTokens,
@@ -457,6 +458,64 @@ const pillars = {
     'and it is not raised as a warning',
     hit?.severity === 'opportunity',
     `severity was ${hit?.severity}`,
+  )
+}
+
+{
+  // The check-match insight must NOT be gated on outstanding checks.
+  //
+  // This is the trap that shaped the design: `getHealthSnapshot` omits `billPay` entirely
+  // unless `outstandingCheckCount > 0`, so folding these findings into that object would
+  // silence them in the exact situation they exist to catch — no outstanding checks
+  // recorded BECAUSE the payments were never entered. `billPay: undefined` here is the
+  // whole point of the test, not incidental setup.
+  const insights = generateInsights({
+    settings,
+    pillars,
+    billPay: undefined,
+    checkMatches: {
+      likelyUnrecordedCount: 2,
+      likelyUnrecordedTotal: 575,
+      amountMismatchCount: 0,
+    },
+  })
+  const hit = insights.find((i) => i.id === 'auto-check-match-unrecorded')
+  ok('unmatched-check insight fires with no outstanding checks at all', Boolean(hit))
+  ok(
+    'and it is worded as a possibility, not a settled fact',
+    Boolean(hit && /may|matches|match/i.test(hit.detail) && !/were paid/i.test(hit.detail)),
+    hit?.detail,
+  )
+  ok(
+    'no amount-mismatch insight when none mismatch',
+    !insights.some((i) => i.id === 'auto-check-match-amount'),
+  )
+}
+
+{
+  const insights = generateInsights({ settings, pillars, checkMatches: undefined })
+  ok(
+    'a clean ledger produces no check-match insight',
+    !insights.some((i) => i.id.startsWith('auto-check-match')),
+  )
+}
+
+{
+  // Amount mismatch is its own message because the remedy differs: the bill is known,
+  // only the figure is wrong. It must not imply a payment needs confirming.
+  const insights = generateInsights({
+    settings,
+    pillars,
+    checkMatches: {
+      likelyUnrecordedCount: 0,
+      likelyUnrecordedTotal: 0,
+      amountMismatchCount: 1,
+    },
+  })
+  ok(
+    'a mismatch alone raises only the amount message',
+    insights.some((i) => i.id === 'auto-check-match-amount') &&
+      !insights.some((i) => i.id === 'auto-check-match-unrecorded'),
   )
 }
 
@@ -938,6 +997,74 @@ console.log('\nAutopay/ACH auto-reconcile from the bank feed')
       TODAY,
     )
     ok('a future-dated or long-past debit is not reconciled', m.length === 0)
+  }
+
+  // --- Non-recurring ACH bills are eligible, but only on an EXACT amount ---
+  //
+  // Dropping the `recurring` requirement gains real bills (two Sysco COGS invoices are
+  // ACH and non-recurring). It also introduces a false-match risk that must be closed in
+  // the same change: the loose band exists for variable utilities, and on a large
+  // one-off invoice it is wide enough to reach a DIFFERENT invoice from the same vendor.
+  {
+    const syscoBig = ach({ id: 'sy-big', obligationName: 'Sysco COGS', vendorName: 'Sysco', amount: 5871.88, recurring: false })
+    const syscoMid = ach({ id: 'sy-mid', obligationName: 'Sysco Invoice', vendorName: 'Sysco', amount: 5025.7, recurring: false })
+
+    ok('a one-off invoice matches its exact amount', amountAcceptableForBill(5871.88, 5871.88, false))
+    // +/-20% of 5,871.88 is +/-$1,174, which reaches down past 5,025.70.
+    ok(
+      'the loose band WOULD have swallowed the neighbouring invoice',
+      amountWithinAchTolerance(5871.88, 5025.7),
+    )
+    ok(
+      'but a one-off invoice rejects it, so the wrong bill cannot clear',
+      !amountAcceptableForBill(5871.88, 5025.7, false),
+    )
+    ok('a recurring bill keeps the loose band', amountAcceptableForBill(2200, 1926.03, true))
+    // Float noise must not defeat exactness: a stored 5025.7 can read back as ...0003.
+    ok('exactness survives float noise', amountAcceptableForBill(5025.7, 5025.7000000000003, false))
+
+    const m = buildAchReconcileMatches(
+      [syscoBig, syscoMid],
+      [bank({ id: 'sy-debit', description: 'SYSCO BATON ROUG ACH DEBIT', amount: 5025.7, transaction_date: '2026-07-25' })],
+      [],
+      TODAY,
+    )
+    check('the Sysco debit clears exactly one bill', m.length, 1)
+    check('and it is the invoice for that exact amount', m[0]?.obligationId, 'sy-mid')
+
+    // A one-off invoice is paid once. Matching several debits would report the same
+    // invoice as paid two or three times over.
+    const twoDebits = buildAchReconcileMatches(
+      [syscoMid],
+      [
+        bank({ id: 'd1', description: 'SYSCO ACH DEBIT', amount: 5025.7, transaction_date: '2026-07-25' }),
+        bank({ id: 'd2', description: 'SYSCO ACH DEBIT', amount: 5025.7, transaction_date: '2026-07-11' }),
+      ],
+      [],
+      TODAY,
+    )
+    check('a one-off invoice claims at most one debit', twoDebits.length, 1)
+
+    // A recurring bill SHOULD still take each period's debit — that backfills history.
+    const recurringTwice = buildAchReconcileMatches(
+      [entergy],
+      [
+        bank({ id: 'e1', description: 'ENTERGY DRAFT', amount: 2193.23, transaction_date: '2026-07-28' }),
+        bank({ id: 'e2', description: 'ENTERGY DRAFT', amount: 2210.4, transaction_date: '2026-06-28' }),
+      ],
+      [],
+      TODAY,
+    )
+    check('a recurring bill still matches each period', recurringTwice.length, 2)
+
+    // The vendor name remains the real identifier for non-recurring bills too.
+    const noName = buildAchReconcileMatches(
+      [ach({ id: 'anon', vendorName: '', amount: 5025.7, recurring: false })],
+      [bank({ description: 'ACH DEBIT 5025.70', amount: 5025.7 })],
+      [],
+      TODAY,
+    )
+    ok('a non-recurring bill with no vendor name never matches', noName.length === 0)
   }
 }
 

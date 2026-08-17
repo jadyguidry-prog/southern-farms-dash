@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/table'
 import { formatCurrency, formatDayLabel } from '@/lib/data'
 import type { SpendingCapacity } from '@/lib/spending-capacity-data'
+import { classifyDayBalance } from '@/lib/day-balance-state'
 import { DayOutflowRows } from './day-outflow-rows'
 
 /** Local alias for the shared formatter, kept so existing call sites read the same. */
@@ -78,6 +79,13 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
   // "coming up", because a 30-row table buries the one row that matters.
   const nearTermRows = days.slice(0, nearTermDays)
   const lastNearTermDate = nearTermRows.at(-1)?.date ?? capacity.today
+
+  // Counted through the SAME classifier the rows render with, so the key can never describe
+  // a colour the table is not showing.
+  const rowStates = nearTermRows.map(classifyDayBalance)
+  const rowsOverdrawn = rowStates.filter((s) => s.overdrawn).length
+  const rowsUnderReserve = rowStates.filter((s) => s.belowReserve).length
+  const highlightedRows = rowStates.filter((s) => s.overdrawn || s.belowReserve)
 
   // A breach INSIDE the spendable window and a breach three weeks out need different
   // wording. Telling the owner "nothing spare to spend this week" because of a payment
@@ -381,6 +389,34 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
               earlier and have not cleared are charged to today, so today can look
               larger than a normal day.
             </p>
+
+            {/* Explains the row shading, but only for states that actually occur below.
+                A permanent key listing "overdrawn" on a week that never goes negative
+                would imply a problem the projection does not show. The reserve figure is
+                read from settings, never written as a literal, so editing the setting can
+                never leave this caption contradicting the colours beside it. */}
+            {highlightedRows.length > 0 ? (
+              <p className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                {rowsUnderReserve > 0 ? (
+                  <span className="flex items-center gap-1.5 text-amber-700">
+                    <span
+                      className="size-2 shrink-0 rounded-full bg-amber-500"
+                      aria-hidden="true"
+                    />
+                    Under your {formatCurrency(minCashReserve)} reserve — still solvent
+                  </span>
+                ) : null}
+                {rowsOverdrawn > 0 ? (
+                  <span className="flex items-center gap-1.5 text-destructive">
+                    <span
+                      className="size-2 shrink-0 rounded-full bg-destructive"
+                      aria-hidden="true"
+                    />
+                    Overdrawn — below zero, payments would fail
+                  </span>
+                ) : null}
+              </p>
+            ) : null}
             <div className="mt-2 overflow-x-auto">
               <Table>
                 <TableHeader>

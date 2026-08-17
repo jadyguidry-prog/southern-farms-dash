@@ -139,6 +139,30 @@ check(
     row({ type: 'transfer', description: 'Square Fin Svcs Transfer 35121567799' }),
     ACCOUNTS,
   ),
+  // `transfer` states no direction and the wording names none either, so outbound is the
+  // only available reading. The `credit` case below is what distinguishes them.
+  'internal_out',
+)
+// Regression: the description above says "Transfer" but never "from", so direction used to
+// come from wording alone and every such row was treated as outbound. Two real rows on
+// 2026-04-16 ($10,000 + $5,000, both typed `credit`) were therefore subtracted instead of
+// added — and since internal moves are honoured for balance, that is a $30,000 swing in the
+// reconstructed balance the whole daily table is offset from. When the wording is silent,
+// the row's own transaction_type is the better evidence.
+check(
+  'a Square Financial Services transfer typed `credit` is money ARRIVING',
+  classifyFlow(
+    row({ type: 'credit', description: 'Square Fin Svcs Transfer 33473448105' }),
+    ACCOUNTS,
+  ),
+  'internal_in',
+)
+check(
+  'an explicit "to Acct" outbound still wins over its type',
+  classifyFlow(
+    row({ type: 'expense', description: 'Internet Transfer to Acct# 2008275' }),
+    ACCOUNTS,
+  ),
   'internal_out',
 )
 check(

@@ -15,6 +15,10 @@ import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
 import { nextScheduledDueDate, getAchReconcileMatches } from '@/lib/bill-pay-service'
 import {
+  runAutoClear,
+  getAutoClearCandidates,
+} from '@/lib/obligation-auto-clear-service'
+import {
   validatePaymentBasics,
   validateBillDueBasics,
   validatePaymentEdit,
@@ -580,6 +584,206 @@ export async function confirmClearWithMatch(
 
   revalidateAll()
   return { ok: true, paymentId }
+}
+
+/**
+ * Match cleared bank checks to the bills they paid, writing only the certain ones.
+ *
+ * Re-derives everything from the database rather than trusting anything from the client,
+ * mirroring reconcileAchFromBank. Normally this runs automatically after a bank sync;
+ * this action exists so the owner can also trigger it directly.
+ */
+export async function autoClearFromBank(): Promise<{
+  ok: boolean
+  error?: string
+  cleared?: number
+  needsReview?: number
+}> {
+  const supabase = await createClient()
+  const actor = await currentActor()
+  if (!actor) return { ok: false, error: 'You must be signed in.' }
+
+  try {
+    const summary = await runAutoClear(supabase, actor)
+    revalidateAll()
+    return { ok: true, cleared: summary.cleared, needsReview: summary.needsReview }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Could not match bank checks.' }
+  }
+}
+
+/**
+ * Resolve one item the matcher was not confident about.
+ *
+ * Three shapes, matching the three uncertain tiers:
+ *  - 'accept_bank'   an amount mismatch, where the bank figure is the truth. Corrects the
+ *                    recorded amount and clears it.
+ *  - 'link'          a bill whose payment was never recorded. Creates the cleared payment
+ *                    row that should have existed, against the obligation the owner picks.
+ *  - 'dismiss'       not a bill payment (ordinary untracked spending). Recorded so the
+ *                    same check does not surface again.
+ *
+ * The obligation id is validated against the candidates the matcher itself produced, so a
+ * tampered form cannot clear an arbitrary bill.
+ */
+export async function resolveAutoClearItem(input: {
+  transactionId: string
+  choice: 'accept_bank' | 'link' | 'dismiss'
+  paymentId?: string
+  obligationId?: string
+}): Promise<ActionResult> {
+  const { transactionId, choice } = input
+  if (!transactionId) return { ok: false, error: 'No bank transaction was specified.' }
+
+  const supabase = await createClient()
+  const actor = await currentActor()
+  if (!actor) return { ok: false, error: 'You must be signed in.' }
+
+  // Re-run the matcher and find this row in its output. This is what makes the action
+  // safe: the choice is only honoured for a row the matcher actually flagged, with the
+  // options it actually offered.
+  const { review } = await getAutoClearCandidates()
+  const item = review.find((r) => r.transactionId === transactionId)
+  if (!item) {
+    return { ok: false, error: 'That item is no longer waiting for review. Refresh the page.' }
+  }
+
+  const { data: txn, error: txnErr } = await supabase
+    .from('financial_transactions')
+    .select('id, transaction_date, amount, description')
+    .eq('id', transactionId)
+    .is('deleted_at', null)
+    .maybeSingle()
+  if (txnErr) return { ok: false, error: txnErr.message }
+  if (!txn) return { ok: false, error: 'That bank transaction no longer exists.' }
+  const postedDate = (txn.transaction_date ?? '').slice(0, 10)
+  const bankAmount = Number(txn.amount) || 0
+
+  if (choice === 'dismiss') {
+    // No payment to touch. Recorded as an audit row against no payment would violate the
+    // FK, so dismissal is stored on the transaction itself via a note the matcher reads
+    // as "already considered".
+    const { error } = await supabase
+      .from('financial_transactions')
+      .update({ bill_match_dismissed_at: new Date().toISOString() })
+      .eq('id', transactionId)
+    if (error) return { ok: false, error: error.message }
+    revalidateAll()
+    return { ok: true }
+  }
+
+  if (choice === 'accept_bank') {
+    const paymentId = input.paymentId ?? item.paymentId
+    if (!paymentId || paymentId !== item.paymentId) {
+      return { ok: false, error: 'That payment does not match this bank row.' }
+    }
+    const { error } = await supabase
+      .from('obligation_payments')
+      .update({
+        amount: bankAmount,
+        status: 'cleared',
+        cleared_date: postedDate,
+        cleared_transaction_id: transactionId,
+      })
+      .eq('id', paymentId)
+      .eq('status', 'outstanding')
+    if (error) {
+      if (error.code === '23505') {
+        return { ok: false, error: 'That bank row already cleared another payment.' }
+      }
+      return { ok: false, error: error.message }
+    }
+    await supabase.from('obligation_payment_audit').insert({
+      payment_id: paymentId,
+      action: 'cleared',
+      detail: {
+        source: 'bank_review_accept',
+        transactionId,
+        clearedDate: postedDate,
+        correctedAmountTo: bankAmount,
+        recordedAmountWas: item.recordedAmount ?? null,
+      },
+      created_by: actor,
+    })
+    revalidateAll()
+    return { ok: true, paymentId }
+  }
+
+  // choice === 'link': create the payment row that was never recorded.
+  const obligationId = input.obligationId
+  if (!obligationId) return { ok: false, error: 'Choose which bill this check paid.' }
+  if (!item.candidateObligationIds.includes(obligationId)) {
+    return { ok: false, error: 'That bill was not one of the suggested matches.' }
+  }
+
+  const { data: obligation, error: obErr } = await supabase
+    .from('cash_obligations')
+    .select('id, obligation_name, vendor_name, recurring, status, due_date, next_due_date, frequency')
+    .eq('id', obligationId)
+    .maybeSingle()
+  if (obErr) return { ok: false, error: obErr.message }
+  if (!obligation) return { ok: false, error: 'That bill no longer exists.' }
+  if (obligation.status === 'Paid') {
+    return { ok: false, error: 'That bill is already marked paid.' }
+  }
+
+  const { data: inserted, error: insErr } = await supabase
+    .from('obligation_payments')
+    .insert({
+      obligation_id: obligationId,
+      amount: bankAmount,
+      // The payment happened when the check cleared, which is the only date the bank
+      // gives us. Dating it today would misplace a real payment in the cash history.
+      payment_date: postedDate,
+      payment_method: 'check',
+      check_number: item.checkNumber,
+      check_written: true,
+      status: 'cleared',
+      cleared_date: postedDate,
+      cleared_transaction_id: transactionId,
+      payee_name: obligation.vendor_name ?? null,
+      memo: 'Matched from bank statement',
+    })
+    .select('id')
+    .single()
+  if (insErr) {
+    if (insErr.code === '23505') {
+      return { ok: false, error: 'That bank row already cleared another payment.' }
+    }
+    return { ok: false, error: insErr.message }
+  }
+
+  // A one-time bill is settled by this payment. A recurring bill rolls forward instead,
+  // matching recordPayment's owner-approved default so a monthly bill never vanishes
+  // from the forecast.
+  if (obligation.recurring) {
+    // Anchored on the bill's own schedule, exactly as the manual and ACH paths do, so a
+    // next_due_date that had drifted is corrected rather than left stale.
+    const anchor = obligation.due_date || obligation.next_due_date || ''
+    const next = nextScheduledDueDate(anchor, obligation.frequency || 'Monthly', postedDate)
+    if (next && next !== obligation.next_due_date) {
+      await supabase.from('cash_obligations').update({ next_due_date: next }).eq('id', obligationId)
+    }
+  } else {
+    await supabase.from('cash_obligations').update({ status: 'Paid' }).eq('id', obligationId)
+  }
+
+  await supabase.from('obligation_payment_audit').insert({
+    payment_id: inserted.id,
+    action: 'created',
+    detail: {
+      source: 'bank_review_link',
+      transactionId,
+      checkNumber: item.checkNumber,
+      clearedDate: postedDate,
+      amount: bankAmount,
+      obligationId,
+    },
+    created_by: actor,
+  })
+
+  revalidateAll()
+  return { ok: true, paymentId: inserted.id }
 }
 
 /**
