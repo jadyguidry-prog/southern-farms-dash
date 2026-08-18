@@ -324,6 +324,15 @@ export const ADMIN_TABLES: TableDef[] = [
         label: 'Statement Due Date (cards)',
         type: 'date',
       },
+      {
+        name: 'planned_monthly_payment',
+        label: 'Planned Monthly Payment (blank = pay in full)',
+        type: 'number',
+        // Same reason as statement_balance above, and the stakes run the other way here:
+        // a blank saved as 0 would tell the cash forecast NO money leaves for this card,
+        // inflating Safe to Spend. Blank must stay NULL, meaning "assume a full payoff".
+        blankIsNull: true,
+      },
       { name: 'last_updated', label: 'Last Updated', type: 'date' },
       { name: 'notes', label: 'Notes', type: 'text' },
     ],

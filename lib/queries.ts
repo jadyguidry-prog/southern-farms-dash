@@ -514,6 +514,14 @@ export async function getBankAccounts() {
     // and still counts toward money owed, but must be excluded from data-freshness
     // alerts, because no further statements will ever arrive for it.
     closedAt: a.closed_at ?? null,
+    // Planned monthly paydown for a card not paid in full each cycle. Null is preserved
+    // as null and NOT coerced to 0: null means "no plan, assume a full payoff", while 0
+    // would tell the forecast no money leaves for this card at all and inflate Safe to
+    // Spend. The two must stay distinguishable.
+    plannedMonthlyPayment:
+      a.planned_monthly_payment === null || a.planned_monthly_payment === undefined
+        ? null
+        : Number(a.planned_monthly_payment),
     notes: a.notes ?? '',
   }))
 }
@@ -1182,6 +1190,10 @@ export async function getHealthSnapshot() {
           lastActivityDate: cardExposure.lastOpenActivityDate,
           typicalMonthlyCharges: cardExposure.typicalMonthlyCharges,
           highUtilization: cardExposure.highUtilization,
+          // Paydown plans, from the same shared loader. The advisor's job here is to say
+          // whether the payment actually beats the card's monthly charges — a plan that
+          // does not is reported as ineffective rather than given a completion date.
+          paydowns: cardExposure.paydowns,
         }
       : undefined,
     // Bill reminders, read from the SAME shared loader the dashboard card uses, so the
