@@ -7,6 +7,7 @@
  */
 
 import { planCardPayments } from '../lib/card-activity'
+import { generateInsights } from '../lib/health'
 
 let passed = 0
 let failed = 0
@@ -313,6 +314,174 @@ const TODAY = '2026-08-03'
   )
   check('plan does not override an unrecorded balance', r[0]?.blockedReason === 'balance not recorded')
   check('plan does not invent an amount', r[0]?.amount === 0)
+}
+
+// ---------------------------------------------------------------------------
+// ADVISOR SIDE: does the paydown plan actually reduce the balance?
+//
+// The trap being pinned: quoting a "clears in N months" date from the payment alone.
+// A payment smaller than the card's monthly charges never clears anything, so a plan
+// can run for months feeling like progress while the balance is flat or growing.
+// Charges must be weighed against the payment BEFORE any completion date is stated.
+// ---------------------------------------------------------------------------
+{
+  // Pillars forced to `unknown` so they emit nothing and only card ids remain.
+  const pillars = {
+    payroll: { status: 'unknown', label: 'Unknown', message: '' },
+    cash: { status: 'unknown', label: 'Unknown', message: '' },
+    sales: { status: 'unknown', label: 'Unknown', message: '' },
+  } as never
+  const settings = {} as unknown as Parameters<typeof generateInsights>[0]['settings']
+
+  type CardsArg = Parameters<typeof generateInsights>[0]['cards']
+  const build = (paydowns: NonNullable<CardsArg>['paydowns']) =>
+    generateInsights({
+      settings,
+      pillars,
+      cards: {
+        staleCards: [],
+        unconfirmedCards: [],
+        highUtilization: [],
+        paydowns,
+      } as unknown as CardsArg,
+    }).filter((i) => i.id.startsWith('auto-cards-paydown'))
+
+  // Payment beats charges -> a real timeline, derived from the NET rate.
+  // $5,000 paid against $1,000 charged nets $4,000/mo on $10,904.40 -> 3 months.
+  {
+    const r = build([
+      {
+        accountName: 'Amex',
+        balanceOwed: 10904.4,
+        plannedMonthlyPayment: 5000,
+        monthlyCharges: 1000,
+      },
+    ])
+    check('effective paydown yields one insight', r.length === 1, `got ${r.length}`)
+    check('timeline uses the NET rate, not the payment', r[0]?.title.includes('3 months'), r[0]?.title)
+    check('effective paydown is not alarming', r[0]?.severity === 'opportunity')
+  }
+
+  // Payment BELOW charges -> the balance grows. Must be critical, and must NOT
+  // quote a completion date.
+  {
+    const r = build([
+      {
+        accountName: 'Amex',
+        balanceOwed: 10904.4,
+        plannedMonthlyPayment: 1000,
+        monthlyCharges: 4000,
+      },
+    ])
+    check('ineffective plan is critical', r[0]?.severity === 'critical', r[0]?.severity)
+    check('ineffective plan says it will not pay down', r[0]?.title.includes('will not pay down'), r[0]?.title)
+    // Targets a COMPLETION claim ("clears in about N months"), not the words "a month",
+    // which legitimately appear in the payment RATE. A bare /months?/ here matched
+    // "$1,000 a month" and failed a correct title.
+    check('ineffective plan quotes no clear-by date', !/clears in|in about \d+ month/.test(r[0]?.title ?? ''), r[0]?.title)
+  }
+
+  // Payment EXACTLY equals charges -> balance never moves. The divide-by-zero case:
+  // a naive balance/net would be Infinity and could render as a nonsense timeline.
+  {
+    const r = build([
+      {
+        accountName: 'Amex',
+        balanceOwed: 10904.4,
+        plannedMonthlyPayment: 2500,
+        monthlyCharges: 2500,
+      },
+    ])
+    check('break-even plan is critical', r[0]?.severity === 'critical')
+    check('break-even plan reports a flat balance', r[0]?.impact === 'Balance flat', r[0]?.impact)
+    check('break-even plan shows no Infinity', !/Infinity|NaN/.test(JSON.stringify(r[0] ?? {})))
+  }
+
+  // Charges UNKNOWN -> must refuse to state a timeline rather than assume the card
+  // is never used again, which would read as optimistic and unearned.
+  {
+    const r = build([
+      {
+        accountName: 'Amex',
+        balanceOwed: 10904.4,
+        plannedMonthlyPayment: 5000,
+        monthlyCharges: null,
+      },
+    ])
+    check('unknown charges is a warning', r[0]?.severity === 'warning', r[0]?.severity)
+    // Same correction: "$5,000 a month" is the rate, not a completion date.
+    check(
+      'unknown charges quotes no timeline',
+      !/clears in|in about \d+ month/.test(r[0]?.title ?? ''),
+      r[0]?.title,
+    )
+    check(
+      'unknown charges says why it cannot be stated',
+      r[0]?.detail.includes('no charge history'),
+    )
+  }
+
+  // STALE HISTORY. A feed that stopped importing can only UNDERSTATE charges, so the
+  // net rate is overstated and the timeline is too short. It must be a best case, never
+  // a plain date -- the optimistic-estimate trap arriving from a new direction.
+  {
+    const r = build([
+      {
+        accountName: 'Amex',
+        balanceOwed: 10904.4,
+        plannedMonthlyPayment: 5000,
+        monthlyCharges: 1000,
+        chargesStale: true,
+      },
+    ])
+    check('stale history downgrades to a warning', r[0]?.severity === 'warning', r[0]?.severity)
+    check('stale timeline is framed as a best case', r[0]?.title.includes('at best'), r[0]?.title)
+    check('stale copy says the real payoff is slower', r[0]?.detail.includes('only slower'))
+    check(
+      'stale case is a distinct insight id',
+      r[0]?.id.includes('paydown-stale'),
+      r[0]?.id,
+    )
+  }
+
+  // Same numbers, FRESH history -> the confident variant. Guards against the caveat
+  // leaking onto every card and making a good plan look doubtful.
+  {
+    const r = build([
+      {
+        accountName: 'Amex',
+        balanceOwed: 10904.4,
+        plannedMonthlyPayment: 5000,
+        monthlyCharges: 1000,
+        chargesStale: false,
+      },
+    ])
+    check('fresh history keeps the plain timeline', r[0]?.severity === 'opportunity')
+    check('fresh history is not hedged', !r[0]?.title.includes('at best'), r[0]?.title)
+  }
+
+  // Staleness must NOT soften a "will not pay down" verdict: understated charges mean
+  // the real shortfall is even worse, so the critical finding only gets stronger.
+  {
+    const r = build([
+      {
+        accountName: 'Amex',
+        balanceOwed: 10904.4,
+        plannedMonthlyPayment: 1000,
+        monthlyCharges: 4000,
+        chargesStale: true,
+      },
+    ])
+    check('stale + ineffective stays critical', r[0]?.severity === 'critical', r[0]?.severity)
+    check('stale + ineffective is not softened to a best case', !r[0]?.title.includes('at best'))
+  }
+
+  // No plan anywhere -> silence. A card paid in full each cycle must not generate
+  // paydown advice at all.
+  {
+    check('no paydowns -> no paydown insights', build([]).length === 0)
+    check('undefined paydowns -> no paydown insights', build(undefined as never).length === 0)
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

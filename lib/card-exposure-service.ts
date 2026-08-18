@@ -415,6 +415,10 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
       // Null when this card has no history. Left null rather than 0 so the advisor says
       // the paydown pace is unknown instead of assuming the card is never used again.
       monthlyCharges: typicalMonthlyCharges(c.activity?.months ?? []),
+      // Whether the charge figure above rests on a feed that has stopped updating.
+      // A stale feed understates charges, which makes a "clears in N months" estimate
+      // too optimistic — so the advisor labels the estimate instead of quoting it flat.
+      chargesStale: c.activity?.feedBehind === true,
     }))
 
   return {

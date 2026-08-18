@@ -622,6 +622,12 @@ export type CardInsightInput = {
     accountName: string
     balanceOwed: number
     plannedMonthlyPayment: number
+    /**
+     * True when this card's charge history has stopped updating. A stale feed
+     * UNDERSTATES charges, so a timeline derived from it is optimistic and must be
+     * labelled as resting on incomplete history rather than quoted as a plain date.
+     */
+    chargesStale?: boolean
     /** Typical monthly charge volume on THIS card; null when there is no history. */
     monthlyCharges: number | null
   }[]
@@ -1785,6 +1791,29 @@ export function generateInsights({
       }
 
       const months = Math.ceil(p.balanceOwed / net)
+
+      // A stale feed can only UNDERSTATE charges, so `net` is too high and `months` is
+      // too low. Quoting it as a plain date would be the optimistic-estimate trap in a
+      // new place, so the stale variant states it as a best case and says why.
+      if (p.chargesStale) {
+        out.push({
+          id: `auto-cards-paydown-stale-${idSuffix}`,
+          severity: 'warning',
+          category: 'Cards',
+          title: `${p.accountName} clears in ${months} month${months === 1 ? '' : 's'} at best — history is behind`,
+          detail:
+            `${formatCurrency(p.plannedMonthlyPayment)} a month against the ` +
+            `${formatCurrency(p.monthlyCharges)} of charges currently on file nets ` +
+            `${formatCurrency(net)} off the ${formatCurrency(p.balanceOwed)} balance, which ` +
+            `would clear it in about ${months} month${months === 1 ? '' : 's'}. Treat that as ` +
+            `a best case: this card's spending has stopped importing, so the real charge ` +
+            `figure can only be higher and the real payoff only slower. Import the latest ` +
+            `statement to get a firm date.`,
+          impact: `${months} month${months === 1 ? '' : 's'} at best`,
+        })
+        continue
+      }
+
       out.push({
         id: `auto-cards-paydown-${idSuffix}`,
         // The plan is working, so this is the advisor's informational bucket rather than
