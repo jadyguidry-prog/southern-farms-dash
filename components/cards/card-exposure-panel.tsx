@@ -223,6 +223,27 @@ export function CardExposurePanel({
                   </p>
                 )}
 
+                {/* A paydown plan changes what the statement due date MEANS: only part of
+                    the balance leaves on it. Stated here next to the statement line so the
+                    two are never read as the same amount. */}
+                {card.plannedMonthlyPayment !== null && (
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    Paying down at{' '}
+                    <span className="font-medium text-foreground">
+                      {formatCurrency(card.plannedMonthlyPayment)}
+                    </span>{' '}
+                    a month rather than in full
+                    {/* Only computable with a confirmed balance. Never guessed: an invented
+                        remainder here would understate the debt that survives the payment. */}
+                    {card.owed !== null &&
+                      card.owed > card.plannedMonthlyPayment &&
+                      ` — ${formatCurrency(
+                        Math.round((card.owed - card.plannedMonthlyPayment) * 100) / 100,
+                      )} would remain after the next payment`}
+                    .
+                  </p>
+                )}
+
                 {/* The amount is never hidden — that would understate exposure — but
                     an unconfirmed one must not read as fact. */}
                 {card.statementBalance !== null && !card.statementIsCurrent && (

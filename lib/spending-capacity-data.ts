@@ -114,6 +114,10 @@ export const getSpendingCapacity = cache(async (): Promise<SpendingCapacity> => 
     balanceOwed: c.owed,
     statementDueDate: c.statementDueDate,
     paymentDescriptionMatch: matcherByAccount.get(c.accountName) ?? null,
+    // Carried through so the forecast models the payment the owner actually intends.
+    // Without this the projection would keep charging the FULL balance on the due date,
+    // overstating near-term outflow for a card being paid down over several months.
+    plannedMonthlyPayment: c.plannedMonthlyPayment,
   }))
 
   // The ledger labels accounts by bank name while `bank_accounts` uses friendly

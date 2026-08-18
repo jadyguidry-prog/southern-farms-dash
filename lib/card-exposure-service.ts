@@ -119,6 +119,14 @@ export type CardExposureCard = {
   balanceLabel: string
   balanceNeverRecorded: boolean
   balanceStale: boolean
+  /**
+   * Planned monthly paydown when this card is NOT paid in full each cycle.
+   *
+   * Null means no plan is recorded, which keeps the forecast's full-payoff assumption —
+   * correct for a card on autopay. Null is never read as 0, which would forecast no card
+   * outflow at all.
+   */
+  plannedMonthlyPayment: number | null
   /** Ledger-side history. Null when this card has no recorded transactions. */
   activity: CardActivity | null
   /** Reconciliation of history against the confirmed balance. Null without history. */
@@ -165,6 +173,17 @@ export type CardExposure = {
    * credit limit are absent, never treated as having free headroom.
    */
   highUtilization: { accountName: string; utilizationPct: number }[]
+  /**
+   * Open cards with a confirmed balance AND a stated monthly payment — i.e. being paid
+   * down over time instead of cleared each cycle. Empty when every card is paid in full.
+   */
+  paydowns: {
+    accountName: string
+    balanceOwed: number
+    plannedMonthlyPayment: number
+    /** Typical monthly charges on THIS card; null when it has no history. */
+    monthlyCharges: number | null
+  }[]
   /** Most recent recorded card transaction across ALL cards, open or closed. */
   lastActivityDate: string | null
   /**
@@ -257,6 +276,9 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
       // reported by its own warning, so defaulting to false here would invent a second
       // complaint about the same missing figure.
       statementIsCurrent: assessment?.statementIsCurrent ?? true,
+      // Read straight from the account row, not from the safety assessment: this is the
+      // owner's stated intent, not a derived judgement about the card.
+      plannedMonthlyPayment: account.plannedMonthlyPayment ?? null,
       balanceLabel: assessment?.freshness.label ?? 'never confirmed',
       balanceNeverRecorded: assessment?.freshness.neverRecorded ?? true,
       balanceStale: assessment?.freshness.isStale ?? true,
@@ -370,8 +392,34 @@ export const getCardExposure = cache(async (): Promise<CardExposure> => {
       utilizationPct: (c.utilization as number) * 100,
     }))
 
+  // Cards the owner is paying down over time rather than clearing each cycle.
+  //
+  // Requires BOTH a confirmed balance and a stated payment: a plan with no balance cannot
+  // be turned into a timeline, and inventing one would report a paydown as nearly done.
+  // Charges are measured PER CARD (not from the portfolio-wide `typical` above), because
+  // the question "is this payment bigger than what this card is charged" is meaningless
+  // against another card's spending.
+  const paydowns = cards
+    .filter(
+      (c) =>
+        c.closedAt === null &&
+        c.owed !== null &&
+        c.owed > 0 &&
+        c.plannedMonthlyPayment !== null &&
+        c.plannedMonthlyPayment > 0,
+    )
+    .map((c) => ({
+      accountName: c.accountName,
+      balanceOwed: c.owed as number,
+      plannedMonthlyPayment: c.plannedMonthlyPayment as number,
+      // Null when this card has no history. Left null rather than 0 so the advisor says
+      // the paydown pace is unknown instead of assuming the card is never used again.
+      monthlyCharges: typicalMonthlyCharges(c.activity?.months ?? []),
+    }))
+
   return {
     cards,
+    paydowns,
     totalOwed,
     confirmedSubtotal,
     confirmedCount: confirmed.length,

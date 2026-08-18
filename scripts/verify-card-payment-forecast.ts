@@ -206,5 +206,114 @@ const TODAY = '2026-08-03'
   check('no cards -> no payments', planCardPayments([], TODAY).length === 0)
 }
 
+// ---------------------------------------------------------------------------
+// PLANNED PARTIAL PAYMENTS (autopay off, paying a card down over months).
+//
+// The failure mode here is the mirror image of the one above: instead of a payoff
+// vanishing, the forecast charges the FULL balance on the due date when the owner
+// only intends to send part of it. That overstates near-term outflow and pushes
+// Safe to Spend down — and the opposite mistake (reading "no plan" as $0) hides the
+// outflow entirely and pushes it up. Both are pinned.
+// ---------------------------------------------------------------------------
+{
+  const r = planCardPayments(
+    [
+      {
+        accountName: 'Amex',
+        closedAt: null,
+        balanceOwed: 10904.4,
+        statementDueDate: '2026-08-18',
+        plannedMonthlyPayment: 5000,
+      },
+    ],
+    TODAY,
+  )
+  check('planned payment replaces the full balance', r[0]?.amount === 5000, String(r[0]?.amount))
+  check('planned payment keeps the due date', r[0]?.dueDate === '2026-08-18')
+  check('planned partial is flagged', r[0]?.isPlannedPartialPayment === true)
+  check(
+    'remaining balance is carried, not dropped',
+    r[0]?.remainingAfterPayment === 5904.4,
+    String(r[0]?.remainingAfterPayment),
+  )
+  check('planned payment is not blocked', r[0]?.blockedReason === null)
+}
+
+// A plan larger than the balance must not forecast an overpayment, and the final
+// payment of a paydown is a FULL payoff — labelling it partial would claim debt
+// remains after the card is clear.
+{
+  const r = planCardPayments(
+    [
+      {
+        accountName: 'Amex',
+        closedAt: null,
+        balanceOwed: 1200,
+        statementDueDate: '2026-08-18',
+        plannedMonthlyPayment: 5000,
+      },
+    ],
+    TODAY,
+  )
+  check('plan capped at the remaining balance', r[0]?.amount === 1200, String(r[0]?.amount))
+  check('final payment is not flagged partial', r[0]?.isPlannedPartialPayment === false)
+  check('nothing remains after the final payment', r[0]?.remainingAfterPayment === 0)
+}
+
+// No plan = the ORIGINAL full-payoff behaviour. This is what keeps every card still
+// on autopay forecast exactly as before.
+{
+  const withNull = planCardPayments(
+    [
+      {
+        accountName: 'Amex',
+        closedAt: null,
+        balanceOwed: 9948.13,
+        statementDueDate: '2026-08-18',
+        plannedMonthlyPayment: null,
+      },
+    ],
+    TODAY,
+  )
+  check('null plan -> full balance', withNull[0]?.amount === 9948.13)
+  check('null plan -> not flagged partial', withNull[0]?.isPlannedPartialPayment === undefined)
+
+  // The dangerous direction: a 0 must never be read as "pay nothing", which would
+  // forecast no card outflow at all and inflate Safe to Spend. The DB forbids storing
+  // 0, but this function is pure and public, so it defends itself.
+  const withZero = planCardPayments(
+    [
+      {
+        accountName: 'Amex',
+        closedAt: null,
+        balanceOwed: 9948.13,
+        statementDueDate: '2026-08-18',
+        plannedMonthlyPayment: 0,
+      },
+    ],
+    TODAY,
+  )
+  check('zero plan does NOT zero the outflow', withZero[0]?.amount === 9948.13, String(withZero[0]?.amount))
+}
+
+// A plan cannot resurrect a card with no recorded balance. "Not recorded" outranks
+// a paydown plan, because the plan says nothing about what is actually owed.
+{
+  const r = planCardPayments(
+    [
+      {
+        accountName: 'Amex',
+        closedAt: null,
+        balanceOwed: null,
+        statementDueDate: '2026-08-18',
+        plannedMonthlyPayment: 5000,
+      },
+    ],
+    TODAY,
+  )
+  check('plan does not override an unrecorded balance', r[0]?.blockedReason === 'balance not recorded')
+  check('plan does not invent an amount', r[0]?.amount === 0)
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

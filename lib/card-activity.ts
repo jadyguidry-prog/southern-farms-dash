@@ -120,6 +120,24 @@ export type ForecastCardPayment = {
    * avoid telling the owner to go fill in data that is already there.
    */
   blockedBeyondHorizon?: boolean
+  /**
+   * True when `amount` is a PLANNED PARTIAL payment rather than the full balance.
+   *
+   * The forecast's default assumption is that a card is paid off in full on its due date
+   * (autopay). Once the owner is paying a card down over several months, that assumption
+   * overstates near-term outflow and makes Safe to Spend read low. This flag lets the UI
+   * say which of the two it is showing, because "$5,000 leaves on the 18th" means something
+   * very different when $6,000 stays on the card afterward.
+   */
+  isPlannedPartialPayment?: boolean
+  /**
+   * Balance still owed AFTER this payment, when this is a planned partial payment.
+   *
+   * Carried explicitly rather than recomputed by each caller: a partial payment that
+   * silently reported nothing about the remainder would let the debt vanish from view the
+   * moment it stopped being a single due-date cliff.
+   */
+  remainingAfterPayment?: number
 }
 
 /**
@@ -141,6 +159,14 @@ export function planCardPayments(
     closedAt: string | null
     balanceOwed: number | null
     statementDueDate: string | null
+    /**
+     * Planned monthly paydown for a card NOT being paid in full each cycle.
+     *
+     * Null means "no paydown plan", which preserves the original full-payoff assumption —
+     * the right model for a card still on autopay. Null must never be read as 0: that
+     * would forecast no card outflow at all and inflate Safe to Spend.
+     */
+    plannedMonthlyPayment?: number | null
   }[],
   todayISO: string,
 ): ForecastCardPayment[] {
@@ -178,6 +204,34 @@ export function planCardPayments(
     }
 
     const { date, isEstimated } = nextOccurrence(card.statementDueDate, todayISO)
+
+    // A paydown plan replaces the full-payoff assumption with the amount actually
+    // intended to leave. Capped at the balance so a plan larger than the remaining
+    // debt forecasts the payoff, not an overpayment — and on the final month that
+    // cap is what makes the plan wind down to exactly zero instead of overshooting.
+    //
+    // `> 0` rather than `!= null`: the DB forbids a stored 0, but this function is pure
+    // and public, so it must not treat a 0 that slipped in as "pay nothing forever".
+    const planned = card.plannedMonthlyPayment
+    if (planned != null && planned > 0) {
+      const amount = Math.min(planned, card.balanceOwed)
+      out.push({
+        accountName: card.accountName,
+        amount,
+        dueDate: date,
+        isEstimatedDate: isEstimated,
+        blockedReason: null,
+        // Only flagged partial when a balance genuinely remains. A final payment that
+        // clears the card is a full payoff, and labelling it "partial" would tell the
+        // owner debt persists after it is gone.
+        isPlannedPartialPayment: amount < card.balanceOwed,
+        // Rounded because float subtraction on money yields values like 5904.469999999999,
+        // which would surface as a nonsense cent in the UI.
+        remainingAfterPayment: Math.round((card.balanceOwed - amount) * 100) / 100,
+      })
+      continue
+    }
+
     out.push({
       accountName: card.accountName,
       amount: card.balanceOwed,

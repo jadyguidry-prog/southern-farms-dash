@@ -744,6 +744,11 @@ export type AssembleInput = {
     statementDueDate: string | null
     /** Ledger descriptor of a payoff TO this card, e.g. "AMEX EPAYMENT". */
     paymentDescriptionMatch: string | null
+    /**
+     * Planned monthly paydown when the card is NOT paid in full each cycle. Null (or
+     * absent) keeps the full-payoff assumption, so existing callers are unaffected.
+     */
+    plannedMonthlyPayment?: number | null
   }[]
   /**
    * How many days ahead to project when hunting for the cash low point. Defaults to the
@@ -862,7 +867,12 @@ export function assembleCapacity(input: AssembleInput) {
     datedOutflows.push({
       date: p.dueDate,
       amount: p.amount,
-      label: `${p.accountName} statement payment`,
+      // A planned partial payment must not read as "statement payment", which implies the
+      // statement is settled. Naming it a planned payment keeps the row honest about the
+      // fact that a balance survives the date.
+      label: p.isPlannedPartialPayment
+        ? `${p.accountName} planned payment`
+        : `${p.accountName} statement payment`,
     })
   }
 

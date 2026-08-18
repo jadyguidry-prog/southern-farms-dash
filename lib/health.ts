@@ -607,6 +607,24 @@ export type CardInsightInput = {
   typicalMonthlyCharges: number | null
   /** Cards whose utilization is known and above the safe threshold. */
   highUtilization: { accountName: string; utilizationPct: number }[]
+  /**
+   * Cards being paid down over time rather than cleared each cycle.
+   *
+   * Present only for cards with BOTH a recorded balance and a stated monthly payment —
+   * a plan without a balance says nothing about how long anything will take, and
+   * guessing the balance is how a paydown gets reported as nearly finished.
+   *
+   * `monthlyCharges` is nullable and must never be coerced to 0: with no charge history
+   * the net paydown rate is unknowable, and treating unknown charges as zero produces an
+   * optimistic "clear by" date that ignores everything still being spent on the card.
+   */
+  paydowns?: {
+    accountName: string
+    balanceOwed: number
+    plannedMonthlyPayment: number
+    /** Typical monthly charge volume on THIS card; null when there is no history. */
+    monthlyCharges: number | null
+  }[]
 }
 
 export type BillPayInsightInput = {
@@ -1714,6 +1732,74 @@ export function generateInsights({
           `month, and high utilization can affect borrowing terms. Paying this down ` +
           `restores flexibility.`,
         impact: `${Math.round(c.utilizationPct)}% of limit used`,
+      })
+    }
+
+    // 4. Paydown plans. The question that matters is NOT "how many months to clear" but
+    //    "is this plan actually reducing the balance". A payment smaller than what the
+    //    card is charged each month leaves the debt flat or growing, so a paydown can run
+    //    for months while feeling like progress. Charges are compared against the payment
+    //    before any completion date is quoted.
+    for (const p of cards.paydowns ?? []) {
+      const idSuffix = p.accountName.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+
+      // No charge history: the net rate is unknowable. Quoting a clear-by date from the
+      // payment alone would silently assume the card is never used again.
+      if (p.monthlyCharges === null) {
+        out.push({
+          id: `auto-cards-paydown-unknown-${idSuffix}`,
+          // A warning, not a note: being unable to tell whether the plan reduces the
+          // balance is a real gap, and the codebase treats unknowns as warnings elsewhere.
+          severity: 'warning',
+          category: 'Cards',
+          title: `${p.accountName} paydown: ${formatCurrency(p.plannedMonthlyPayment)} a month`,
+          detail:
+            `${formatCurrency(p.balanceOwed)} is owed and the forecast now charges ` +
+            `${formatCurrency(p.plannedMonthlyPayment)} on the due date instead of the full ` +
+            `balance. How long the paydown takes cannot be stated yet: there is no charge ` +
+            `history for this card, so there is no way to tell how much new spending is ` +
+            `being added each month against the payment.`,
+          impact: `${formatCurrency(p.balanceOwed)} owed`,
+        })
+        continue
+      }
+
+      const net = p.plannedMonthlyPayment - p.monthlyCharges
+
+      if (net <= 0) {
+        out.push({
+          id: `auto-cards-paydown-ineffective-${idSuffix}`,
+          severity: 'critical',
+          category: 'Cards',
+          title: `${formatCurrency(p.plannedMonthlyPayment)} a month will not pay down ${p.accountName}`,
+          detail:
+            `The card is charged about ${formatCurrency(p.monthlyCharges)} a month and the ` +
+            `plan pays ${formatCurrency(p.plannedMonthlyPayment)}, so the ` +
+            `${formatCurrency(p.balanceOwed)} balance ` +
+            `${net === 0 ? 'stays where it is' : `grows by about ${formatCurrency(-net)} a month`} ` +
+            `even while every payment is made on time. Clearing it needs either a payment ` +
+            `above ${formatCurrency(p.monthlyCharges)} a month or less spending on the card.`,
+          impact: net === 0 ? 'Balance flat' : `+${formatCurrency(-net)}/mo`,
+        })
+        continue
+      }
+
+      const months = Math.ceil(p.balanceOwed / net)
+      out.push({
+        id: `auto-cards-paydown-${idSuffix}`,
+        // The plan is working, so this is the advisor's informational bucket rather than
+        // a problem to fix.
+        severity: 'opportunity',
+        category: 'Cards',
+        title: `${p.accountName} clears in about ${months} month${months === 1 ? '' : 's'}`,
+        detail:
+          `${formatCurrency(p.plannedMonthlyPayment)} a month against about ` +
+          `${formatCurrency(p.monthlyCharges)} of new charges nets ` +
+          `${formatCurrency(net)} off the ${formatCurrency(p.balanceOwed)} balance each ` +
+          `month. That pace clears the card in roughly ${months} month${months === 1 ? '' : 's'} ` +
+          `if spending on it stays where it is — the estimate moves with the charges, not ` +
+          `just the payment.`,
+        impact: `${formatCurrency(net)}/mo net paydown`,
       })
     }
   }

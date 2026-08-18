@@ -110,6 +110,18 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
       )
     : null
 
+  // Cards being paid down over time rather than cleared each cycle. Called out explicitly
+  // because the forecast's default assumption is a full payoff: without this the panel
+  // would show a smaller outflow with no indication that a balance survives the date, and
+  // the debt would quietly disappear from the page.
+  const plannedPartials = cardPayments.filter((p) => p.isPlannedPartialPayment)
+  const plannedPartialNote = plannedPartials
+    .map(
+      (p) =>
+        `${formatCurrency(p.remainingAfterPayment ?? 0)} stays on ${p.accountName} after that payment.`,
+    )
+    .join(' ')
+
   // Dated events beyond the spendable window — the cliff the old 7-day view could not see.
   //
   // Only `kind === 'dated'`. The spread estimate recurs EVERY day, so including it produced
@@ -484,9 +496,14 @@ export function SpendingCapacityPanel({ capacity }: { capacity: SpendingCapacity
               and your reserve of {formatCurrency(minCashReserve)} is held back.{' '}
               Card balances are not counted as cash, since borrowing is not money you
               have &mdash; but{' '}
-              {cardPayments.length > 0
-                ? 'the payment due on each card is charged on its due date, so the day it clears is visible above.'
-                : 'no card payment is currently being forecast.'}
+              {cardPayments.length === 0
+                ? 'no card payment is currently being forecast.'
+                : plannedPartials.length > 0
+                  ? // Says which of the two assumptions is in force. "The payment due on each
+                    // card" would claim a full payoff on a card being paid down over months,
+                    // and the remaining balance would silently drop out of view.
+                    `your planned payment is charged on the due date, so the day it clears is visible above. ${plannedPartialNote}`
+                  : 'the payment due on each card is charged on its due date, so the day it clears is visible above.'}
             </p>
           </>
         )}
