@@ -80,6 +80,8 @@ export default async function CashFlowPage() {
           inflow: m.inflow,
           outflow: m.outflow,
           complete: m.complete,
+          partial: m.partial,
+          inProgress: m.inProgress,
         }))
       : cashFlowMonthly
   const hasHistory = chartData.length > 0
@@ -87,6 +89,9 @@ export default async function CashFlowPage() {
 
   const incompleteLabels = insight.monthly.incompleteMonths.map(monthLabel)
   const gapLabels = insight.monthly.gapMonths.map(monthLabel)
+  // Named per month so the note can state the exact date the statements stop,
+  // which is the only thing that tells the owner what to go and import.
+  const partialMonths = derived.filter((m) => m.partial)
 
   return (
     <div className="mx-auto max-w-7xl">
@@ -146,8 +151,26 @@ export default async function CashFlowPage() {
             {hasHistory ? (
               <>
                 <CashFlowChart data={chartData} />
-                {usingDerived && (incompleteLabels.length > 0 || gapLabels.length > 0) && (
+                {usingDerived &&
+                  (incompleteLabels.length > 0 ||
+                    gapLabels.length > 0 ||
+                    partialMonths.length > 0) && (
                   <div className="mt-3 space-y-1">
+                    {partialMonths.map((m) => (
+                      <p
+                        key={m.monthKey}
+                        className="text-xs text-muted-foreground text-pretty"
+                      >
+                        <span className="font-medium text-foreground">
+                          {m.month} is only partly imported
+                        </span>{' '}
+                        — transactions stop on {m.lastDateISO}, leaving{' '}
+                        {m.tailDays} {m.tailDays === 1 ? 'day' : 'days'} of the
+                        month with no data. Its bar is faded and understates both
+                        cash in and cash out, so it is not a monthly result. Import
+                        the rest of the statement period to complete it.
+                      </p>
+                    ))}
                     {incompleteLabels.length > 0 && (
                       <p className="text-xs text-muted-foreground text-pretty">
                         Faded bars ({incompleteLabels.join(', ')}) show months where

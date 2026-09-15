@@ -100,8 +100,19 @@ export default async function DashboardPage() {
           inflow: m.inflow,
           outflow: m.outflow,
           complete: m.complete,
+          partial: m.partial,
+          inProgress: m.inProgress,
         }))
       : cashFlowMonthly
+  // A finished month imported only part-way through is faded in the chart; name
+  // it underneath too, so the dip is explained rather than just de-emphasised.
+  const partialCashFlowMonths = derivedCashFlow.filter((m) => m.partial)
+  // A partly-imported month newer than the quoted one is the case that reads as
+  // a missing month, so the tile names it rather than silently skipping it.
+  const newestPartialMonth =
+    partialCashFlowMonths.length > 0
+      ? partialCashFlowMonths[partialCashFlowMonths.length - 1]
+      : null
   // Last FINISHED month, so the headline is a real month's result. The
   // still-running month is shown alongside it rather than hidden, because
   // dropping it would leave the owner wondering where the current month went —
@@ -336,6 +347,12 @@ export default async function DashboardPage() {
             hint={`${formatCurrency(latestComplete.inflow, { compact: true })} in · ${formatCurrency(latestComplete.outflow, { compact: true })} out${
               monthInProgress
                 ? ` · ${monthInProgress.month} so far ${formatCurrency(monthInProgress.net, { compact: true })}`
+                : ''
+            }${
+              // Without this the newer partly-imported month simply disappears
+              // from the tile and the owner is left asking where it went.
+              newestPartialMonth
+                ? ` · ${newestPartialMonth.month} partly imported, not counted`
                 : ''
             }`}
           />
@@ -844,7 +861,21 @@ export default async function DashboardPage() {
           </CardHeader>
           <CardContent>
             {cashFlowData.length > 0 ? (
-              <CashFlowChart data={cashFlowData} />
+              <>
+                <CashFlowChart data={cashFlowData} />
+                {partialCashFlowMonths.map((m) => (
+                  <p
+                    key={m.monthKey}
+                    className="mt-3 text-xs text-muted-foreground text-pretty"
+                  >
+                    <span className="font-medium text-foreground">
+                      {m.month} is only partly imported
+                    </span>{' '}
+                    — transactions stop on {m.lastDateISO}, so its faded bar
+                    understates both cash in and cash out.
+                  </p>
+                ))}
+              </>
             ) : (
               <div className="flex h-[300px] items-center justify-center">
                 <p className="max-w-xs text-center text-sm text-muted-foreground text-pretty">

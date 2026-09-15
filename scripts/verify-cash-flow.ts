@@ -150,8 +150,18 @@ eq(deriveMonthlyCashFlow([]).series.length, 0, 'monthly: empty input is empty')
       transactionType: 'income',
       accountName: 'Checking 2268',
     }),
+    // Runs to the end of April, so this month is fully imported and the
+    // assertions below test the missing-DEPOSITS rule in isolation rather than
+    // tripping the separate partly-imported rule.
+    row({
+      transactionDate: '2026-04-30',
+      amount: 10,
+      transactionType: 'income',
+      accountName: 'Checking 2268',
+    }),
     // Card-only month: spend, no deposits.
     row({ transactionDate: '2026-05-01', amount: -80, accountName: 'Amex 73009' }),
+    row({ transactionDate: '2026-05-31', amount: -20, accountName: 'Amex 73009' }),
   ])
   eq(result.series[0].complete, true, 'coverage: month with deposits is complete')
   eq(result.series[1].complete, false, 'coverage: card-only month is incomplete')
@@ -402,9 +412,10 @@ eq(summarizeSpendByCategory([], new Map()).coverage, 0, 'spend: empty coverage i
 // days holding one $249.67 deposit against $1,372.73 of spending.
 {
   const rows = [
-    // A full, finished July.
+    // A full, finished July — imported through the 31st, so it is quotable.
     row({ transactionDate: '2026-07-05', amount: 102791.77, transactionType: 'income' }),
     row({ transactionDate: '2026-07-06', amount: -95576.98 }),
+    row({ transactionDate: '2026-07-31', amount: 0.01, transactionType: 'income' }),
     // Four days of August, mirroring the real data.
     row({ transactionDate: '2026-08-01', amount: 249.67, transactionType: 'income' }),
     row({ transactionDate: '2026-08-02', amount: -1372.73 }),
@@ -440,10 +451,11 @@ eq(summarizeSpendByCategory([], new Map()).coverage, 0, 'spend: empty coverage i
   )
 }
 {
-  // Once the month is over, the same August data IS quotable as a result.
+  // Once the month is over AND fully imported, August IS quotable as a result.
   const rows = [
     row({ transactionDate: '2026-08-01', amount: 249.67, transactionType: 'income' }),
     row({ transactionDate: '2026-08-02', amount: -1372.73 }),
+    row({ transactionDate: '2026-08-31', amount: -10 }),
   ]
   const result = deriveMonthlyCashFlow(rows, { todayISO: '2026-09-01' })
   eq(
@@ -473,7 +485,9 @@ eq(summarizeSpendByCategory([], new Map()).coverage, 0, 'spend: empty coverage i
   const rows = [
     row({ transactionDate: '2026-06-10', amount: 50000, transactionType: 'income' }),
     row({ transactionDate: '2026-06-11', amount: -40000 }),
+    row({ transactionDate: '2026-06-30', amount: -100 }),
     row({ transactionDate: '2026-07-10', amount: -9000 }),
+    row({ transactionDate: '2026-07-31', amount: -50 }),
   ]
   const result = deriveMonthlyCashFlow(rows, { todayISO: '2026-08-04' })
   eq(
@@ -481,6 +495,116 @@ eq(summarizeSpendByCategory([], new Map()).coverage, 0, 'spend: empty coverage i
     "Jun '26",
     'latestCompleteMonth: card-only July still excluded',
   )
+}
+
+/* ---------------- partly-imported months ---------------- */
+// The live bug: Aug '26 held $26,110 of deposits that stopped on the 13th of a
+// 31-day month. It had ended and it had deposits, so it passed every existing
+// test, was drawn at full opacity, and was headlined as the last finished
+// month — a 13-day stub presented as a monthly result.
+{
+  const rows = [
+    // July imported to month end.
+    row({ transactionDate: '2026-07-01', amount: 90000, transactionType: 'income' }),
+    row({ transactionDate: '2026-07-31', amount: -80000 }),
+    // August stops on the 13th, as the real import does.
+    row({ transactionDate: '2026-08-01', amount: 26110, transactionType: 'income' }),
+    row({ transactionDate: '2026-08-13', amount: -12000 }),
+  ]
+  const result = deriveMonthlyCashFlow(rows, { todayISO: '2026-09-15' })
+  const aug = result.series[result.series.length - 1]
+
+  eq(aug.monthKey, '2026-08', 'partial: August is the newest month')
+  eq(aug.partial, true, 'partial: a month ending on the 13th is flagged')
+  eq(aug.lastDateISO, '2026-08-13', 'partial: last imported date is exposed')
+  eq(aug.tailDays, 18, 'partial: 18 days of the month have no data')
+  eq(result.partialMonths, ['2026-08'], 'partial: listed in partialMonths')
+
+  // The `complete` flag must NOT change: it also gates bank coverage for
+  // COGS/margin withholding, so redefining it here would silently alter which
+  // months may quote a margin.
+  eq(aug.complete, true, 'partial: complete flag is left untouched')
+  eq(result.incompleteMonths, [], 'partial: not reported as missing deposits')
+
+  // The headline must fall back to the last FULLY imported month.
+  eq(
+    result.latestCompleteMonth?.monthKey,
+    '2026-07',
+    'partial: headline skips the part-imported month',
+  )
+  eq(
+    result.series.length,
+    2,
+    'partial: the month stays in the chart series, faded rather than hidden',
+  )
+}
+{
+  // Calibration baseline. Every fully-imported month of 2026 ends 0-1 days
+  // before month-end, so none of them may be flagged — a threshold that fires
+  // on normal statement cutoffs would fade the whole chart and mean nothing.
+  const observedTailDays = [0, 1, 0, 0, 1, 0, 0]
+  for (const gap of observedTailDays) {
+    const lastDay = 31 - gap
+    const rows = [
+      row({ transactionDate: '2026-01-02', amount: 5000, transactionType: 'income' }),
+      row({ transactionDate: `2026-01-${String(lastDay).padStart(2, '0')}`, amount: -400 }),
+    ]
+    const result = deriveMonthlyCashFlow(rows, { todayISO: '2026-03-01' })
+    eq(
+      result.series[0].partial,
+      false,
+      `partial: a normal ${gap}-day month-end gap is not flagged`,
+    )
+  }
+}
+{
+  // The threshold itself: 7 days of silence is tolerated, 8 is not. Pinned so
+  // the boundary cannot drift unnoticed.
+  const atLimit = deriveMonthlyCashFlow(
+    [
+      row({ transactionDate: '2026-01-05', amount: 100, transactionType: 'income' }),
+      row({ transactionDate: '2026-01-24', amount: -10 }),
+    ],
+    { todayISO: '2026-03-01' },
+  )
+  eq(atLimit.series[0].tailDays, 7, 'partial: boundary fixture has a 7-day gap')
+  eq(atLimit.series[0].partial, false, 'partial: exactly 7 days is still accepted')
+
+  const overLimit = deriveMonthlyCashFlow(
+    [
+      row({ transactionDate: '2026-01-05', amount: 100, transactionType: 'income' }),
+      row({ transactionDate: '2026-01-23', amount: -10 }),
+    ],
+    { todayISO: '2026-03-01' },
+  )
+  eq(overLimit.series[0].tailDays, 8, 'partial: boundary fixture has an 8-day gap')
+  eq(overLimit.series[0].partial, true, 'partial: 8 days is flagged')
+}
+{
+  // The RUNNING month is always short of its own end. That is not an import
+  // gap, and labelling it "statements missing" would send the owner looking for
+  // a statement that does not exist yet.
+  const result = deriveMonthlyCashFlow(
+    [row({ transactionDate: '2026-09-02', amount: 500, transactionType: 'income' })],
+    { todayISO: '2026-09-15' },
+  )
+  eq(result.series[0].inProgress, true, 'partial: running month marked inProgress')
+  eq(result.series[0].partial, false, 'partial: running month is not an import gap')
+  eq(result.partialMonths, [], 'partial: running month not listed as partial')
+}
+{
+  // A transfer still proves the statement covered that date, so coverage is
+  // tracked from every row even though transfers are excluded from the money.
+  const result = deriveMonthlyCashFlow(
+    [
+      row({ transactionDate: '2026-01-05', amount: 100, transactionType: 'income' }),
+      row({ transactionDate: '2026-01-30', amount: -50, transactionType: 'transfer' }),
+    ],
+    { todayISO: '2026-03-01' },
+  )
+  eq(result.series[0].lastDateISO, '2026-01-30', 'partial: transfers extend coverage')
+  eq(result.series[0].partial, false, 'partial: transfer-covered month end accepted')
+  eq(result.series[0].inflow, 100, 'partial: transfer still excluded from inflow')
 }
 
 /* ---------------- report ---------------- */

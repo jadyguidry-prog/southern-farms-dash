@@ -16,9 +16,16 @@ const config = {
 } satisfies ChartConfig
 
 /**
- * `complete` is optional so existing callers keep working. When a month is
- * flagged incomplete its bars are faded, because a month whose bank statement
- * wasn't imported shows no deposits and would otherwise read as a total loss.
+ * All three flags are optional so existing callers keep working. A bar is faded
+ * when the month cannot be read as a finished result:
+ *
+ * - `complete === false` — spending but no deposits, so only a card statement
+ *   was imported and the month would otherwise read as a total loss.
+ * - `partial` — the month is over but was imported only part-way through.
+ * - `inProgress` — the current month, which is simply not finished yet.
+ *
+ * Fading only `complete === false` was not enough: Aug '26 held deposits for
+ * its first 13 days, passed that test, and was drawn solid at $26,110.
  */
 export function CashFlowChart({
   data,
@@ -28,9 +35,16 @@ export function CashFlowChart({
     inflow: number
     outflow: number
     complete?: boolean
+    partial?: boolean
+    inProgress?: boolean
   }[]
 }) {
-  const fadeFor = (i: number) => (data[i]?.complete === false ? 0.35 : 1)
+  const isProvisional = (i: number) => {
+    const d = data[i]
+    if (!d) return false
+    return d.complete === false || d.partial === true || d.inProgress === true
+  }
+  const fadeFor = (i: number) => (isProvisional(i) ? 0.35 : 1)
   return (
     <ChartContainer config={config} className="aspect-auto h-[300px] w-full">
       <BarChart data={data} margin={{ left: 4, right: 8, top: 8 }}>

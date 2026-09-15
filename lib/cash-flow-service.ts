@@ -96,6 +96,46 @@ export type MonthlyCashFlow = {
    * missing. Such a month must not be read as "earned nothing".
    */
   complete: boolean
+  /** Latest `YYYY-MM-DD` seen in the month, or null when the month is empty. */
+  lastDateISO: string | null
+  /**
+   * Days between the last imported transaction and the final day of the month.
+   * 0 means the month runs to its end.
+   */
+  tailDays: number
+  /**
+   * The month is OVER but its transactions stop well before month-end, so only
+   * part of the statement period was imported. Distinct from `complete`, which
+   * only asks whether any deposit exists: a month can hold deposits for its
+   * first two weeks and still be a fortnight short. Aug '26 was exactly this —
+   * $26,110 of inflow that stopped on the 13th, drawn at full opacity and
+   * therefore read as a bad month rather than a half-imported one.
+   */
+  partial: boolean
+  /** The month is the current, still-running one. Not an import problem. */
+  inProgress: boolean
+}
+
+/**
+ * A finished month whose transactions stop more than this many days before
+ * month-end is treated as partly imported.
+ *
+ * Calibrated against this business rather than picked: for the fully-imported
+ * months of 2026 the gap between the last transaction and month-end runs
+ * 0, 1, 0, 0, 1, 0, 0 days (Jan-Jul) — at most a single day, because statement
+ * periods land essentially on the month boundary. Aug '26, imported only
+ * through the 13th, has a gap of 18. A week of silence therefore sits far above
+ * any normal cutoff and far below a real truncation, so neither a quiet
+ * month-end nor a genuine gap is misread.
+ */
+const TAIL_SILENCE_DAYS = 7
+
+/** Calendar length of the month a `YYYY-MM` key refers to. */
+function daysInMonth(monthKey: string): number {
+  const year = Number(monthKey.slice(0, 4))
+  const month = Number(monthKey.slice(5, 7))
+  // Day 0 of the NEXT month is the last day of this one.
+  return new Date(Date.UTC(year, month, 0)).getUTCDate()
 }
 
 const MONTH_NAMES = [
@@ -135,6 +175,13 @@ export type MonthlyCashFlowResult = {
   monthInProgress: MonthlyCashFlow | null
   /** Months present but missing their deposit account. */
   incompleteMonths: string[]
+  /**
+   * Finished months imported only part-way through (see
+   * MonthlyCashFlow.partial). Kept separate from `incompleteMonths` because the
+   * remedy differs: those need the deposit account, these need the rest of the
+   * statement period.
+   */
+  partialMonths: string[]
   /** Calendar months inside the range with no transactions imported at all. */
   gapMonths: string[]
   /** Cash movement intentionally left out of the series, for transparency. */
@@ -208,8 +255,21 @@ export function deriveMonthlyCashFlow(
         net: 0,
         accounts: [] as string[],
         complete: false,
+        lastDateISO: null as string | null,
+        tailDays: 0,
+        partial: false,
+        inProgress: false,
         accountSet: new Set<string>(),
       }
+
+    // Tracked for every row, including transfers: a transfer still proves the
+    // statement covered that date, which is what import coverage measures.
+    const dateISO = String(row.transactionDate ?? '').slice(0, 10)
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dateISO)) {
+      if (bucket.lastDateISO === null || dateISO > bucket.lastDateISO) {
+        bucket.lastDateISO = dateISO
+      }
+    }
 
     // Account coverage is tracked for every row, including transfers, because
     // it describes which statements were imported rather than the money math.
@@ -237,6 +297,13 @@ export function deriveMonthlyCashFlow(
     // A month with spending but not a single deposit is missing its bank
     // statement; treating it as real would invent a month of pure loss.
     b.complete = b.inflow > 0
+
+    b.inProgress = b.monthKey === currentMonthKey
+    const lastDay = b.lastDateISO ? Number(b.lastDateISO.slice(8, 10)) : 0
+    b.tailDays = b.lastDateISO ? daysInMonth(b.monthKey) - lastDay : 0
+    // Only a month that has ENDED can be short of its own end. The running
+    // month is always "missing" the rest of itself, which is not an import gap.
+    b.partial = !b.inProgress && b.tailDays > TAIL_SILENCE_DAYS
   }
 
   const full: MonthlyCashFlow[] = ordered.map(
@@ -256,8 +323,12 @@ export function deriveMonthlyCashFlow(
   // change the per-month `complete` flag itself: that flag also feeds bank
   // coverage for COGS/margin withholding, and redefining it here would silently
   // change which months can quote a margin.
+  // `partial` is excluded for the same reason the month must be over: Aug '26
+  // held deposits and had ended, so it passed both original tests and would be
+  // presented as the last finished month's result — while holding only 13 days
+  // of a 31-day month. A half-imported month is not a monthly outcome.
   const complete = series.filter(
-    (m) => m.complete && m.monthKey < currentMonthKey,
+    (m) => m.complete && m.monthKey < currentMonthKey && !m.partial,
   )
 
   return {
@@ -267,6 +338,7 @@ export function deriveMonthlyCashFlow(
     monthInProgress:
       series.find((m) => m.monthKey === currentMonthKey) ?? null,
     incompleteMonths: series.filter((m) => !m.complete).map((m) => m.monthKey),
+    partialMonths: series.filter((m) => m.partial).map((m) => m.monthKey),
     gapMonths,
     excluded: { transfersAndPayments: excludedTotal, count: excludedCount },
   }
